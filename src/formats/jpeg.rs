@@ -7,7 +7,7 @@ use crate::{
     Format, FormatHandler, Updates,
 };
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
-use std::io::{copy, Read, Seek, SeekFrom, Take, Write};
+use std::io::{copy, Read, Seek, SeekFrom, Write};
 
 // JPEG markers
 const SOI: u8 = 0xD8; // Start of Image
@@ -19,8 +19,6 @@ const SOS: u8 = 0xDA; // Start of Scan (image data follows)
 // Special markers without length
 const RST0: u8 = 0xD0;
 const RST7: u8 = 0xD7;
-const SOF0: u8 = 0xC0;
-const SOF15: u8 = 0xCF;
 
 const XMP_SIGNATURE: &[u8] = b"http://ns.adobe.com/xap/1.0/\0";
 const C2PA_MARKER: &[u8] = b"c2pa";
@@ -34,41 +32,37 @@ impl JpegHandler {
     pub fn new() -> Self {
         Self
     }
-    
+
     /// Fast single-pass parser
     fn parse_impl<R: Read + Seek>(&self, reader: &mut R) -> Result<FileStructure> {
         let mut structure = FileStructure::new(Format::Jpeg);
-        
+
         // Check SOI marker
         if reader.read_u8()? != 0xFF || reader.read_u8()? != SOI {
             return Err(Error::InvalidFormat("Not a JPEG file".into()));
         }
-        
-        structure.add_segment(Segment::Header {
-            offset: 0,
-            size: 2,
-        });
-        
+
+        structure.add_segment(Segment::Header { offset: 0, size: 2 });
+
         let mut offset = 2u64;
-        let mut in_scan = false;
-        
+
         loop {
             // Read marker
             let marker_prefix = reader.read_u8()?;
             let marker = reader.read_u8()?;
-            
+
             if marker_prefix != 0xFF {
                 return Err(Error::InvalidSegment {
                     offset,
                     reason: format!("Expected 0xFF, got 0x{:02X}", marker_prefix),
                 });
             }
-            
+
             // Handle padding bytes
             if marker == 0xFF {
                 continue;
             }
-            
+
             match marker {
                 EOI => {
                     structure.add_segment(Segment::Other {
@@ -79,37 +73,46 @@ impl JpegHandler {
                     structure.total_size = offset + 2;
                     break;
                 }
-                
+
                 SOS => {
                     // Start of scan - image data follows
                     let size = reader.read_u16::<BigEndian>()? as u64;
-                    
+                    let sos_start = offset; // Start of FF DA marker
+
                     // Skip SOS header
                     reader.seek(SeekFrom::Current((size - 2) as i64))?;
-                    let image_start = offset + 2 + size;
-                    
+
                     // Find end of image data (scan for FFD9)
                     let image_end = find_eoi(reader)?;
-                    
+
+                    // ImageData includes SOS marker + header + compressed data
+                    // This makes writing easier - just copy the whole thing
                     structure.add_segment(Segment::ImageData {
-                        offset: image_start,
-                        size: image_end - image_start,
+                        offset: sos_start,
+                        size: image_end - sos_start,
                         hashable: true,
                     });
-                    
-                    offset = image_end;
-                    reader.seek(SeekFrom::Start(offset))?;
-                    in_scan = true;
+
+                    // Add EOI segment
+                    structure.add_segment(Segment::Other {
+                        offset: image_end,
+                        size: 2,
+                        marker: EOI,
+                    });
+
+                    structure.total_size = image_end + 2;
+                    break;
                 }
-                
+
                 APP1 => {
                     let size = reader.read_u16::<BigEndian>()? as u64;
                     let data_size = size - 2;
-                    
+                    let segment_start = offset;
+
                     // Check for XMP signature
                     let mut sig_buf = vec![0u8; XMP_SIGNATURE.len().min(data_size as usize)];
                     reader.read_exact(&mut sig_buf)?;
-                    
+
                     if sig_buf == XMP_SIGNATURE {
                         // This is an XMP segment
                         structure.add_segment(Segment::Xmp {
@@ -117,51 +120,100 @@ impl JpegHandler {
                             size: data_size - XMP_SIGNATURE.len() as u64,
                             data: LazyData::NotLoaded,
                         });
+                        // Skip remaining XMP data
+                        let remaining = (data_size as usize) - sig_buf.len();
+                        reader.seek(SeekFrom::Current(remaining as i64))?;
                     } else {
-                        // Other APP1 segment
+                        // Other APP1 segment - skip remaining data
+                        let remaining = (data_size as usize) - sig_buf.len();
+                        reader.seek(SeekFrom::Current(remaining as i64))?;
                         structure.add_segment(Segment::Other {
-                            offset,
+                            offset: segment_start,
                             size: size + 2,
                             marker: APP1,
                         });
                     }
-                    
+
                     offset += 2 + size;
-                    reader.seek(SeekFrom::Start(offset))?;
                 }
-                
+
                 APP11 => {
                     let size = reader.read_u16::<BigEndian>()? as u64;
+                    let data_size = size - 2;
                     let data_start = offset + 4;
-                    
-                    // Check for C2PA marker (JPEG XT box header + c2pa UUID)
-                    // Skip JPEG XT header (CI + En + Z = 2 + 2 + 4 = 8 bytes)
-                    let mut header = [0u8; 16];
-                    reader.read_exact(&mut header)?;
-                    
-                    if &header[12..16] == C2PA_MARKER {
-                        // This is a JUMBF segment
-                        structure.add_segment(Segment::Jumbf {
-                            offset: data_start,
-                            size: size - 2,
-                            segments: vec![Location {
+                    let segment_start = offset;
+
+                    // Check for JPEG XT + JUMBF structure
+                    // JPEG XT: CI(2) + En(2) + Z(4) = 8 bytes
+                    // JUMBF superbox: LBox(4) + TBox(4 "jumb")
+                    let mut header = [0u8; 32];
+                    let bytes_to_read = header.len().min(data_size as usize);
+                    reader.read_exact(&mut header[..bytes_to_read])?;
+
+                    // Check if this is JPEG XT with JUMBF
+                    let is_jpeg_xt = bytes_to_read >= 8 && &header[0..2] == b"JP";
+                    let has_jumb_box = bytes_to_read >= 16 && &header[12..16] == b"jumb";
+                    let has_c2pa = bytes_to_read >= 32 && &header[28..32] == C2PA_MARKER;
+
+                    let is_jumbf = is_jpeg_xt && (has_jumb_box || has_c2pa);
+
+                    if is_jumbf {
+                        // Extract sequence number from JPEG XT header
+                        let seq_num = if bytes_to_read >= 8 {
+                            u32::from_be_bytes([header[4], header[5], header[6], header[7]])
+                        } else {
+                            1
+                        };
+
+                        // Check if this is a continuation of the previous JUMBF segment
+                        let mut is_continuation = false;
+                        if seq_num > 1 {
+                            if let Some(Segment::Jumbf {
+                                segments,
+                                size: total_size,
+                                ..
+                            }) = structure.segments.last_mut()
+                            {
+                                // Add this segment to the existing JUMBF
+                                segments.push(Location {
+                                    offset: data_start,
+                                    size: data_size,
+                                });
+                                *total_size += data_size;
+                                is_continuation = true;
+                            }
+                        }
+
+                        if !is_continuation {
+                            // New JUMBF segment
+                            structure.add_segment(Segment::Jumbf {
                                 offset: data_start,
-                                size: size - 2,
-                            }],
-                            data: LazyData::NotLoaded,
-                        });
+                                size: data_size,
+                                segments: vec![Location {
+                                    offset: data_start,
+                                    size: data_size,
+                                }],
+                                data: LazyData::NotLoaded,
+                            });
+                        }
+
+                        // Skip remaining JUMBF data
+                        let remaining = data_size - bytes_to_read as u64;
+                        reader.seek(SeekFrom::Current(remaining as i64))?;
                     } else {
+                        // Other APP11 segment - skip remaining data
+                        let remaining = data_size - bytes_to_read as u64;
+                        reader.seek(SeekFrom::Current(remaining as i64))?;
                         structure.add_segment(Segment::Other {
-                            offset,
+                            offset: segment_start,
                             size: size + 2,
                             marker: APP11,
                         });
                     }
-                    
+
                     offset += 2 + size;
-                    reader.seek(SeekFrom::Start(offset))?;
                 }
-                
+
                 // RST markers have no length
                 RST0..=RST7 => {
                     structure.add_segment(Segment::Other {
@@ -171,7 +223,7 @@ impl JpegHandler {
                     });
                     offset += 2;
                 }
-                
+
                 _ => {
                     // Standard marker with length
                     let size = reader.read_u16::<BigEndian>()? as u64;
@@ -185,7 +237,7 @@ impl JpegHandler {
                 }
             }
         }
-        
+
         Ok(structure)
     }
 }
@@ -200,7 +252,7 @@ impl FormatHandler for JpegHandler {
     fn parse<R: Read + Seek>(&self, reader: &mut R) -> Result<FileStructure> {
         self.parse_impl(reader)
     }
-    
+
     fn write<R: Read + Seek, W: Write>(
         &self,
         structure: &FileStructure,
@@ -209,70 +261,168 @@ impl FormatHandler for JpegHandler {
         updates: &Updates,
     ) -> Result<()> {
         reader.seek(SeekFrom::Start(0))?;
-        
+        let mut current_read_pos = 0u64;
+
         // Write SOI
         writer.write_u8(0xFF)?;
         writer.write_u8(SOI)?;
-        
-        let mut xmp_written = updates.new_xmp.is_some();
-        let mut jumbf_written = updates.new_jumbf.is_some();
-        
+
+        let mut xmp_written = false;
+        let mut jumbf_written = false;
+
+        // Track if file has existing XMP/JUMBF
+        let has_xmp = structure
+            .segments
+            .iter()
+            .any(|s| matches!(s, Segment::Xmp { .. }));
+        let has_jumbf = structure
+            .segments
+            .iter()
+            .any(|s| matches!(s, Segment::Jumbf { .. }));
+
         for segment in &structure.segments {
             match segment {
                 Segment::Header { .. } => {
                     // Already wrote SOI
                     continue;
                 }
-                
+
                 Segment::Xmp { offset, size, .. } => {
-                    if let Some(ref new_xmp) = updates.new_xmp {
-                        if !xmp_written {
+                    match &updates.xmp {
+                        crate::XmpUpdate::Remove => {
+                            // Skip existing XMP - effectively removing it
+                            xmp_written = true;
+                        }
+                        crate::XmpUpdate::Set(new_xmp) => {
+                            // Replace with new XMP
+                            if !xmp_written {
+                                write_xmp_segment(writer, new_xmp)?;
+                                xmp_written = true;
+                            }
+                            // Skip existing XMP
+                        }
+                        crate::XmpUpdate::Keep => {
+                            // Copy existing XMP with APP1 marker
+                            writer.write_u8(0xFF)?;
+                            writer.write_u8(APP1)?;
+                            writer.write_u16::<BigEndian>(
+                                (*size + XMP_SIGNATURE.len() as u64 + 2) as u16,
+                            )?;
+                            writer.write_all(XMP_SIGNATURE)?;
+
+                            // Optimized seek: only seek if we're not already at the right position
+                            if current_read_pos != *offset {
+                                reader.seek(SeekFrom::Start(*offset))?;
+                                current_read_pos = *offset;
+                            }
+
+                            let mut limited = reader.take(*size);
+                            copy(&mut limited, writer)?;
+                            current_read_pos += *size;
+                            xmp_written = true;
+                        }
+                    }
+                }
+
+                Segment::Jumbf { segments, .. } => {
+                    match &updates.jumbf {
+                        crate::JumbfUpdate::Remove => {
+                            // Skip existing JUMBF - effectively removing it
+                            jumbf_written = true;
+                        }
+                        crate::JumbfUpdate::Set(new_jumbf) => {
+                            // Replace with new JUMBF
+                            if !jumbf_written {
+                                write_jumbf_segments(writer, new_jumbf)?;
+                                jumbf_written = true;
+                            }
+                            // Skip existing JUMBF
+                        }
+                        crate::JumbfUpdate::Keep => {
+                            // Copy existing JUMBF segments
+                            for loc in segments.iter() {
+                                writer.write_u8(0xFF)?;
+                                writer.write_u8(APP11)?;
+
+                                let seg_size = loc.size + 2;
+                                writer.write_u16::<BigEndian>(seg_size as u16)?;
+
+                                // Optimized seek
+                                if current_read_pos != loc.offset {
+                                    reader.seek(SeekFrom::Start(loc.offset))?;
+                                    current_read_pos = loc.offset;
+                                }
+
+                                let mut limited = reader.take(loc.size);
+                                copy(&mut limited, writer)?;
+                                current_read_pos += loc.size;
+                            }
+                            jumbf_written = true;
+                        }
+                    }
+                }
+
+                Segment::Other { marker, .. } if *marker == APP1 && !xmp_written => {
+                    // First APP1 segment - good place to insert XMP if we're adding it
+                    if let crate::XmpUpdate::Set(new_xmp) = &updates.xmp {
+                        if !has_xmp {
+                            // Insert new XMP before this segment
                             write_xmp_segment(writer, new_xmp)?;
                             xmp_written = true;
                         }
-                    } else {
-                        // Copy existing XMP
-                        copy_segment(reader, writer, *offset, *size, 0xFF, APP1)?;
                     }
+
+                    // Copy the Other segment
+                    copy_other_segment(segment, reader, writer, &mut current_read_pos)?;
                 }
-                
-                Segment::Jumbf { offset, size, .. } => {
-                    if updates.remove_existing_jumbf {
-                        continue;
-                    }
-                    
-                    if let Some(ref new_jumbf) = updates.new_jumbf {
-                        if !jumbf_written {
+
+                Segment::Other { marker, .. } if *marker == APP11 && !jumbf_written => {
+                    // First APP11 segment - good place to insert JUMBF if we're adding it
+                    if let crate::JumbfUpdate::Set(new_jumbf) = &updates.jumbf {
+                        if !has_jumbf {
+                            // Insert new JUMBF before this segment
                             write_jumbf_segments(writer, new_jumbf)?;
                             jumbf_written = true;
                         }
-                    } else {
-                        // Copy existing JUMBF
-                        copy_segment(reader, writer, *offset, *size, 0xFF, APP11)?;
                     }
+
+                    // Copy the Other segment
+                    copy_other_segment(segment, reader, writer, &mut current_read_pos)?;
                 }
-                
-                Segment::ImageData { offset, size, .. } => {
-                    // Stream copy image data
-                    reader.seek(SeekFrom::Start(*offset))?;
-                    let mut limited = reader.take(*size);
-                    copy(&mut limited, writer)?;
+
+                Segment::ImageData { .. } => {
+                    // Before writing image data, insert any pending new metadata
+                    if !xmp_written {
+                        if let crate::XmpUpdate::Set(new_xmp) = &updates.xmp {
+                            if !has_xmp {
+                                write_xmp_segment(writer, new_xmp)?;
+                                xmp_written = true;
+                            }
+                        }
+                    }
+
+                    if !jumbf_written {
+                        if let crate::JumbfUpdate::Set(new_jumbf) = &updates.jumbf {
+                            if !has_jumbf {
+                                write_jumbf_segments(writer, new_jumbf)?;
+                                jumbf_written = true;
+                            }
+                        }
+                    }
+
+                    // Copy image data
+                    copy_other_segment(segment, reader, writer, &mut current_read_pos)?;
                 }
-                
-                Segment::Other {
-                    offset, size, marker, ..
-                } => {
-                    // Copy other segments as-is
-                    reader.seek(SeekFrom::Start(*offset))?;
-                    let mut limited = reader.take(*size);
-                    copy(&mut limited, writer)?;
+
+                Segment::Other { .. } => {
+                    copy_other_segment(segment, reader, writer, &mut current_read_pos)?;
                 }
             }
         }
-        
+
         Ok(())
     }
-    
+
     #[cfg(feature = "thumbnails")]
     fn generate_thumbnail<R: Read + Seek>(
         &self,
@@ -288,59 +438,88 @@ impl FormatHandler for JpegHandler {
 // Helper functions
 
 /// Find End of Image marker (FFD9)
+/// Properly handles byte stuffing in JPEG compressed data
 fn find_eoi<R: Read + Seek>(reader: &mut R) -> Result<u64> {
-    let mut prev = 0u8;
+    const BUFFER_SIZE: usize = 8192;
+    let mut buffer = vec![0u8; BUFFER_SIZE];
+    let mut prev_was_ff = false;
     let start_pos = reader.stream_position()?;
-    
-    loop {
-        let byte = reader.read_u8()?;
-        
-        if prev == 0xFF && byte == EOI {
-            // Found EOI, return position of FF
-            return Ok(reader.stream_position()? - 1);
-        }
-        
-        prev = byte;
-    }
-}
+    let mut total_read = 0u64;
 
-/// Copy a segment with marker prefix
-fn copy_segment<R: Read + Seek, W: Write>(
-    reader: &mut R,
-    writer: &mut W,
-    offset: u64,
-    size: u64,
-    marker_prefix: u8,
-    marker: u8,
-) -> Result<()> {
-    writer.write_u8(marker_prefix)?;
-    writer.write_u8(marker)?;
-    writer.write_u16::<BigEndian>((size + 2) as u16)?;
-    
-    reader.seek(SeekFrom::Start(offset))?;
-    let mut limited = reader.take(size);
-    copy(&mut limited, writer)?;
-    
-    Ok(())
+    loop {
+        let n = reader.read(&mut buffer)?;
+        if n == 0 {
+            return Err(Error::InvalidFormat("EOI marker not found".into()));
+        }
+
+        for (i, &byte) in buffer[..n].iter().enumerate() {
+            if prev_was_ff {
+                if byte == EOI {
+                    // Found EOI! Return position of the FF
+                    let eoi_pos = start_pos + total_read + i as u64 - 1;
+                    return Ok(eoi_pos);
+                } else if byte == 0x00 {
+                    // Stuffed byte - the FF was part of data, not a marker
+                    prev_was_ff = false;
+                } else if byte == 0xFF {
+                    // Multiple FF bytes (padding) - stay in FF state
+                    prev_was_ff = true;
+                } else {
+                    // Some other marker - not EOI, keep scanning
+                    prev_was_ff = false;
+                }
+            } else if byte == 0xFF {
+                prev_was_ff = true;
+            }
+        }
+
+        total_read += n as u64;
+    }
 }
 
 /// Write XMP as APP1 segment
 fn write_xmp_segment<W: Write>(writer: &mut W, xmp: &[u8]) -> Result<()> {
     let total_size = XMP_SIGNATURE.len() + xmp.len() + 2;
-    
+
     if total_size > MAX_MARKER_SIZE {
         return Err(Error::DataTooLarge {
             size: total_size,
             max: MAX_MARKER_SIZE,
         });
     }
-    
+
     writer.write_u8(0xFF)?;
     writer.write_u8(APP1)?;
     writer.write_u16::<BigEndian>(total_size as u16)?;
     writer.write_all(XMP_SIGNATURE)?;
     writer.write_all(xmp)?;
-    
+
+    Ok(())
+}
+
+/// Helper to copy a segment (ImageData or Other)
+fn copy_other_segment<R: Read + Seek, W: Write>(
+    segment: &Segment,
+    reader: &mut R,
+    writer: &mut W,
+    current_read_pos: &mut u64,
+) -> Result<()> {
+    let (offset, size) = match segment {
+        Segment::ImageData { offset, size, .. } => (*offset, *size),
+        Segment::Other { offset, size, .. } => (*offset, *size),
+        _ => return Ok(()), // Shouldn't happen, but handle gracefully
+    };
+
+    // Optimized seek
+    if *current_read_pos != offset {
+        reader.seek(SeekFrom::Start(offset))?;
+        *current_read_pos = offset;
+    }
+
+    let mut limited = reader.take(size);
+    copy(&mut limited, writer)?;
+    *current_read_pos += size;
+
     Ok(())
 }
 
@@ -349,29 +528,27 @@ fn write_jumbf_segments<W: Write>(writer: &mut W, jumbf: &[u8]) -> Result<()> {
     // JPEG XT header: CI (2) + En (2) + Z (4) + LBox (4) + TBox (4) = 16 bytes
     const JPEG_XT_OVERHEAD: usize = 16;
     const MAX_DATA_PER_SEGMENT: usize = MAX_MARKER_SIZE - JPEG_XT_OVERHEAD;
-    
-    let num_segments = (jumbf.len() + MAX_DATA_PER_SEGMENT - 1) / MAX_DATA_PER_SEGMENT;
-    
+
     for (seg_num, chunk) in jumbf.chunks(MAX_DATA_PER_SEGMENT).enumerate() {
         writer.write_u8(0xFF)?;
         writer.write_u8(APP11)?;
-        
+
         let seg_size = chunk.len() + JPEG_XT_OVERHEAD + 2;
         writer.write_u16::<BigEndian>(seg_size as u16)?;
-        
+
         // JPEG XT header
         writer.write_all(b"JP")?; // CI: JPEG extensions marker
         writer.write_u16::<BigEndian>(0x0211)?; // En: Box Instance Number
         writer.write_u32::<BigEndian>((seg_num + 1) as u32)?; // Z: Packet sequence
-        
+
         // For continuation segments, repeat LBox and TBox
         if seg_num > 0 && jumbf.len() >= 8 {
             writer.write_all(&jumbf[0..8])?; // LBox + TBox
         }
-        
+
         writer.write_all(chunk)?;
     }
-    
+
     Ok(())
 }
 
@@ -379,19 +556,18 @@ fn write_jumbf_segments<W: Write>(writer: &mut W, jumbf: &[u8]) -> Result<()> {
 mod tests {
     use super::*;
     use std::io::Cursor;
-    
+
     #[test]
     fn test_jpeg_parse_minimal() {
         // Minimal JPEG: SOI + EOI
         let data = vec![0xFF, 0xD8, 0xFF, 0xD9];
         let mut reader = Cursor::new(data);
-        
+
         let handler = JpegHandler::new();
         let structure = handler.parse(&mut reader).unwrap();
-        
+
         assert_eq!(structure.format, Format::Jpeg);
         assert_eq!(structure.total_size, 4);
         assert_eq!(structure.segments.len(), 2); // Header + EOI
     }
 }
-

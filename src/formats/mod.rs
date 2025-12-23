@@ -10,7 +10,7 @@ pub trait FormatHandler: Send + Sync {
     /// This discovers all segments, XMP, and JUMBF locations without
     /// loading the actual data into memory.
     fn parse<R: Read + Seek>(&self, reader: &mut R) -> Result<FileStructure>;
-    
+
     /// Write file with updates in single streaming pass
     ///
     /// This streams from the source to destination, applying updates
@@ -22,7 +22,7 @@ pub trait FormatHandler: Send + Sync {
         writer: &mut W,
         updates: &Updates,
     ) -> Result<()>;
-    
+
     /// Generate thumbnail if supported by this format
     #[cfg(feature = "thumbnails")]
     fn generate_thumbnail<R: Read + Seek>(
@@ -35,4 +35,3 @@ pub trait FormatHandler: Send + Sync {
 
 #[cfg(feature = "jpeg")]
 pub mod jpeg;
-
