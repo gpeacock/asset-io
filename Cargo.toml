@@ -1,0 +1,46 @@
+[package]
+name = "jumbf-io"
+version = "0.1.0"
+edition = "2021"
+authors = ["Greg Peacock <gpeacock@adobe.com>"]
+license = "MIT OR Apache-2.0"
+description = "High-performance streaming JUMBF and XMP I/O for media files"
+repository = "https://github.com/contentauth/jumbf-io"
+keywords = ["jumbf", "c2pa", "xmp", "jpeg", "streaming"]
+categories = ["multimedia", "parsing"]
+
+[dependencies]
+# Core I/O
+byteorder = "1.5"
+thiserror = "1.0"
+
+# Optional features
+memmap2 = { version = "0.9", optional = true }
+
+# Image processing (for thumbnail generation)
+image = { version = "0.25", optional = true, default-features = false, features = ["jpeg"] }
+
+# Hashing
+sha2 = { version = "0.10", optional = true }
+
+[dev-dependencies]
+criterion = "0.5"
+tempfile = "3.8"
+
+[features]
+default = ["jpeg"]
+jpeg = []
+png = []
+bmff = []
+memory-mapped = ["memmap2"]
+thumbnails = ["image"]
+hashing = ["sha2"]
+all-formats = ["jpeg", "png", "bmff"]
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+
+[profile.bench]
+inherits = "release"
