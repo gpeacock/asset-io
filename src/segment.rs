@@ -12,6 +12,19 @@ pub struct Location {
     pub size: u64,
 }
 
+/// Information about an extended XMP chunk
+#[derive(Debug, Clone)]
+pub struct XmpExtendedPart {
+    /// Location of the chunk data (after headers)
+    pub location: Location,
+    /// GUID identifying this XMP set (all parts share same GUID)
+    pub guid: String,
+    /// Offset where this chunk belongs in the reassembled XMP
+    pub chunk_offset: u32,
+    /// Total size of the complete extended XMP when reassembled
+    pub total_size: u32,
+}
+
 /// Lazy-loaded data - only reads when accessed
 #[derive(Debug)]
 pub enum LazyData {
@@ -69,6 +82,8 @@ pub enum Segment {
         size: u64,
         /// Lazy-loaded data
         data: LazyData,
+        /// Extended XMP segments if this is a multi-part XMP
+        extended_parts: Vec<XmpExtendedPart>,
     },
 
     /// JUMBF/C2PA data

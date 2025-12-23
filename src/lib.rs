@@ -77,11 +77,15 @@ mod structure;
 pub use asset::{Asset, AssetBuilder};
 pub use error::{Error, Result};
 pub use formats::FormatHandler;
-pub use segment::{LazyData, Location, Segment};
+pub use segment::{LazyData, Location, Segment, XmpExtendedPart};
 pub use structure::FileStructure;
 
 #[cfg(feature = "jpeg")]
 pub use formats::jpeg::JpegHandler;
+
+// Test utilities - only compiled for tests or when explicitly enabled
+#[cfg(any(test, feature = "test-utils"))]
+pub mod test_utils;
 
 /// Updates to apply when writing a file
 #[derive(Debug, Default)]

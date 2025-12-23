@@ -1,1 +1,4 @@
 /target
+
+# Extended test fixtures (not committed to repo)
+/tests/fixtures-extended/

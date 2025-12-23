@@ -1,7 +1,7 @@
 //! File structure representation
 
 use crate::{
-    error::Result,
+    error::{Error, Result},
     segment::{Location, Segment},
     Format,
 };
@@ -55,19 +55,81 @@ impl FileStructure {
         self.segments.push(segment);
     }
 
-    /// Get XMP data (loads lazily if needed)
-    pub fn xmp<R: Read + Seek>(&mut self, reader: &mut R) -> Result<Option<&[u8]>> {
+    /// Get the XMP index (if any) - for internal use during parsing
+    pub(crate) fn xmp_index_mut(&mut self) -> &mut Option<usize> {
+        &mut self.xmp_index
+    }
+
+    /// Get XMP data (loads lazily if needed, assembles extended parts if present)
+    pub fn xmp<R: Read + Seek>(&mut self, reader: &mut R) -> Result<Option<Vec<u8>>> {
         let Some(index) = self.xmp_index else {
             return Ok(None);
         };
 
-        if let Segment::Xmp { offset, size, data } = &mut self.segments[index] {
+        if let Segment::Xmp {
+            offset,
+            size,
+            data,
+            extended_parts,
+        } = &mut self.segments[index]
+        {
             reader.seek(SeekFrom::Start(*offset))?;
             let location = Location {
                 offset: *offset,
                 size: *size,
             };
-            Ok(Some(data.load(reader, location)?))
+            let main_xmp = data.load(reader, location)?.to_vec();
+
+            // If no extended parts, return main XMP
+            if extended_parts.is_empty() {
+                return Ok(Some(main_xmp));
+            }
+
+            // Assemble extended XMP
+            // Sort parts by chunk_offset
+            let mut parts = extended_parts.clone();
+            parts.sort_by_key(|p| p.chunk_offset);
+
+            // Validate all parts have same GUID and total_size
+            if parts.is_empty() {
+                return Ok(Some(main_xmp));
+            }
+
+            let first_guid = &parts[0].guid;
+            let total_size = parts[0].total_size;
+
+            for part in &parts {
+                if &part.guid != first_guid {
+                    return Err(Error::InvalidFormat(
+                        "Extended XMP parts have mismatched GUIDs".into(),
+                    ));
+                }
+                if part.total_size != total_size {
+                    return Err(Error::InvalidFormat(
+                        "Extended XMP parts have mismatched total sizes".into(),
+                    ));
+                }
+            }
+
+            // Allocate buffer for complete extended XMP
+            let mut extended_xmp = vec![0u8; total_size as usize];
+
+            // Read each chunk into the correct position
+            for part in &parts {
+                reader.seek(SeekFrom::Start(part.location.offset))?;
+                let end_pos = (part.chunk_offset as usize + part.location.size as usize)
+                    .min(extended_xmp.len());
+                if part.chunk_offset as usize >= extended_xmp.len() {
+                    continue; // Skip malformed chunks
+                }
+                let chunk_data = &mut extended_xmp[part.chunk_offset as usize..end_pos];
+                reader.read_exact(chunk_data)?;
+            }
+
+            // According to XMP spec, extended XMP is the complete XMP
+            // (the main XMP just has a pointer to it via xmpNote:HasExtendedXMP)
+            // So we return the extended XMP, which contains everything
+            Ok(Some(extended_xmp))
         } else {
             Ok(None)
         }

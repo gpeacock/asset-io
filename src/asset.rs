@@ -140,8 +140,8 @@ impl<R: Read + Seek> Asset<R> {
         self.structure.format
     }
 
-    /// Get XMP metadata (loads lazily)
-    pub fn xmp(&mut self) -> Result<Option<&[u8]>> {
+    /// Get XMP metadata (loads lazily, assembles extended parts if present)
+    pub fn xmp(&mut self) -> Result<Option<Vec<u8>>> {
         self.structure.xmp(&mut self.reader)
     }
 
