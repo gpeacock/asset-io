@@ -74,7 +74,7 @@ mod formats;
 mod segment;
 mod structure;
 pub mod thumbnail;
-#[cfg(feature = "thumbnails")]
+#[cfg(feature = "exif")]
 mod tiff;
 
 pub use asset::{Asset, AssetBuilder};
@@ -89,11 +89,7 @@ pub use thumbnail::{
     EmbeddedThumbnail, ThumbnailFormat, ThumbnailGenerator, ThumbnailOptions,
 };
 
-#[cfg(feature = "jpeg")]
-pub use formats::jpeg::JpegHandler;
-
-#[cfg(feature = "png")]
-pub use formats::png::PngHandler;
+// Format handlers are exported by the register_formats! macro below
 
 // Test utilities - only compiled for tests or when explicitly enabled
 #[cfg(any(test, feature = "test-utils"))]
@@ -107,10 +103,6 @@ pub struct Updates {
 
     /// JUMBF data update strategy
     pub jumbf: JumbfUpdate,
-
-    /// Request thumbnail generation
-    #[cfg(feature = "thumbnails")]
-    pub thumbnail: Option<ThumbnailRequest>,
 }
 
 /// XMP metadata update strategy
@@ -149,8 +141,6 @@ impl Updates {
         Self {
             xmp: XmpUpdate::Remove,
             jumbf: JumbfUpdate::Remove,
-            #[cfg(feature = "thumbnails")]
-            thumbnail: None,
         }
     }
 
@@ -171,15 +161,6 @@ impl Updates {
     }
 }
 
-/// Request for thumbnail generation
-#[cfg(feature = "thumbnails")]
-#[derive(Debug, Clone)]
-pub struct ThumbnailRequest {
-    pub max_width: u32,
-    pub max_height: u32,
-    pub quality: u8,
-}
-
 /// Register all supported formats in one place
 ///
 /// This macro generates:
@@ -187,6 +168,7 @@ pub struct ThumbnailRequest {
 /// - detect_format() function
 /// - get_handler() function  
 /// - Extension and MIME type lookup
+/// - Public exports of format handlers
 macro_rules! register_formats {
     ($(
         $(#[$meta:meta])*
@@ -200,6 +182,12 @@ macro_rules! register_formats {
                 $variant,
             )*
         }
+
+        // Export format handlers
+        $(
+            $(#[$meta])*
+            pub use $handler;
+        )*
 
         /// Detect format from file header
         pub(crate) fn detect_format<R: std::io::Read + std::io::Seek>(

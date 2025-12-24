@@ -192,13 +192,13 @@ pub enum Segment {
     /// - HEIF/WebP: Can contain EXIF metadata
     ///
     /// Note: The segment itself is always available. The `thumbnail` field is only
-    /// populated when the `thumbnails` feature is enabled and EXIF is parsed.
+    /// populated when the `exif` feature is enabled and EXIF is parsed.
     Exif {
         offset: u64,
         size: u64,
         /// Embedded thumbnail location (if present in IFD1)
-        /// Only populated when `thumbnails` feature is enabled
-        #[cfg(feature = "thumbnails")]
+        /// Only populated when `exif` feature is enabled
+        #[cfg(feature = "exif")]
         thumbnail: Option<crate::thumbnail::EmbeddedThumbnail>,
     },
 

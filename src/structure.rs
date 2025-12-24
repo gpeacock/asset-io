@@ -1,7 +1,5 @@
 //! Structure representation for parsed assets
 
-#[cfg(feature = "thumbnails")]
-use crate::thumbnail::EmbeddedThumbnail;
 use crate::{
     error::Result,
     segment::{ByteRange, ChunkedSegmentReader, Location, Segment},
@@ -288,38 +286,5 @@ impl Structure {
             }),
             _ => None,
         })
-    }
-
-    /// Try to extract an embedded thumbnail from the file
-    ///
-    /// Many image formats include pre-rendered thumbnails for quick preview:
-    /// - JPEG: EXIF thumbnail (typically 160x120)
-    /// - HEIF/HEIC: 'thmb' item reference  
-    /// - WebP: VP8L thumbnail chunk
-    /// - TIFF: IFD0 thumbnail
-    /// - PNG: No embedded thumbnails
-    ///
-    /// This is the fastest way to get a thumbnail if available.
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// // Try embedded thumbnail first (fastest!)
-    /// if let Some(thumb) = structure.embedded_thumbnail()? {
-    ///     if thumb.fits(256, 256) {
-    ///         return Ok(thumb.data);  // Perfect!
-    ///     }
-    /// }
-    /// // Fall back to decoding main image
-    /// ```
-    #[cfg(feature = "thumbnails")]
-    pub fn embedded_thumbnail(&self) -> Result<Option<EmbeddedThumbnail>> {
-        // Check if any EXIF segment has an embedded thumbnail
-        for segment in &self.segments {
-            if let Segment::Exif { thumbnail, .. } = segment {
-                return Ok(thumbnail.clone());
-            }
-        }
-        Ok(None)
     }
 }

@@ -290,7 +290,7 @@ impl PngHandler {
                     structure.add_segment(Segment::Exif {
                         offset: data_offset,
                         size: chunk_len,
-                        #[cfg(feature = "thumbnails")]
+                        #[cfg(feature = "exif")]
                         thumbnail: None, // TODO: Parse EXIF to extract thumbnail
                     });
                     reader.seek(SeekFrom::Current((chunk_len + 4) as i64))?; // Skip data + CRC
@@ -589,14 +589,18 @@ impl FormatHandler for PngHandler {
         Ok(())
     }
 
-    #[cfg(feature = "thumbnails")]
-    fn generate_thumbnail<R: Read + Seek>(
+    #[cfg(feature = "exif")]
+    fn extract_embedded_thumbnail<R: Read + Seek>(
         &self,
-        _structure: &Structure,
+        structure: &Structure,
         _reader: &mut R,
-        _request: &crate::ThumbnailRequest,
-    ) -> Result<Option<Vec<u8>>> {
-        // PNG thumbnail generation not yet implemented
+    ) -> Result<Option<crate::EmbeddedThumbnail>> {
+        // PNG doesn't typically have embedded thumbnails, but check EXIF anyway
+        for segment in structure.segments() {
+            if let Segment::Exif { thumbnail, .. } = segment {
+                return Ok(thumbnail.clone());
+            }
+        }
         Ok(None)
     }
 }

@@ -64,8 +64,7 @@ fn main() -> asset_io::Result<()> {
         let updates = Updates {
             xmp: XmpUpdate::Set(new_xmp.into_bytes()),
             jumbf: JumbfUpdate::Keep,
-            #[cfg(feature = "thumbnails")]
-            thumbnail: None,
+            ..Default::default()
         };
 
         asset.write_to(output_path, &updates)?;

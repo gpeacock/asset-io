@@ -68,14 +68,21 @@ pub trait FormatHandler: Send + Sync {
         reader: &mut R,
     ) -> Result<Option<Vec<u8>>>;
 
-    /// Generate thumbnail if supported by this format
-    #[cfg(feature = "thumbnails")]
-    fn generate_thumbnail<R: Read + Seek>(
+    /// Extract embedded thumbnail from format-specific metadata
+    ///
+    /// Some formats embed pre-rendered thumbnails in their metadata:
+    /// - JPEG: EXIF IFD1 thumbnail (typically ~160x120)
+    /// - HEIF: 'thmb' item reference
+    /// - WebP: VP8L thumbnail chunk
+    /// - PNG: No embedded thumbnails (returns None)
+    ///
+    /// This is the fastest thumbnail path - no decoding needed!
+    #[cfg(feature = "exif")]
+    fn extract_embedded_thumbnail<R: Read + Seek>(
         &self,
         structure: &Structure,
         reader: &mut R,
-        request: &crate::ThumbnailRequest,
-    ) -> Result<Option<Vec<u8>>>;
+    ) -> Result<Option<crate::EmbeddedThumbnail>>;
 }
 
 // Format modules are private - handlers are re-exported at crate root

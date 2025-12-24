@@ -283,18 +283,16 @@ mod thumbnail_tests {
     }
 
     #[test]
-    #[cfg(feature = "thumbnails")]
+    #[cfg(feature = "exif")]
     fn test_embedded_thumbnail() {
         println!("\n=== Testing embedded_thumbnail() ===");
 
+        use asset_io::Asset;
         let path = test_utils::fixture_path(test_utils::P1000708);
-        let mut file = File::open(&path).expect("Failed to open file");
-
-        let handler = JpegHandler::new();
-        let structure = handler.parse(&mut file).expect("Failed to parse");
+        let mut asset = Asset::open(&path).expect("Failed to open file");
 
         // Try to get embedded thumbnail (may or may not exist)
-        match structure.embedded_thumbnail() {
+        match asset.embedded_thumbnail() {
             Ok(Some(thumb)) => {
                 println!("  ✓ Found embedded thumbnail:");
                 println!("    Format: {:?}", thumb.format);
@@ -384,7 +382,6 @@ mod thumbnail_tests {
     }
 
     #[test]
-    #[cfg(feature = "thumbnails")]
     fn test_embedded_thumbnail_fits() {
         println!("\n=== Testing EmbeddedThumbnail::fits() ===");
 

@@ -70,8 +70,7 @@ fn main() -> asset_io::Result<()> {
         Updates {
             xmp: XmpUpdate::Set(test_xmp.clone()),
             jumbf: JumbfUpdate::Remove,
-            #[cfg(feature = "thumbnails")]
-            thumbnail: None,
+            ..Default::default()
         },
     )?;
 

@@ -4,8 +4,7 @@
 // The core library provides efficient access to image data, and external crates
 // handle the actual decoding and thumbnail generation.
 
-use asset_io::{FormatHandler, JpegHandler, ThumbnailOptions};
-use std::fs::File;
+use asset_io::{Asset, ThumbnailOptions};
 
 fn main() -> asset_io::Result<()> {
     #[cfg(feature = "test-utils")]
@@ -18,19 +17,17 @@ fn main() -> asset_io::Result<()> {
         println!("File: {}", path.display());
 
         // Open the asset
-        let mut file = File::open(&path)?;
-        let handler = JpegHandler::new();
-        let structure = handler.parse(&mut file)?;
+        let mut asset = Asset::open(&path)?;
 
-        println!("Format: {:?}", structure.format);
-        println!("Total size: {} bytes\n", structure.total_size);
+        println!("Format: {:?}", asset.structure().format);
+        println!("Total size: {} bytes\n", asset.structure().total_size);
 
         // ========================================================================
         // STEP 1: Try embedded thumbnail (fastest path!)
         // ========================================================================
 
         println!("1. Checking for embedded thumbnail...");
-        match structure.embedded_thumbnail()? {
+        match asset.embedded_thumbnail()? {
             Some(thumb) => {
                 println!("   ✓ Found embedded thumbnail!");
                 println!("     Format: {:?}", thumb.format);
@@ -67,7 +64,7 @@ fn main() -> asset_io::Result<()> {
         // ========================================================================
 
         println!("2. Getting image data range...");
-        if let Some(range) = structure.image_data_range() {
+        if let Some(range) = asset.structure().image_data_range() {
             println!("   ✓ Image data found");
             println!("     Offset: {} bytes", range.offset);
             println!(
@@ -92,30 +89,23 @@ fn main() -> asset_io::Result<()> {
 
         #[cfg(feature = "memory-mapped")]
         {
+            use std::fs::File;
+            
             println!("3. Zero-copy access with memory-mapping...");
 
             let file = File::open(&path)?;
-            let mmap = unsafe { memmap2::Mmap::map(&file)? };
+            let _mmap = unsafe { memmap2::Mmap::map(&file)? };
 
-            let mut file = File::open(&path)?;
-            let structure = handler.parse(&mut file)?;
-            let structure = structure.with_mmap(mmap);
-
-            if let Some(range) = structure.image_data_range() {
-                if let Some(slice) = structure.get_mmap_slice(range) {
-                    println!("   ✓ Got zero-copy slice!");
-                    println!("     Size: {} bytes", slice.len());
-                    println!(
-                        "     First 16 bytes: {:02X?}",
-                        &slice[..16.min(slice.len())]
-                    );
-                    println!();
-                    println!("   External decoder would receive:");
-                    println!("   • Direct pointer to image data");
-                    println!("   • No copying or allocation");
-                    println!("   • Maximum decode speed");
-                }
-            }
+            // Re-open and parse with mmap
+            let asset2 = Asset::open(&path)?;
+            let _structure = asset2.structure();
+            // TODO: Add with_mmap support to Asset
+            // For now, just demonstrate the concept
+            
+            println!("   Memory-mapping support would allow:");
+            println!("   • Zero-copy access to image data");
+            println!("   • Direct pointer to JPEG stream");
+            println!("   • Maximum decode speed");
         }
 
         #[cfg(not(feature = "memory-mapped"))]
@@ -137,7 +127,7 @@ fn main() -> asset_io::Result<()> {
         println!("   ```rust");
         println!("   pub fn generate_thumbnail(asset: &mut Asset) -> Result<Vec<u8>> {{");
         println!("       // Fast path: embedded thumbnail");
-        println!("       if let Some(thumb) = asset.structure().embedded_thumbnail()? {{");
+        println!("       if let Some(thumb) = asset.embedded_thumbnail()? {{");
         println!("           if thumb.fits(256, 256) {{");
         println!("               // Load thumbnail data from file at thumb.offset/size");
         println!("               return Ok(load_thumbnail_data(&thumb));  // Fast!");

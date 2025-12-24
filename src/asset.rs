@@ -58,6 +58,7 @@ pub(crate) enum Handler {
 }
 
 impl Handler {
+    #[allow(unreachable_patterns)]
     fn parse<R: Read + Seek>(&self, reader: &mut R) -> Result<Structure> {
         match self {
             #[cfg(feature = "jpeg")]
@@ -68,6 +69,7 @@ impl Handler {
         }
     }
 
+    #[allow(unreachable_patterns)]
     fn write<R: Read + Seek, W: Write>(
         &self,
         structure: &Structure,
@@ -84,6 +86,7 @@ impl Handler {
         }
     }
 
+    #[allow(unreachable_patterns)]
     fn extract_xmp<R: Read + Seek>(
         &self,
         structure: &Structure,
@@ -98,6 +101,7 @@ impl Handler {
         }
     }
 
+    #[allow(unreachable_patterns)]
     fn extract_jumbf<R: Read + Seek>(
         &self,
         structure: &Structure,
@@ -109,6 +113,22 @@ impl Handler {
 
             #[cfg(feature = "png")]
             Handler::Png(h) => h.extract_jumbf(structure, reader),
+        }
+    }
+
+    #[cfg(feature = "exif")]
+    #[allow(unreachable_patterns)]
+    fn extract_embedded_thumbnail<R: Read + Seek>(
+        &self,
+        structure: &Structure,
+        reader: &mut R,
+    ) -> Result<Option<crate::EmbeddedThumbnail>> {
+        match self {
+            #[cfg(feature = "jpeg")]
+            Handler::Jpeg(h) => h.extract_embedded_thumbnail(structure, reader),
+
+            #[cfg(feature = "png")]
+            Handler::Png(h) => h.extract_embedded_thumbnail(structure, reader),
         }
     }
 }
@@ -169,6 +189,30 @@ impl<R: Read + Seek> Asset<R> {
     /// Get JUMBF data (loads and assembles lazily)
     pub fn jumbf(&mut self) -> Result<Option<Vec<u8>>> {
         self.handler.extract_jumbf(&self.structure, &mut self.reader)
+    }
+
+    /// Extract an embedded thumbnail if available
+    ///
+    /// Many image formats include pre-rendered thumbnails for quick preview:
+    /// - JPEG: EXIF thumbnail (typically 160x120)
+    /// - PNG: EXIF thumbnail (if eXIf chunk present)
+    ///
+    /// This is the fastest way to get a thumbnail if available - no decoding needed!
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // Try embedded thumbnail first (fastest!)
+    /// if let Some(thumb) = asset.embedded_thumbnail()? {
+    ///     println!("Found {}x{} thumbnail", thumb.width, thumb.height);
+    ///     return Ok(thumb.data);
+    /// }
+    /// // Fall back to decoding main image
+    /// ```
+    #[cfg(feature = "exif")]
+    pub fn embedded_thumbnail(&mut self) -> Result<Option<crate::EmbeddedThumbnail>> {
+        self.handler
+            .extract_embedded_thumbnail(&self.structure, &mut self.reader)
     }
 
     /// Get the file structure

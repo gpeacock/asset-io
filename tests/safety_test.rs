@@ -33,7 +33,7 @@ fn test_extended_xmp_size_limit_exists() {
 }
 
 #[test]
-#[cfg(feature = "thumbnails")]
+#[cfg(feature = "exif")]
 fn test_tiff_ifd_tag_limit_exists() {
     // The MAX_IFD_TAGS constant prevents DOS via excessive tags
     // (Defined in tiff.rs, tested via fuzzing)
@@ -136,7 +136,7 @@ fn test_safety_mechanisms_summary() {
     assert!(MAX_XMP > 0);
 
     // 4. TIFF IFD tag count limit (1000 tags)
-    #[cfg(feature = "thumbnails")]
+    #[cfg(feature = "exif")]
     {
         const MAX_IFD_TAGS: u16 = 1000;
         assert!(MAX_IFD_TAGS > 0);

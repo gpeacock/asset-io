@@ -67,7 +67,7 @@ fn main() -> asset_io::Result<()> {
             }
             asset_io::Segment::ImageData { .. } => "ImageData".to_string(),
             asset_io::Segment::Exif { .. } => {
-                #[cfg(feature = "thumbnails")]
+                #[cfg(feature = "exif")]
                 {
                     if let asset_io::Segment::Exif { thumbnail, .. } = segment {
                         if thumbnail.is_some() {
@@ -79,7 +79,7 @@ fn main() -> asset_io::Result<()> {
                         "EXIF".to_string()
                     }
                 }
-                #[cfg(not(feature = "thumbnails"))]
+                #[cfg(not(feature = "exif"))]
                 {
                     "EXIF".to_string()
                 }

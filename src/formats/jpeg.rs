@@ -458,7 +458,7 @@ impl JpegHandler {
                             && &sig_buf[..EXIF_SIGNATURE.len()] == EXIF_SIGNATURE
                         {
                             // EXIF segment
-                            #[cfg(feature = "thumbnails")]
+                            #[cfg(feature = "exif")]
                             {
                                 // Parse for embedded thumbnail
                                 // Note: We already read sig_buf, so only read the remaining EXIF data
@@ -500,7 +500,7 @@ impl JpegHandler {
                                 });
                             }
 
-                            #[cfg(not(feature = "thumbnails"))]
+                            #[cfg(not(feature = "exif"))]
                             {
                                 // Just record the EXIF segment without parsing thumbnails
                                 structure.add_segment(Segment::Exif {
@@ -949,14 +949,18 @@ impl FormatHandler for JpegHandler {
         Ok(())
     }
 
-    #[cfg(feature = "thumbnails")]
-    fn generate_thumbnail<R: Read + Seek>(
+    #[cfg(feature = "exif")]
+    fn extract_embedded_thumbnail<R: Read + Seek>(
         &self,
-        _structure: &Structure,
+        structure: &Structure,
         _reader: &mut R,
-        _request: &crate::ThumbnailRequest,
-    ) -> Result<Option<Vec<u8>>> {
-        // TODO: Implement thumbnail generation using image crate
+    ) -> Result<Option<crate::EmbeddedThumbnail>> {
+        // Check if any EXIF segment has an embedded thumbnail
+        for segment in structure.segments() {
+            if let Segment::Exif { thumbnail, .. } = segment {
+                return Ok(thumbnail.clone());
+            }
+        }
         Ok(None)
     }
 }
