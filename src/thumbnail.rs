@@ -190,10 +190,9 @@ pub trait ThumbnailGenerator {
 /// Get a format hint string for a Format enum
 pub fn format_hint(format: Format) -> &'static str {
     match format {
+        #[cfg(feature = "jpeg")]
         Format::Jpeg => "jpeg",
         #[cfg(feature = "png")]
         Format::Png => "png",
-        #[cfg(feature = "bmff")]
-        Format::Bmff => "mp4",
     }
 }

@@ -127,11 +127,6 @@ impl FileStructure {
                 use crate::formats::png::PngHandler;
                 PngHandler::extract_xmp_impl(self, reader)
             }
-            #[cfg(feature = "bmff")]
-            crate::Format::Bmff => {
-                // TODO: Implement BMFF XMP extraction
-                Err(crate::Error::UnsupportedFormat)
-            }
         }
     }
 
@@ -155,11 +150,6 @@ impl FileStructure {
             crate::Format::Png => {
                 use crate::formats::png::PngHandler;
                 PngHandler::extract_jumbf_impl(self, reader)
-            }
-            #[cfg(feature = "bmff")]
-            crate::Format::Bmff => {
-                // TODO: Implement BMFF JUMBF extraction
-                Err(crate::Error::UnsupportedFormat)
             }
         }
     }
@@ -396,11 +386,6 @@ impl FileStructure {
             #[cfg(feature = "png")]
             Format::Png => {
                 // PNG doesn't have embedded thumbnails in metadata
-                Ok(None)
-            }
-            #[cfg(feature = "bmff")]
-            Format::Bmff => {
-                // TODO: Implement BMFF thumbnail extraction
                 Ok(None)
             }
         }

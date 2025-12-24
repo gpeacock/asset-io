@@ -56,7 +56,6 @@ enum Handler {
 
     #[cfg(feature = "png")]
     Png(PngHandler),
-
 }
 
 impl Handler {
@@ -229,8 +228,6 @@ fn get_handler(format: Format) -> Result<Handler> {
 
         #[cfg(feature = "png")]
         Format::Png => Ok(Handler::Png(PngHandler::new())),
-
-        _ => Err(Error::UnsupportedFormat),
     }
 }
 

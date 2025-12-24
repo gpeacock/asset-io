@@ -191,7 +191,4 @@ pub enum Format {
     #[cfg(feature = "png")]
     Png,
 
-    /// BMFF (MP4, MOV, etc.)
-    #[cfg(feature = "bmff")]
-    Bmff,
 }
