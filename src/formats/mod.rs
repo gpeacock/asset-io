@@ -78,8 +78,9 @@ pub trait FormatHandler: Send + Sync {
     ) -> Result<Option<Vec<u8>>>;
 }
 
+// Format modules are private - handlers are re-exported at crate root
 #[cfg(feature = "jpeg")]
-pub mod jpeg;
+pub(crate) mod jpeg;
 
 #[cfg(feature = "png")]
-pub mod png;
+pub(crate) mod png;
