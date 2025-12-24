@@ -82,10 +82,15 @@ pub enum ThumbnailFormat {
 /// - HEIF/HEIC: 'thmb' item reference
 /// - WebP: VP8L thumbnail chunk
 /// - TIFF: IFD0 thumbnail
+///
+/// The thumbnail data is stored as a location (offset/size) for lazy loading.
 #[derive(Debug, Clone)]
 pub struct EmbeddedThumbnail {
-    /// Raw thumbnail data (already encoded)
-    pub data: Vec<u8>,
+    /// Offset of thumbnail data in the file
+    pub offset: u64,
+    
+    /// Size of thumbnail data in bytes
+    pub size: u64,
     
     /// Format of the thumbnail
     pub format: ThumbnailFormat,
@@ -98,25 +103,34 @@ pub struct EmbeddedThumbnail {
 }
 
 impl EmbeddedThumbnail {
-    /// Create a new embedded thumbnail
-    pub fn new(data: Vec<u8>, format: ThumbnailFormat) -> Self {
+    /// Create a new embedded thumbnail with location
+    pub fn new(
+        offset: u64,
+        size: u64,
+        format: ThumbnailFormat,
+        width: Option<u32>,
+        height: Option<u32>,
+    ) -> Self {
         Self {
-            data,
+            offset,
+            size,
             format,
-            width: None,
-            height: None,
+            width,
+            height,
         }
     }
     
-    /// Create a new embedded thumbnail with dimensions
+    /// Create a new embedded thumbnail with dimensions (for testing/legacy)
     pub fn with_dimensions(
         data: Vec<u8>,
         format: ThumbnailFormat,
         width: u32,
         height: u32,
     ) -> Self {
+        // For backwards compatibility - store as if at offset 0
         Self {
-            data,
+            offset: 0,
+            size: data.len() as u64,
             format,
             width: Some(width),
             height: Some(height),

@@ -28,10 +28,6 @@ pub enum Error {
     #[error("XMP data not found")]
     XmpNotFound,
 
-    /// Data size exceeds maximum allowed
-    #[error("Data too large: {size} bytes (max: {max})")]
-    DataTooLarge { size: usize, max: usize },
-
     /// Invalid segment
     #[error("Invalid segment at offset {offset}: {reason}")]
     InvalidSegment { offset: u64, reason: String },

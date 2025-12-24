@@ -45,6 +45,27 @@ all-formats = ["jpeg", "png", "bmff"]
 embed-fixtures = []
 test-utils = []
 
+# Example-specific features
+[[example]]
+name = "png_demo"
+required-features = ["png"]
+
+[[example]]
+name = "thumbnail_demo"
+required-features = ["thumbnails"]
+
+[[example]]
+name = "mmap_demo"
+required-features = ["memory-mapped"]
+
+[[example]]
+name = "hash_demo"
+required-features = ["hashing"]
+
+[[example]]
+name = "sha256_demo"
+required-features = ["hashing"]
+
 [profile.release]
 opt-level = 3
 lto = true

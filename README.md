@@ -103,7 +103,7 @@ Designed for high-throughput applications:
 | Format | Parse | Write | XMP | JUMBF |
 |--------|-------|-------|-----|-------|
 | JPEG | ✅ | ✅ | ✅ | ✅ |
-| PNG | 🚧 | 🚧 | 🚧 | 🚧 |
+| PNG | ✅ | ✅ | ✅ | ✅ |
 | MP4/MOV | 🚧 | 🚧 | 🚧 | 🚧 |
 
 ## Architecture

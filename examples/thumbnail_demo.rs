@@ -37,7 +37,7 @@ fn main() -> asset_io::Result<()> {
                 if let (Some(w), Some(h)) = (thumb.width, thumb.height) {
                     println!("     Size: {}x{}", w, h);
                 }
-                println!("     Data: {} bytes", thumb.data.len());
+                println!("     Location: offset={}, size={} bytes", thumb.offset, thumb.size);
 
                 // Check if it fits our requirements
                 let options = ThumbnailOptions::default();
@@ -126,7 +126,8 @@ fn main() -> asset_io::Result<()> {
         println!("       // Fast path: embedded thumbnail");
         println!("       if let Some(thumb) = asset.structure().embedded_thumbnail()? {{");
         println!("           if thumb.fits(256, 256) {{");
-        println!("               return Ok(thumb.data);  // Done!");
+        println!("               // Load thumbnail data from file at thumb.offset/size");
+        println!("               return Ok(load_thumbnail_data(&thumb));  // Fast!");
         println!("           }}");
         println!("       }}");
         println!();

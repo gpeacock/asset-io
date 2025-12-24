@@ -259,6 +259,7 @@ mod thumbnail_tests {
     }
     
     #[test]
+    #[cfg(feature = "thumbnails")]
     fn test_embedded_thumbnail() {
         println!("\n=== Testing embedded_thumbnail() ===");
         
@@ -273,14 +274,15 @@ mod thumbnail_tests {
             Ok(Some(thumb)) => {
                 println!("  ✓ Found embedded thumbnail:");
                 println!("    Format: {:?}", thumb.format);
-                println!("    Data: {} bytes", thumb.data.len());
+                println!("    Offset: {} bytes", thumb.offset);
+                println!("    Size: {} bytes", thumb.size);
                 if let (Some(w), Some(h)) = (thumb.width, thumb.height) {
-                    println!("    Size: {}x{}", w, h);
+                    println!("    Dimensions: {}x{}", w, h);
                 }
                 
                 // Verify it's reasonable
-                assert!(!thumb.data.is_empty(), "Thumbnail data should not be empty");
-                assert!(thumb.data.len() < 100_000, "Thumbnail should be small");
+                assert!(thumb.size > 0, "Thumbnail size should not be zero");
+                assert!(thumb.size < 100_000, "Thumbnail should be small");
             }
             Ok(None) => {
                 println!("  ℹ No embedded thumbnail (expected for most test files)");
@@ -354,6 +356,7 @@ mod thumbnail_tests {
     }
     
     #[test]
+    #[cfg(feature = "thumbnails")]
     fn test_embedded_thumbnail_fits() {
         println!("\n=== Testing EmbeddedThumbnail::fits() ===");
         
@@ -371,10 +374,343 @@ mod thumbnail_tests {
         assert!(!thumb.fits(128, 128), "160x120 should not fit in 128x128");
         
         // Thumbnail without dimensions doesn't fit
-        let thumb_no_dims = EmbeddedThumbnail::new(vec![0u8; 100], ThumbnailFormat::Jpeg);
+        let thumb_no_dims = EmbeddedThumbnail::new(0, 100, ThumbnailFormat::Jpeg, None, None);
         assert!(!thumb_no_dims.fits(256, 256), "Unknown size should not fit");
         
         println!("  ✓ EmbeddedThumbnail::fits() works correctly");
     }
 }
+
+#[cfg(all(test, feature = "png"))]
+mod png_tests {
+    use asset_io::{Asset, Format, FormatHandler, PngHandler, Updates, XmpUpdate, JumbfUpdate};
+    use std::io::Cursor;
+
+    /// Create a minimal valid PNG (1x1 pixel, RGB)
+    fn create_minimal_png() -> Vec<u8> {
+        let mut data = Vec::new();
+        
+        // PNG signature
+        data.extend_from_slice(b"\x89PNG\r\n\x1a\n");
+        
+        // IHDR chunk (1x1 RGB image)
+        data.extend_from_slice(&[
+            0x00, 0x00, 0x00, 0x0D, // Length: 13
+        ]);
+        data.extend_from_slice(b"IHDR");
+        data.extend_from_slice(&[
+            0x00, 0x00, 0x00, 0x01, // Width: 1
+            0x00, 0x00, 0x00, 0x01, // Height: 1
+            0x08, // Bit depth: 8
+            0x02, // Color type: RGB (2)
+            0x00, // Compression: deflate
+            0x00, // Filter: adaptive
+            0x00, // Interlace: none
+        ]);
+        data.extend_from_slice(&0x90770c9e_u32.to_be_bytes()); // CRC
+        
+        // IDAT chunk (minimal compressed image data)
+        // This is the zlib-compressed representation of a 1x1 RGB pixel (black)
+        data.extend_from_slice(&[
+            0x00, 0x00, 0x00, 0x0C, // Length: 12
+        ]);
+        data.extend_from_slice(b"IDAT");
+        data.extend_from_slice(&[
+            0x08, 0x1D, 0x01, 0x03, 0x00, 0xFC, 0xFF, 0x00, 0x00, 0x00, 0x06, 0x00,
+        ]);
+        data.extend_from_slice(&0x0364CB4D_u32.to_be_bytes()); // CRC
+        
+        // IEND chunk
+        data.extend_from_slice(&[
+            0x00, 0x00, 0x00, 0x00, // Length: 0
+        ]);
+        data.extend_from_slice(b"IEND");
+        data.extend_from_slice(&0xAE426082_u32.to_be_bytes()); // CRC
+        
+        data
+    }
+
+    #[test]
+    fn test_png_parse_minimal() {
+        let png_data = create_minimal_png();
+        let mut cursor = Cursor::new(png_data);
+        
+        let handler = PngHandler::new();
+        let structure = handler.parse(&mut cursor).unwrap();
+        
+        assert_eq!(structure.format, Format::Png);
+        assert!(!structure.segments.is_empty());
+    }
+
+    #[test]
+    fn test_png_round_trip_no_metadata() {
+        let png_data = create_minimal_png();
+        let mut input = Cursor::new(png_data.clone());
+        
+        let handler = PngHandler::new();
+        let structure = handler.parse(&mut input).unwrap();
+        
+        // Write with no changes
+        input.set_position(0);
+        let mut output = Vec::new();
+        let updates = Updates::default();
+        handler.write(&structure, &mut input, &mut output, &updates).unwrap();
+        
+        // Output should be valid PNG
+        assert_eq!(&output[0..8], b"\x89PNG\r\n\x1a\n");
+        
+        // Should be parseable
+        let mut output_cursor = Cursor::new(output);
+        let result = handler.parse(&mut output_cursor);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_png_add_xmp() {
+        let png_data = create_minimal_png();
+        let mut input = Cursor::new(png_data);
+        
+        let handler = PngHandler::new();
+        let structure = handler.parse(&mut input).unwrap();
+        
+        // Add XMP metadata
+        let xmp_data = b"<rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\"><test>PNG XMP</test></rdf:RDF>".to_vec();
+        input.set_position(0);
+        let mut output = Vec::new();
+        let updates = Updates {
+            xmp: XmpUpdate::Set(xmp_data.clone()),
+            ..Default::default()
+        };
+        handler.write(&structure, &mut input, &mut output, &updates).unwrap();
+        
+        // Parse the output and verify XMP was added
+        let output_cursor = Cursor::new(output);
+        let mut asset = Asset::from_reader_with_format(output_cursor, Format::Png).unwrap();
+        
+        let result_xmp = asset.xmp().unwrap();
+        assert!(result_xmp.is_some());
+        assert_eq!(result_xmp.unwrap(), xmp_data);
+    }
+
+    #[test]
+    fn test_png_add_jumbf() {
+        let png_data = create_minimal_png();
+        let mut input = Cursor::new(png_data);
+        
+        let handler = PngHandler::new();
+        let structure = handler.parse(&mut input).unwrap();
+        
+        // Add JUMBF metadata
+        let jumbf_data = b"Test JUMBF data for PNG".to_vec();
+        input.set_position(0);
+        let mut output = Vec::new();
+        let updates = Updates {
+            jumbf: JumbfUpdate::Set(jumbf_data.clone()),
+            ..Default::default()
+        };
+        handler.write(&structure, &mut input, &mut output, &updates).unwrap();
+        
+        // Parse the output and verify JUMBF was added
+        let output_cursor = Cursor::new(output);
+        let mut asset = Asset::from_reader_with_format(output_cursor, Format::Png).unwrap();
+        
+        let result_jumbf = asset.jumbf().unwrap();
+        assert!(result_jumbf.is_some());
+        assert_eq!(result_jumbf.unwrap(), jumbf_data);
+    }
+
+    #[test]
+    fn test_png_add_both_xmp_and_jumbf() {
+        let png_data = create_minimal_png();
+        let mut input = Cursor::new(png_data);
+        
+        let handler = PngHandler::new();
+        let structure = handler.parse(&mut input).unwrap();
+        
+        // Add both XMP and JUMBF
+        let xmp_data = b"<test>XMP Data</test>".to_vec();
+        let jumbf_data = b"JUMBF Data".to_vec();
+        
+        input.set_position(0);
+        let mut output = Vec::new();
+        let updates = Updates {
+            xmp: XmpUpdate::Set(xmp_data.clone()),
+            jumbf: JumbfUpdate::Set(jumbf_data.clone()),
+            ..Default::default()
+        };
+        handler.write(&structure, &mut input, &mut output, &updates).unwrap();
+        
+        // Verify both were added
+        let output_cursor = Cursor::new(output);
+        let mut asset = Asset::from_reader_with_format(output_cursor, Format::Png).unwrap();
+        
+        assert_eq!(asset.xmp().unwrap().unwrap(), xmp_data);
+        assert_eq!(asset.jumbf().unwrap().unwrap(), jumbf_data);
+    }
+
+    #[test]
+    fn test_png_format_detection() {
+        let png_data = create_minimal_png();
+        let cursor = Cursor::new(png_data);
+        
+        let asset = Asset::from_reader_with_format(cursor, Format::Png).unwrap();
+        assert_eq!(asset.format(), Format::Png);
+    }
+
+    #[test]
+    fn test_png_remove_metadata() {
+        // Start with PNG that has XMP
+        let base_png = create_minimal_png();
+        let mut input = Cursor::new(base_png.clone());
+        
+        let handler = PngHandler::new();
+        let structure = handler.parse(&mut input).unwrap();
+        
+        // Add XMP first
+        let xmp_data = b"<test>To be removed</test>".to_vec();
+        input.set_position(0);
+        let mut with_xmp = Vec::new();
+        handler.write(&structure, &mut input, &mut with_xmp, &Updates {
+            xmp: XmpUpdate::Set(xmp_data),
+            ..Default::default()
+        }).unwrap();
+        
+        // Now remove the XMP
+        let mut input2 = Cursor::new(with_xmp);
+        let structure2 = handler.parse(&mut input2).unwrap();
+        input2.set_position(0);
+        let mut output = Vec::new();
+        handler.write(&structure2, &mut input2, &mut output, &Updates {
+            xmp: XmpUpdate::Remove,
+            ..Default::default()
+        }).unwrap();
+        
+        // Verify XMP was removed
+        let output_cursor = Cursor::new(output);
+        let mut asset = Asset::from_reader_with_format(output_cursor, Format::Png).unwrap();
+        assert!(asset.xmp().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_png_parse_real_file() {
+        use std::fs::File;
+        
+        let mut file = File::open("tests/fixtures/GreenCat.png").unwrap();
+        let handler = PngHandler::new();
+        let structure = handler.parse(&mut file).unwrap();
+        
+        assert_eq!(structure.format, Format::Png);
+        assert!(!structure.segments.is_empty());
+        println!("Parsed {} segments from GreenCat.png", structure.segments.len());
+    }
+
+    #[test]
+    fn test_png_round_trip_real_file() {
+        use std::fs::File;
+        
+        let mut input = File::open("tests/fixtures/GreenCat.png").unwrap();
+        let handler = PngHandler::new();
+        let structure = handler.parse(&mut input).unwrap();
+        
+        // Write with no changes
+        let mut output = Vec::new();
+        let updates = Updates::default();
+        handler.write(&structure, &mut input, &mut output, &updates).unwrap();
+        
+        // Output should be valid PNG
+        assert_eq!(&output[0..8], b"\x89PNG\r\n\x1a\n");
+        
+        // Write output to temp file for debugging
+        std::fs::write("/tmp/png_output.png", &output).ok();
+        
+        // Should be parseable
+        let mut output_cursor = Cursor::new(output);
+        let result = handler.parse(&mut output_cursor);
+        if let Err(e) = &result {
+            eprintln!("Parse error: {:?}", e);
+        }
+        assert!(result.is_ok(), "Output PNG should be parseable");
+    }
+
+    #[test]
+    fn test_png_add_xmp_to_real_file() {
+        use std::fs::File;
+        
+        let mut input = File::open("tests/fixtures/GreenCat.png").unwrap();
+        let handler = PngHandler::new();
+        let structure = handler.parse(&mut input).unwrap();
+        
+        // Add XMP metadata
+        let xmp_data = b"<rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\"><test>PNG XMP</test></rdf:RDF>".to_vec();
+        let mut output = Vec::new();
+        let updates = Updates {
+            xmp: XmpUpdate::Set(xmp_data.clone()),
+            ..Default::default()
+        };
+        handler.write(&structure, &mut input, &mut output, &updates).unwrap();
+        
+        // Parse the output and verify XMP was added
+        let output_cursor = Cursor::new(output);
+        let mut asset = Asset::from_reader_with_format(output_cursor, Format::Png).unwrap();
+        
+        let result_xmp = asset.xmp().unwrap();
+        assert!(result_xmp.is_some());
+        assert_eq!(result_xmp.unwrap(), xmp_data);
+    }
+
+    #[test]
+    fn test_png_add_jumbf_to_real_file() {
+        use std::fs::File;
+        
+        let mut input = File::open("tests/fixtures/GreenCat.png").unwrap();
+        let handler = PngHandler::new();
+        let structure = handler.parse(&mut input).unwrap();
+        
+        // Add JUMBF metadata
+        let jumbf_data = b"Test JUMBF data for PNG".to_vec();
+        let mut output = Vec::new();
+        let updates = Updates {
+            jumbf: JumbfUpdate::Set(jumbf_data.clone()),
+            ..Default::default()
+        };
+        handler.write(&structure, &mut input, &mut output, &updates).unwrap();
+        
+        // Parse the output and verify JUMBF was added
+        let output_cursor = Cursor::new(output);
+        let mut asset = Asset::from_reader_with_format(output_cursor, Format::Png).unwrap();
+        
+        let result_jumbf = asset.jumbf().unwrap();
+        assert!(result_jumbf.is_some());
+        assert_eq!(result_jumbf.unwrap(), jumbf_data);
+    }
+
+    #[test]
+    fn test_png_add_both_xmp_and_jumbf_to_real_file() {
+        use std::fs::File;
+        
+        let mut input = File::open("tests/fixtures/GreenCat.png").unwrap();
+        let handler = PngHandler::new();
+        let structure = handler.parse(&mut input).unwrap();
+        
+        // Add both XMP and JUMBF
+        let xmp_data = b"<test>XMP Data</test>".to_vec();
+        let jumbf_data = b"JUMBF Data".to_vec();
+        
+        let mut output = Vec::new();
+        let updates = Updates {
+            xmp: XmpUpdate::Set(xmp_data.clone()),
+            jumbf: JumbfUpdate::Set(jumbf_data.clone()),
+            ..Default::default()
+        };
+        handler.write(&structure, &mut input, &mut output, &updates).unwrap();
+        
+        // Verify both were added
+        let output_cursor = Cursor::new(output);
+        let mut asset = Asset::from_reader_with_format(output_cursor, Format::Png).unwrap();
+        
+        assert_eq!(asset.xmp().unwrap().unwrap(), xmp_data);
+        assert_eq!(asset.jumbf().unwrap().unwrap(), jumbf_data);
+    }
+}
+
 

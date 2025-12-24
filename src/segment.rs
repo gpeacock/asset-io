@@ -105,7 +105,10 @@ pub enum Segment {
         size: u64,
         /// Lazy-loaded data
         data: LazyData,
-        /// Extended XMP segments if this is a multi-part XMP
+        /// Extended XMP segments if this is a multi-part XMP (JPEG-specific)
+        /// 
+        /// Note: This is format-specific (JPEG Extended XMP) and should eventually
+        /// be moved to a JPEG-specific structure. For now, it's always empty for non-JPEG formats.
         extended_parts: Vec<XmpExtendedPart>,
     },
 
@@ -125,6 +128,15 @@ pub enum Segment {
         size: u64,
         /// Whether this should be included in hash calculations
         hashable: bool,
+    },
+
+    /// EXIF metadata (JPEG-specific, but could apply to other formats)
+    #[cfg(feature = "thumbnails")]
+    Exif {
+        offset: u64,
+        size: u64,
+        /// Embedded thumbnail location (if present in IFD1)
+        thumbnail: Option<crate::thumbnail::EmbeddedThumbnail>,
     },
 
     /// Other format-specific segments
@@ -148,6 +160,11 @@ impl Segment {
                 offset: *offset,
                 size: *size,
             },
+            #[cfg(feature = "thumbnails")]
+            Self::Exif { offset, size, .. } => Location {
+                offset: *offset,
+                size: *size,
+            },
         }
     }
 
@@ -167,6 +184,8 @@ impl Segment {
             Self::Xmp { .. } => "xmp",
             Self::Jumbf { .. } => "jumbf",
             Self::ImageData { .. } => "image_data",
+            #[cfg(feature = "thumbnails")]
+            Self::Exif { .. } => "exif",
             Self::Other { marker, .. } => {
                 // For JPEG markers, use hex representation
                 match *marker {

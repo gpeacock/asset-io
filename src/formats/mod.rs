@@ -23,6 +23,26 @@ pub trait FormatHandler: Send + Sync {
         updates: &Updates,
     ) -> Result<()>;
 
+    /// Extract XMP data from file (format-specific)
+    ///
+    /// This handles format-specific details like JPEG's extended XMP
+    /// with multi-segment assembly, or PNG's simple iTXt chunks.
+    fn extract_xmp<R: Read + Seek>(
+        &self,
+        structure: &FileStructure,
+        reader: &mut R,
+    ) -> Result<Option<Vec<u8>>>;
+
+    /// Extract JUMBF data from file (format-specific)
+    ///
+    /// This handles format-specific details like JPEG XT headers,
+    /// multi-segment assembly, etc.
+    fn extract_jumbf<R: Read + Seek>(
+        &self,
+        structure: &FileStructure,
+        reader: &mut R,
+    ) -> Result<Option<Vec<u8>>>;
+
     /// Generate thumbnail if supported by this format
     #[cfg(feature = "thumbnails")]
     fn generate_thumbnail<R: Read + Seek>(
@@ -35,3 +55,6 @@ pub trait FormatHandler: Send + Sync {
 
 #[cfg(feature = "jpeg")]
 pub mod jpeg;
+
+#[cfg(feature = "png")]
+pub mod png;

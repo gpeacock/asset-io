@@ -22,6 +22,8 @@ const RST7: u8 = 0xD7;
 
 const XMP_SIGNATURE: &[u8] = b"http://ns.adobe.com/xap/1.0/\0";
 const XMP_EXTENDED_SIGNATURE: &[u8] = b"http://ns.adobe.com/xmp/extension/\0";
+#[cfg(feature = "thumbnails")]
+const EXIF_SIGNATURE: &[u8] = b"Exif\0\0";
 const C2PA_MARKER: &[u8] = b"c2pa";
 const MAX_MARKER_SIZE: usize = 65533; // Max size for JPEG marker segment
 
@@ -32,6 +34,148 @@ impl JpegHandler {
     /// Create a new JPEG handler
     pub fn new() -> Self {
         Self
+    }
+
+    /// Extract XMP data from JPEG file (handles extended XMP with multi-segment assembly)
+    pub fn extract_xmp_impl<R: Read + Seek>(
+        structure: &crate::structure::FileStructure,
+        reader: &mut R,
+    ) -> Result<Option<Vec<u8>>> {
+        let Some(index) = structure.xmp_index() else {
+            return Ok(None);
+        };
+
+        if let crate::Segment::Xmp {
+            offset,
+            size,
+            extended_parts,
+            ..
+        } = &structure.segments()[index]
+        {
+            // Read main XMP
+            reader.seek(SeekFrom::Start(*offset))?;
+            let mut main_xmp = vec![0u8; *size as usize];
+            reader.read_exact(&mut main_xmp)?;
+
+            // If no extended parts, return main XMP
+            if extended_parts.is_empty() {
+                return Ok(Some(main_xmp));
+            }
+
+            // JPEG-specific: Assemble extended XMP
+            // Sort parts by chunk_offset
+            let mut parts = extended_parts.clone();
+            parts.sort_by_key(|p| p.chunk_offset);
+
+            // Validate all parts have same GUID and total_size
+            if parts.is_empty() {
+                return Ok(Some(main_xmp));
+            }
+
+            let first_guid = &parts[0].guid;
+            let total_size = parts[0].total_size;
+
+            for part in &parts {
+                if &part.guid != first_guid {
+                    return Err(Error::InvalidFormat(
+                        "Extended XMP parts have mismatched GUIDs".into(),
+                    ));
+                }
+                if part.total_size != total_size {
+                    return Err(Error::InvalidFormat(
+                        "Extended XMP parts have mismatched total sizes".into(),
+                    ));
+                }
+            }
+
+            // Allocate buffer for complete extended XMP
+            let mut extended_xmp = vec![0u8; total_size as usize];
+
+            // Read each chunk into the correct position
+            for part in &parts {
+                reader.seek(SeekFrom::Start(part.location.offset))?;
+                let end_pos = (part.chunk_offset as usize + part.location.size as usize)
+                    .min(extended_xmp.len());
+                if part.chunk_offset as usize >= extended_xmp.len() {
+                    continue; // Skip malformed chunks
+                }
+                let chunk_data = &mut extended_xmp[part.chunk_offset as usize..end_pos];
+                reader.read_exact(chunk_data)?;
+            }
+
+            // According to XMP spec, extended XMP is the complete XMP
+            // (the main XMP just has a pointer to it via xmpNote:HasExtendedXMP)
+            return Ok(Some(extended_xmp));
+        }
+
+        Ok(None)
+    }
+
+    /// Extract JUMBF data from JPEG file (handles JPEG XT headers and multi-segment assembly)
+    pub fn extract_jumbf_impl<R: Read + Seek>(
+        structure: &crate::structure::FileStructure,
+        reader: &mut R,
+    ) -> Result<Option<Vec<u8>>> {
+        if structure.jumbf_indices().is_empty() {
+            return Ok(None);
+        }
+
+        let mut result = Vec::new();
+        const JPEG_XT_HEADER_SIZE: usize = 8;
+
+        for &index in structure.jumbf_indices() {
+            if let crate::Segment::Jumbf {
+                offset,
+                size,
+                segments,
+                ..
+            } = &structure.segments()[index]
+            {
+                if segments.len() > 1 {
+                    // Multi-segment JUMBF: strip JPEG XT headers
+                    for (i, loc) in segments.iter().enumerate() {
+                        reader.seek(SeekFrom::Start(loc.offset))?;
+
+                        // First segment: skip JPEG XT header (8 bytes)
+                        // Continuation segments: skip JPEG XT header + repeated LBox/TBox (16 bytes total)
+                        let skip_bytes = if i == 0 {
+                            JPEG_XT_HEADER_SIZE
+                        } else {
+                            JPEG_XT_HEADER_SIZE + 8 // Skip JPEG XT header + repeated LBox/TBox
+                        };
+
+                        let data_size = loc.size.saturating_sub(skip_bytes as u64);
+                        if data_size > 0 {
+                            let mut skip_buf = vec![0u8; skip_bytes];
+                            reader.read_exact(&mut skip_buf)?; // Skip the header
+
+                            let mut buf = vec![0u8; data_size as usize];
+                            reader.read_exact(&mut buf)?;
+                            result.extend_from_slice(&buf);
+                        }
+                    }
+                } else {
+                    // Single segment: skip JPEG XT header
+                    reader.seek(SeekFrom::Start(*offset))?;
+
+                    let mut skip_buf = [0u8; JPEG_XT_HEADER_SIZE];
+                    reader.read_exact(&mut skip_buf)?;
+
+                    let data_size = size.saturating_sub(JPEG_XT_HEADER_SIZE as u64);
+                    if data_size > 0 {
+                        let mut buf = vec![0u8; data_size as usize];
+                        reader.read_exact(&mut buf)?;
+                        result.extend_from_slice(&buf);
+                    }
+                }
+            }
+        }
+
+        Ok(if result.is_empty() {
+            None
+        } else {
+            Some(result)
+        })
     }
 
     /// Fast single-pass parser
@@ -193,14 +337,67 @@ impl JpegHandler {
                             reader.seek(SeekFrom::Current(remaining as i64))?;
                         }
                     } else {
-                        // Other APP1 segment (probably EXIF)
-                        let remaining = (data_size as usize) - sig_buf.len();
-                        reader.seek(SeekFrom::Current(remaining as i64))?;
-                        structure.add_segment(Segment::Other {
-                            offset: segment_start,
-                            size: size + 2,
-                            marker: APP1,
-                        });
+                        // Check for EXIF segment
+                        #[cfg(feature = "thumbnails")]
+                        if sig_buf.len() >= EXIF_SIGNATURE.len()
+                            && &sig_buf[..EXIF_SIGNATURE.len()] == EXIF_SIGNATURE
+                        {
+                            // EXIF segment - parse for embedded thumbnail
+                            // Note: We already read sig_buf, so only read the remaining EXIF data
+                            let remaining_to_read = (data_size as usize) - sig_buf.len();
+                            let mut remaining_data = vec![0u8; remaining_to_read];
+                            reader.read_exact(&mut remaining_data)?;
+                            
+                            // Reconstruct full EXIF data (TIFF part only, without "Exif\0\0")
+                            let exif_tiff_start = EXIF_SIGNATURE.len();
+                            let mut exif_data = Vec::new();
+                            exif_data.extend_from_slice(&sig_buf[exif_tiff_start..]);
+                            exif_data.extend_from_slice(&remaining_data);
+                            
+                            // Parse TIFF structure to find thumbnail
+                            let thumbnail = match crate::tiff::parse_thumbnail_info(&exif_data) {
+                                Ok(Some(thumb_info)) => {
+                                    // Create EmbeddedThumbnail with location relative to EXIF segment start
+                                    let thumb_offset = segment_start + 4 + EXIF_SIGNATURE.len() as u64 + thumb_info.offset as u64;
+                                    Some(crate::thumbnail::EmbeddedThumbnail::new(
+                                        thumb_offset,
+                                        thumb_info.size as u64,
+                                        crate::thumbnail::ThumbnailFormat::Jpeg,
+                                        thumb_info.width,
+                                        thumb_info.height,
+                                    ))
+                                }
+                                Ok(None) => None,
+                                Err(_) => None, // Ignore EXIF parsing errors
+                            };
+                            
+                            structure.add_segment(Segment::Exif {
+                                offset: segment_start,
+                                size: size + 2,
+                                thumbnail,
+                            });
+                        } else {
+                            // Other APP1 segment
+                            let remaining = (data_size as usize) - sig_buf.len();
+                            reader.seek(SeekFrom::Current(remaining as i64))?;
+                            structure.add_segment(Segment::Other {
+                                offset: segment_start,
+                                size: size + 2,
+                                marker: APP1,
+                            });
+                        }
+                        
+                        #[cfg(not(feature = "thumbnails"))]
+                        {
+                            // Other APP1 segment (probably EXIF)
+                            let remaining = (data_size as usize) - sig_buf.len();
+                            reader.seek(SeekFrom::Current(remaining as i64))?;
+                            structure.add_segment(Segment::Other {
+                                offset: segment_start,
+                                size: size + 2,
+                                marker: APP1,
+                            });
+                        }
                     }
 
                     offset += 2 + size;
@@ -320,6 +517,22 @@ impl Default for JpegHandler {
 impl FormatHandler for JpegHandler {
     fn parse<R: Read + Seek>(&self, reader: &mut R) -> Result<FileStructure> {
         self.parse_impl(reader)
+    }
+
+    fn extract_xmp<R: Read + Seek>(
+        &self,
+        structure: &FileStructure,
+        reader: &mut R,
+    ) -> Result<Option<Vec<u8>>> {
+        Self::extract_xmp_impl(structure, reader)
+    }
+
+    fn extract_jumbf<R: Read + Seek>(
+        &self,
+        structure: &FileStructure,
+        reader: &mut R,
+    ) -> Result<Option<Vec<u8>>> {
+        Self::extract_jumbf_impl(structure, reader)
     }
 
     fn write<R: Read + Seek, W: Write>(
@@ -524,6 +737,12 @@ impl FormatHandler for JpegHandler {
                     }
 
                     // Copy image data
+                    copy_other_segment(segment, reader, writer, &mut current_read_pos)?;
+                }
+
+                #[cfg(feature = "thumbnails")]
+                Segment::Exif { .. } => {
+                    // Copy EXIF segment as-is (thumbnails are embedded in it)
                     copy_other_segment(segment, reader, writer, &mut current_read_pos)?;
                 }
 

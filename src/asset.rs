@@ -15,6 +15,9 @@ use std::path::Path;
 #[cfg(feature = "jpeg")]
 use crate::formats::jpeg::JpegHandler;
 
+#[cfg(feature = "png")]
+use crate::formats::png::PngHandler;
+
 /// A media asset that automatically detects and handles its format
 ///
 /// # Example
@@ -52,7 +55,7 @@ enum Handler {
     Jpeg(JpegHandler),
 
     #[cfg(feature = "png")]
-    Png, // TODO: Add PNG handler
+    Png(PngHandler),
 
     #[cfg(feature = "bmff")]
     Bmff, // TODO: Add BMFF handler
@@ -65,7 +68,7 @@ impl Handler {
             Handler::Jpeg(h) => h.parse(reader),
 
             #[cfg(feature = "png")]
-            Handler::Png => Err(Error::UnsupportedFormat),
+            Handler::Png(h) => h.parse(reader),
 
             #[cfg(feature = "bmff")]
             Handler::Bmff => Err(Error::UnsupportedFormat),
@@ -84,7 +87,7 @@ impl Handler {
             Handler::Jpeg(h) => h.write(structure, reader, writer, updates),
 
             #[cfg(feature = "png")]
-            Handler::Png => Err(Error::UnsupportedFormat),
+            Handler::Png(h) => h.write(structure, reader, writer, updates),
 
             #[cfg(feature = "bmff")]
             Handler::Bmff => Err(Error::UnsupportedFormat),
@@ -237,7 +240,7 @@ fn get_handler(format: Format) -> Result<Handler> {
         Format::Jpeg => Ok(Handler::Jpeg(JpegHandler::new())),
 
         #[cfg(feature = "png")]
-        Format::Png => Err(Error::UnsupportedFormat), // TODO: Implement PNG handler
+        Format::Png => Ok(Handler::Png(PngHandler::new())),
 
         #[cfg(feature = "bmff")]
         Format::Bmff => Err(Error::UnsupportedFormat), // TODO: Implement BMFF handler

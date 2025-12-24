@@ -73,6 +73,8 @@ mod error;
 mod formats;
 mod segment;
 mod structure;
+#[cfg(feature = "thumbnails")]
+mod tiff;
 pub mod thumbnail;
 
 pub use asset::{Asset, AssetBuilder};
@@ -86,6 +88,9 @@ pub use thumbnail::{
 
 #[cfg(feature = "jpeg")]
 pub use formats::jpeg::JpegHandler;
+
+#[cfg(feature = "png")]
+pub use formats::png::PngHandler;
 
 // Test utilities - only compiled for tests or when explicitly enabled
 #[cfg(any(test, feature = "test-utils"))]

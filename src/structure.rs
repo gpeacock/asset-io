@@ -1,11 +1,12 @@
 //! File structure representation
 
 use crate::{
-    error::{Error, Result},
+    error::Result,
     segment::{ByteRange, ChunkedSegmentReader, Location, Segment},
-    thumbnail::EmbeddedThumbnail,
     Format,
 };
+#[cfg(feature = "thumbnails")]
+use crate::thumbnail::EmbeddedThumbnail;
 use std::io::{Read, Seek, SeekFrom, Take};
 
 /// Represents the discovered structure of a file
@@ -84,147 +85,78 @@ impl FileStructure {
         &mut self.xmp_index
     }
 
+    /// Get reference to XMP index (for format-specific handlers)
+    pub fn xmp_index(&self) -> Option<usize> {
+        self.xmp_index
+    }
+
+    /// Get reference to jumbf indices (for format-specific handlers)
+    pub fn jumbf_indices(&self) -> &[usize] {
+        &self.jumbf_indices
+    }
+
+    /// Get reference to segments (for format-specific handlers)
+    pub fn segments(&self) -> &[Segment] {
+        &self.segments
+    }
+
     /// Get XMP data (loads lazily if needed, assembles extended parts if present)
+    /// Get XMP metadata (loads lazily, assembles extended parts if present)
+    ///
+    /// This method delegates to format-specific handlers for extraction,
+    /// as each format has its own conventions (e.g., JPEG Extended XMP, PNG iTXt chunks).
     pub fn xmp<R: Read + Seek>(&mut self, reader: &mut R) -> Result<Option<Vec<u8>>> {
-        let Some(index) = self.xmp_index else {
+        if self.xmp_index.is_none() {
             return Ok(None);
-        };
+        }
 
-        if let Segment::Xmp {
-            offset,
-            size,
-            data,
-            extended_parts,
-        } = &mut self.segments[index]
-        {
-            reader.seek(SeekFrom::Start(*offset))?;
-            let location = Location {
-                offset: *offset,
-                size: *size,
-            };
-            let main_xmp = data.load(reader, location)?.to_vec();
-
-            // If no extended parts, return main XMP
-            if extended_parts.is_empty() {
-                return Ok(Some(main_xmp));
+        // Delegate to format-specific XMP extraction
+        match self.format {
+            #[cfg(feature = "jpeg")]
+            crate::Format::Jpeg => {
+                use crate::formats::jpeg::JpegHandler;
+                JpegHandler::extract_xmp_impl(self, reader)
             }
-
-            // Assemble extended XMP
-            // Sort parts by chunk_offset
-            let mut parts = extended_parts.clone();
-            parts.sort_by_key(|p| p.chunk_offset);
-
-            // Validate all parts have same GUID and total_size
-            if parts.is_empty() {
-                return Ok(Some(main_xmp));
+            #[cfg(feature = "png")]
+            crate::Format::Png => {
+                use crate::formats::png::PngHandler;
+                PngHandler::extract_xmp_impl(self, reader)
             }
-
-            let first_guid = &parts[0].guid;
-            let total_size = parts[0].total_size;
-
-            for part in &parts {
-                if &part.guid != first_guid {
-                    return Err(Error::InvalidFormat(
-                        "Extended XMP parts have mismatched GUIDs".into(),
-                    ));
-                }
-                if part.total_size != total_size {
-                    return Err(Error::InvalidFormat(
-                        "Extended XMP parts have mismatched total sizes".into(),
-                    ));
-                }
+            #[cfg(feature = "bmff")]
+            crate::Format::Bmff => {
+                // TODO: Implement BMFF XMP extraction
+                Err(crate::Error::UnsupportedFormat)
             }
-
-            // Allocate buffer for complete extended XMP
-            let mut extended_xmp = vec![0u8; total_size as usize];
-
-            // Read each chunk into the correct position
-            for part in &parts {
-                reader.seek(SeekFrom::Start(part.location.offset))?;
-                let end_pos = (part.chunk_offset as usize + part.location.size as usize)
-                    .min(extended_xmp.len());
-                if part.chunk_offset as usize >= extended_xmp.len() {
-                    continue; // Skip malformed chunks
-                }
-                let chunk_data = &mut extended_xmp[part.chunk_offset as usize..end_pos];
-                reader.read_exact(chunk_data)?;
-            }
-
-            // According to XMP spec, extended XMP is the complete XMP
-            // (the main XMP just has a pointer to it via xmpNote:HasExtendedXMP)
-            // So we return the extended XMP, which contains everything
-            Ok(Some(extended_xmp))
-        } else {
-            Ok(None)
         }
     }
 
     /// Get JUMBF data (loads and assembles from multiple segments if needed)
+    ///
+    /// This method delegates to format-specific handlers for extraction,
+    /// as each format has its own conventions (e.g., JPEG XT headers, PNG caBX chunks).
     pub fn jumbf<R: Read + Seek>(&mut self, reader: &mut R) -> Result<Option<Vec<u8>>> {
         if self.jumbf_indices.is_empty() {
             return Ok(None);
         }
 
-        let mut result = Vec::new();
-
-        for &index in &self.jumbf_indices {
-            if let Segment::Jumbf {
-                offset,
-                size,
-                segments,
-                data: _,
-            } = &mut self.segments[index]
-            {
-                // If there are multiple segments, assemble them
-                // Each segment has: JPEG XT header (8 bytes: CI + En + Z) followed by JUMBF data
-                // We need to strip the JPEG XT header from each segment
-                const JPEG_XT_HEADER_SIZE: usize = 8;
-
-                if segments.len() > 1 {
-                    for (i, loc) in segments.iter().enumerate() {
-                        reader.seek(SeekFrom::Start(loc.offset))?;
-
-                        // First segment: skip JPEG XT header, keep everything else
-                        // Continuation segments: skip JPEG XT header + LBox + TBox (16 bytes total)
-                        let skip_bytes = if i == 0 {
-                            JPEG_XT_HEADER_SIZE
-                        } else {
-                            JPEG_XT_HEADER_SIZE + 8 // Skip JPEG XT header + repeated LBox/TBox
-                        };
-
-                        let data_size = loc.size.saturating_sub(skip_bytes as u64);
-                        if data_size > 0 {
-                            let mut buf = vec![0u8; skip_bytes];
-                            reader.read_exact(&mut buf)?; // Skip the header
-
-                            let mut buf = vec![0u8; data_size as usize];
-                            reader.read_exact(&mut buf)?;
-                            result.extend_from_slice(&buf);
-                        }
-                    }
-                } else {
-                    // Single segment: skip JPEG XT header
-                    reader.seek(SeekFrom::Start(*offset))?;
-
-                    // Skip JPEG XT header
-                    let mut skip_buf = [0u8; JPEG_XT_HEADER_SIZE];
-                    reader.read_exact(&mut skip_buf)?;
-
-                    let data_size = size.saturating_sub(JPEG_XT_HEADER_SIZE as u64);
-                    if data_size > 0 {
-                        let mut buf = vec![0u8; data_size as usize];
-                        reader.read_exact(&mut buf)?;
-                        result.extend_from_slice(&buf);
-                    }
-                }
+        // Delegate to format-specific JUMBF extraction
+        match self.format {
+            #[cfg(feature = "jpeg")]
+            crate::Format::Jpeg => {
+                use crate::formats::jpeg::JpegHandler;
+                JpegHandler::extract_jumbf_impl(self, reader)
+            }
+            #[cfg(feature = "png")]
+            crate::Format::Png => {
+                use crate::formats::png::PngHandler;
+                PngHandler::extract_jumbf_impl(self, reader)
+            }
+            #[cfg(feature = "bmff")]
+            crate::Format::Bmff => {
+                // TODO: Implement BMFF JUMBF extraction
+                Err(crate::Error::UnsupportedFormat)
             }
         }
-
-        Ok(if result.is_empty() {
-            None
-        } else {
-            Some(result)
-        })
     }
 
     /// Calculate hash of specified segments without loading entire file
@@ -442,34 +374,34 @@ impl FileStructure {
     /// }
     /// // Fall back to decoding main image
     /// ```
+    #[cfg(feature = "thumbnails")]
     pub fn embedded_thumbnail(&self) -> Result<Option<EmbeddedThumbnail>> {
-        // Dispatch to format-specific extraction
+        // Delegate to format-specific extraction
         match self.format {
-            Format::Jpeg => self.jpeg_embedded_thumbnail(),
+            #[cfg(feature = "jpeg")]
+            Format::Jpeg => self.extract_jpeg_thumbnail(),
             #[cfg(feature = "png")]
-            Format::Png => Ok(None), // PNG doesn't have embedded thumbnails
+            Format::Png => {
+                // PNG doesn't have embedded thumbnails in metadata
+                Ok(None)
+            }
             #[cfg(feature = "bmff")]
-            Format::Bmff => Ok(None), // TODO: Implement BMFF thumbnail extraction
+            Format::Bmff => {
+                // TODO: Implement BMFF thumbnail extraction
+                Ok(None)
+            }
         }
     }
-    
+
     /// Extract EXIF thumbnail from JPEG (if present)
-    ///
-    /// JPEG files often contain a thumbnail in their EXIF metadata.
-    /// This is typically 160x120 pixels and encoded as JPEG.
-    ///
-    /// Note: This currently returns None. Full implementation requires
-    /// parsing the EXIF/TIFF structure, which will be added when
-    /// EXIF segment support is implemented.
-    fn jpeg_embedded_thumbnail(&self) -> Result<Option<EmbeddedThumbnail>> {
-        // TODO: When EXIF support is added, parse the EXIF segment
-        // and extract the thumbnail from IFD1 if present.
-        //
-        // The EXIF thumbnail is typically at:
-        // - IFD1 (the thumbnail IFD)
-        // - Tags: JPEGInterchangeFormat (offset) and JPEGInterchangeFormatLength (size)
-        //
-        // For now, return None
+    #[cfg(all(feature = "thumbnails", feature = "jpeg"))]
+    fn extract_jpeg_thumbnail(&self) -> Result<Option<EmbeddedThumbnail>> {
+        // Find EXIF segment
+        for segment in &self.segments {
+            if let Segment::Exif { thumbnail, .. } = segment {
+                return Ok(thumbnail.clone());
+            }
+        }
         Ok(None)
     }
 }

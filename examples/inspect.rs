@@ -59,6 +59,14 @@ fn main() -> asset_io::Result<()> {
             asset_io::Segment::Xmp { .. } => "XMP   ".to_string(),
             asset_io::Segment::Jumbf { .. } => "JUMBF ".to_string(),
             asset_io::Segment::ImageData { .. } => "Image ".to_string(),
+            #[cfg(feature = "thumbnails")]
+            asset_io::Segment::Exif { thumbnail, .. } => {
+                if thumbnail.is_some() {
+                    "EXIF (with thumbnail)".to_string()
+                } else {
+                    "EXIF  ".to_string()
+                }
+            }
             asset_io::Segment::Other { marker, .. } => format!("Other (0x{:02X})", marker),
         };
         println!(
