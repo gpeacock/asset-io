@@ -191,11 +191,15 @@ pub enum Segment {
     /// - PNG: eXIf chunk with raw TIFF data (offset points to TIFF data)
     /// - TIFF: Native format (EXIF is the file itself)
     /// - HEIF/WebP: Can contain EXIF metadata
-    #[cfg(feature = "thumbnails")]
+    /// 
+    /// Note: The segment itself is always available. The `thumbnail` field is only
+    /// populated when the `thumbnails` feature is enabled and EXIF is parsed.
     Exif {
         offset: u64,
         size: u64,
         /// Embedded thumbnail location (if present in IFD1)
+        /// Only populated when `thumbnails` feature is enabled
+        #[cfg(feature = "thumbnails")]
         thumbnail: Option<crate::thumbnail::EmbeddedThumbnail>,
     },
 
@@ -216,12 +220,8 @@ impl Segment {
             | Self::Xmp { offset, size, .. }
             | Self::Jumbf { offset, size, .. }
             | Self::ImageData { offset, size, .. }
+            | Self::Exif { offset, size, .. }
             | Self::Other { offset, size, .. } => Location {
-                offset: *offset,
-                size: *size,
-            },
-            #[cfg(feature = "thumbnails")]
-            Self::Exif { offset, size, .. } => Location {
                 offset: *offset,
                 size: *size,
             },
@@ -251,7 +251,6 @@ impl Segment {
             Self::Xmp { .. } => "xmp",
             Self::Jumbf { .. } => "jumbf",
             Self::ImageData { .. } => "image_data",
-            #[cfg(feature = "thumbnails")]
             Self::Exif { .. } => "exif",
             Self::Other { marker, .. } => {
                 // For JPEG markers, use hex representation

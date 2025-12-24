@@ -234,13 +234,13 @@ impl PngHandler {
                     reader.seek(SeekFrom::Current((chunk_len + 4) as i64))?; // Skip data + CRC
                 }
 
-                #[cfg(feature = "thumbnails")]
                 b"eXIf" => {
                     // EXIF chunk (PNG extension, added in PNG 1.5.0 specification)
                     // Contains raw EXIF data in TIFF format (without the "Exif\0\0" header used in JPEG)
                     structure.add_segment(Segment::Exif {
                         offset: data_offset,
                         size: chunk_len,
+                        #[cfg(feature = "thumbnails")]
                         thumbnail: None, // TODO: Parse EXIF to extract thumbnail
                     });
                     reader.seek(SeekFrom::Current((chunk_len + 4) as i64))?; // Skip data + CRC
@@ -504,7 +504,6 @@ impl FormatHandler for PngHandler {
                     writer.write_all(&buffer)?;
                 }
 
-                #[cfg(feature = "thumbnails")]
                 Segment::Exif { offset, size, .. } => {
                     // Write eXIf chunk with proper structure
                     reader.seek(SeekFrom::Start(*offset))?;

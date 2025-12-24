@@ -22,7 +22,6 @@ const RST7: u8 = 0xD7;
 
 const XMP_SIGNATURE: &[u8] = b"http://ns.adobe.com/xap/1.0/\0";
 const XMP_EXTENDED_SIGNATURE: &[u8] = b"http://ns.adobe.com/xmp/extension/\0";
-#[cfg(feature = "thumbnails")]
 const EXIF_SIGNATURE: &[u8] = b"Exif\0\0";
 const C2PA_MARKER: &[u8] = b"c2pa";
 const MAX_MARKER_SIZE: usize = 65533; // Max size for JPEG marker segment
@@ -392,44 +391,61 @@ impl JpegHandler {
                         }
                     } else {
                         // Check for EXIF segment
-                        #[cfg(feature = "thumbnails")]
+                        // Check for EXIF segment
                         if sig_buf.len() >= EXIF_SIGNATURE.len()
                             && &sig_buf[..EXIF_SIGNATURE.len()] == EXIF_SIGNATURE
                         {
-                            // EXIF segment - parse for embedded thumbnail
-                            // Note: We already read sig_buf, so only read the remaining EXIF data
-                            let remaining_to_read = (data_size as usize) - sig_buf.len();
-                            let mut remaining_data = vec![0u8; remaining_to_read];
-                            reader.read_exact(&mut remaining_data)?;
+                            // EXIF segment
+                            #[cfg(feature = "thumbnails")]
+                            {
+                                // Parse for embedded thumbnail
+                                // Note: We already read sig_buf, so only read the remaining EXIF data
+                                let remaining_to_read = (data_size as usize) - sig_buf.len();
+                                let mut remaining_data = vec![0u8; remaining_to_read];
+                                reader.read_exact(&mut remaining_data)?;
+                                
+                                // Reconstruct full EXIF data (TIFF part only, without "Exif\0\0")
+                                let exif_tiff_start = EXIF_SIGNATURE.len();
+                                let mut exif_data = Vec::new();
+                                exif_data.extend_from_slice(&sig_buf[exif_tiff_start..]);
+                                exif_data.extend_from_slice(&remaining_data);
+                                
+                                // Parse TIFF structure to find thumbnail
+                                let thumbnail = match crate::tiff::parse_thumbnail_info(&exif_data) {
+                                    Ok(Some(thumb_info)) => {
+                                        // Create EmbeddedThumbnail with location relative to EXIF segment start
+                                        let thumb_offset = segment_start + 4 + EXIF_SIGNATURE.len() as u64 + thumb_info.offset as u64;
+                                        Some(crate::thumbnail::EmbeddedThumbnail::new(
+                                            thumb_offset,
+                                            thumb_info.size as u64,
+                                            crate::thumbnail::ThumbnailFormat::Jpeg,
+                                            thumb_info.width,
+                                            thumb_info.height,
+                                        ))
+                                    }
+                                    Ok(None) => None,
+                                    Err(_) => None, // Ignore EXIF parsing errors
+                                };
+                                
+                                structure.add_segment(Segment::Exif {
+                                    offset: segment_start,
+                                    size: size + 2,
+                                    thumbnail,
+                                });
+                            }
                             
-                            // Reconstruct full EXIF data (TIFF part only, without "Exif\0\0")
-                            let exif_tiff_start = EXIF_SIGNATURE.len();
-                            let mut exif_data = Vec::new();
-                            exif_data.extend_from_slice(&sig_buf[exif_tiff_start..]);
-                            exif_data.extend_from_slice(&remaining_data);
-                            
-                            // Parse TIFF structure to find thumbnail
-                            let thumbnail = match crate::tiff::parse_thumbnail_info(&exif_data) {
-                                Ok(Some(thumb_info)) => {
-                                    // Create EmbeddedThumbnail with location relative to EXIF segment start
-                                    let thumb_offset = segment_start + 4 + EXIF_SIGNATURE.len() as u64 + thumb_info.offset as u64;
-                                    Some(crate::thumbnail::EmbeddedThumbnail::new(
-                                        thumb_offset,
-                                        thumb_info.size as u64,
-                                        crate::thumbnail::ThumbnailFormat::Jpeg,
-                                        thumb_info.width,
-                                        thumb_info.height,
-                                    ))
-                                }
-                                Ok(None) => None,
-                                Err(_) => None, // Ignore EXIF parsing errors
-                            };
-                            
-                            structure.add_segment(Segment::Exif {
-                                offset: segment_start,
-                                size: size + 2,
-                                thumbnail,
-                            });
+                            #[cfg(not(feature = "thumbnails"))]
+                            {
+                                // Just record the EXIF segment without parsing thumbnails
+                                structure.add_segment(Segment::Exif {
+                                    offset: segment_start,
+                                    size: size + 2,
+                                });
+                                
+                                // Skip remaining EXIF data
+                                let remaining = (data_size as usize) - sig_buf.len();
+                                reader.seek(SeekFrom::Current(remaining as i64))?;
+                            }
                         } else {
                             // Other APP1 segment
                             let remaining = (data_size as usize) - sig_buf.len();
@@ -441,7 +457,9 @@ impl JpegHandler {
                             });
                         }
                         
-                        #[cfg(not(feature = "thumbnails"))]
+                        // If not XMP or EXIF, treat as Other APP1 segment
+                        if sig_buf.len() < EXIF_SIGNATURE.len()
+                            || &sig_buf[..EXIF_SIGNATURE.len()] != EXIF_SIGNATURE
                         {
                             // Other APP1 segment (probably EXIF)
                             let remaining = (data_size as usize) - sig_buf.len();
@@ -828,7 +846,6 @@ impl FormatHandler for JpegHandler {
                     copy_other_segment(segment, reader, writer, &mut current_read_pos)?;
                 }
 
-                #[cfg(feature = "thumbnails")]
                 Segment::Exif { .. } => {
                     // Copy EXIF segment as-is (thumbnails are embedded in it)
                     copy_other_segment(segment, reader, writer, &mut current_read_pos)?;

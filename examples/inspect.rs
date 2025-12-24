@@ -59,11 +59,21 @@ fn main() -> asset_io::Result<()> {
             asset_io::Segment::Xmp { .. } => "XMP   ".to_string(),
             asset_io::Segment::Jumbf { .. } => "JUMBF ".to_string(),
             asset_io::Segment::ImageData { .. } => "Image ".to_string(),
-            #[cfg(feature = "thumbnails")]
-            asset_io::Segment::Exif { thumbnail, .. } => {
-                if thumbnail.is_some() {
-                    "EXIF (with thumbnail)".to_string()
-                } else {
+            asset_io::Segment::Exif { .. } => {
+                #[cfg(feature = "thumbnails")]
+                {
+                    if let asset_io::Segment::Exif { thumbnail, .. } = segment {
+                        if thumbnail.is_some() {
+                            "EXIF (with thumbnail)".to_string()
+                        } else {
+                            "EXIF  ".to_string()
+                        }
+                    } else {
+                        "EXIF  ".to_string()
+                    }
+                }
+                #[cfg(not(feature = "thumbnails"))]
+                {
                     "EXIF  ".to_string()
                 }
             }
