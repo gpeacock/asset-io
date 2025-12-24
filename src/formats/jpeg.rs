@@ -248,7 +248,6 @@ impl JpegHandler {
                     structure.add_segment(Segment::ImageData {
                         offset: sos_start,
                         size: image_end - sos_start,
-                        hashable: true,
                     });
 
                     // Add EOI segment

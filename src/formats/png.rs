@@ -132,11 +132,10 @@ impl PngHandler {
                 }
 
                 b"IDAT" => {
-                    // Image data - hashable
+                    // Image data
                     structure.add_segment(Segment::ImageData {
                         offset: data_offset,
                         size: chunk_len,
-                        hashable: true,
                     });
                     reader.seek(SeekFrom::Current((chunk_len + 4) as i64))?; // Skip data + CRC
                 }

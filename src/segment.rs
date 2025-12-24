@@ -164,8 +164,6 @@ pub enum Segment {
     ImageData {
         offset: u64,
         size: u64,
-        /// Whether this should be included in hash calculations
-        hashable: bool,
     },
 
     /// EXIF metadata (JPEG-specific, but could apply to other formats)
@@ -206,12 +204,19 @@ impl Segment {
         }
     }
 
-    /// Check if this segment is hashable (legacy method for ImageData)
+    /// Check if this segment is hashable (DEPRECATED)
+    /// 
+    /// This method is deprecated. Hashing policy should be determined by the caller
+    /// using `hashable_ranges()` with exclusion patterns, not by the parser.
+    /// 
+    /// This always returns false now. Use `segments_by_path("image_data")` or
+    /// `hashable_ranges()` with appropriate exclusions instead.
+    #[deprecated(
+        since = "0.1.0",
+        note = "Use hashable_ranges() with exclusion patterns instead"
+    )]
     pub fn is_hashable(&self) -> bool {
-        match self {
-            Self::ImageData { hashable, .. } => *hashable,
-            _ => false,
-        }
+        false
     }
     
     /// Get a human-readable path/identifier for this segment
