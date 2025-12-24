@@ -4,7 +4,7 @@
 //! without needing to know the specific format.
 
 use crate::{
-    detect_format, error::Result, get_handler, structure::FileStructure, Format, FormatHandler,
+    detect_format, error::Result, get_handler, structure::Structure, Format, FormatHandler,
     Updates,
 };
 use std::fs::File;
@@ -44,7 +44,7 @@ use crate::formats::png::PngHandler;
 /// ```
 pub struct Asset<R: Read + Seek> {
     reader: R,
-    structure: FileStructure,
+    structure: Structure,
     handler: Handler,
 }
 
@@ -58,7 +58,7 @@ pub(crate) enum Handler {
 }
 
 impl Handler {
-    fn parse<R: Read + Seek>(&self, reader: &mut R) -> Result<FileStructure> {
+    fn parse<R: Read + Seek>(&self, reader: &mut R) -> Result<Structure> {
         match self {
             #[cfg(feature = "jpeg")]
             Handler::Jpeg(h) => h.parse(reader),
@@ -70,7 +70,7 @@ impl Handler {
 
     fn write<R: Read + Seek, W: Write>(
         &self,
-        structure: &FileStructure,
+        structure: &Structure,
         reader: &mut R,
         writer: &mut W,
         updates: &Updates,
@@ -144,7 +144,7 @@ impl<R: Read + Seek> Asset<R> {
     }
 
     /// Get the file structure
-    pub fn structure(&self) -> &FileStructure {
+    pub fn structure(&self) -> &Structure {
         &self.structure
     }
 

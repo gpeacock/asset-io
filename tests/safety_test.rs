@@ -45,7 +45,7 @@ fn test_tiff_ifd_tag_limit_exists() {
 #[test]
 #[cfg(feature = "memory-mapped")]
 fn test_mmap_bounds_checking_with_overflow() {
-    use asset_io::FileStructure;
+    use asset_io::Structure;
     use std::fs::File;
     use std::io::Write;
 
@@ -60,7 +60,7 @@ fn test_mmap_bounds_checking_with_overflow() {
     let file = File::open(temp_path).unwrap();
     let mmap = unsafe { memmap2::Mmap::map(&file).unwrap() };
 
-    let mut structure = FileStructure::new(Format::Jpeg);
+    let mut structure = Structure::new(Format::Jpeg);
     structure = structure.with_mmap(mmap);
 
     // Test 1: Out of bounds access returns None

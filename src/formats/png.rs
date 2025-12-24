@@ -3,7 +3,7 @@
 use crate::{
     error::{Error, Result},
     segment::{LazyData, Location, Segment},
-    structure::FileStructure,
+    structure::Structure,
     Format, FormatHandler, Updates,
 };
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
@@ -80,7 +80,7 @@ impl PngHandler {
 
     /// Extract XMP data from PNG file (simple iTXt chunk, no extended XMP)
     pub fn extract_xmp_impl<R: Read + Seek>(
-        structure: &crate::structure::FileStructure,
+        structure: &crate::structure::Structure,
         reader: &mut R,
     ) -> Result<Option<Vec<u8>>> {
         let Some(index) = structure.xmp_index() else {
@@ -102,7 +102,7 @@ impl PngHandler {
 
     /// Extract JUMBF data from PNG file (direct data from caBX chunks, no headers to strip)
     pub fn extract_jumbf_impl<R: Read + Seek>(
-        structure: &crate::structure::FileStructure,
+        structure: &crate::structure::Structure,
         reader: &mut R,
     ) -> Result<Option<Vec<u8>>> {
         if structure.jumbf_indices().is_empty() {
@@ -130,8 +130,8 @@ impl PngHandler {
     }
 
     /// Fast single-pass parser
-    fn parse_impl<R: Read + Seek>(&self, reader: &mut R) -> Result<FileStructure> {
-        let mut structure = FileStructure::new(Format::Png);
+    fn parse_impl<R: Read + Seek>(&self, reader: &mut R) -> Result<Structure> {
+        let mut structure = Structure::new(Format::Png);
 
         // Check PNG signature
         let mut sig = [0u8; 8];
@@ -420,13 +420,13 @@ impl FormatHandler for PngHandler {
         }
     }
 
-    fn parse<R: Read + Seek>(&self, reader: &mut R) -> Result<FileStructure> {
+    fn parse<R: Read + Seek>(&self, reader: &mut R) -> Result<Structure> {
         self.parse_impl(reader)
     }
 
     fn extract_xmp<R: Read + Seek>(
         &self,
-        structure: &FileStructure,
+        structure: &Structure,
         reader: &mut R,
     ) -> Result<Option<Vec<u8>>> {
         Self::extract_xmp_impl(structure, reader)
@@ -434,7 +434,7 @@ impl FormatHandler for PngHandler {
 
     fn extract_jumbf<R: Read + Seek>(
         &self,
-        structure: &FileStructure,
+        structure: &Structure,
         reader: &mut R,
     ) -> Result<Option<Vec<u8>>> {
         Self::extract_jumbf_impl(structure, reader)
@@ -442,7 +442,7 @@ impl FormatHandler for PngHandler {
 
     fn write<R: Read + Seek, W: Write>(
         &self,
-        structure: &FileStructure,
+        structure: &Structure,
         reader: &mut R,
         writer: &mut W,
         updates: &Updates,
@@ -592,7 +592,7 @@ impl FormatHandler for PngHandler {
     #[cfg(feature = "thumbnails")]
     fn generate_thumbnail<R: Read + Seek>(
         &self,
-        _structure: &FileStructure,
+        _structure: &Structure,
         _reader: &mut R,
         _request: &crate::ThumbnailRequest,
     ) -> Result<Option<Vec<u8>>> {

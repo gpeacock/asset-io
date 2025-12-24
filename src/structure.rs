@@ -1,4 +1,4 @@
-//! File structure representation
+//! Structure representation for parsed assets
 
 #[cfg(feature = "thumbnails")]
 use crate::thumbnail::EmbeddedThumbnail;
@@ -9,16 +9,20 @@ use crate::{
 };
 use std::io::{Read, Seek, SeekFrom, Take};
 
-/// Represents the discovered structure of a file
+/// Represents the discovered structure of a parsed asset
+///
+/// This structure works with any `Read + Seek` source (files, buffers, streams).
+/// It contains the parsed segment layout and provides efficient access methods
+/// for metadata extraction and hashing operations.
 #[derive(Debug)]
-pub struct FileStructure {
-    /// All segments in the file
+pub struct Structure {
+    /// All segments in the asset
     pub segments: Vec<Segment>,
 
-    /// File format
+    /// Asset format
     pub format: Format,
 
-    /// Total file size
+    /// Total asset size
     pub total_size: u64,
 
     /// Quick lookup: index of XMP segment (if any)
@@ -32,8 +36,8 @@ pub struct FileStructure {
     mmap: Option<std::sync::Arc<memmap2::Mmap>>,
 }
 
-impl FileStructure {
-    /// Create a new file structure
+impl Structure {
+    /// Create a new structure for the given format
     pub fn new(format: Format) -> Self {
         Self {
             segments: Vec::new(),
@@ -220,7 +224,7 @@ impl FileStructure {
     /// # Example
     /// ```no_run
     /// # use asset_io::*;
-    /// # fn example(structure: &FileStructure) -> Result<()> {
+    /// # fn example(structure: &Structure) -> Result<()> {
     /// // Hash everything except JUMBF segments
     /// let ranges = structure.hashable_ranges(&["jumbf"]);
     /// # Ok(())

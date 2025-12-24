@@ -1,6 +1,6 @@
 //! Format-specific handlers
 
-use crate::{error::Result, structure::FileStructure, Updates};
+use crate::{error::Result, structure::Structure, Updates};
 use std::io::{Read, Seek, Write};
 
 // Forward declare Format here so handlers can use it
@@ -34,7 +34,7 @@ pub trait FormatHandler: Send + Sync {
     ///
     /// This discovers all segments, XMP, and JUMBF locations without
     /// loading the actual data into memory.
-    fn parse<R: Read + Seek>(&self, reader: &mut R) -> Result<FileStructure>;
+    fn parse<R: Read + Seek>(&self, reader: &mut R) -> Result<Structure>;
 
     /// Write file with updates in single streaming pass
     ///
@@ -42,7 +42,7 @@ pub trait FormatHandler: Send + Sync {
     /// without loading the entire file into memory.
     fn write<R: Read + Seek, W: Write>(
         &self,
-        structure: &FileStructure,
+        structure: &Structure,
         reader: &mut R,
         writer: &mut W,
         updates: &Updates,
@@ -54,7 +54,7 @@ pub trait FormatHandler: Send + Sync {
     /// with multi-segment assembly, or PNG's simple iTXt chunks.
     fn extract_xmp<R: Read + Seek>(
         &self,
-        structure: &FileStructure,
+        structure: &Structure,
         reader: &mut R,
     ) -> Result<Option<Vec<u8>>>;
 
@@ -64,7 +64,7 @@ pub trait FormatHandler: Send + Sync {
     /// multi-segment assembly, etc.
     fn extract_jumbf<R: Read + Seek>(
         &self,
-        structure: &FileStructure,
+        structure: &Structure,
         reader: &mut R,
     ) -> Result<Option<Vec<u8>>>;
 
@@ -72,7 +72,7 @@ pub trait FormatHandler: Send + Sync {
     #[cfg(feature = "thumbnails")]
     fn generate_thumbnail<R: Read + Seek>(
         &self,
-        structure: &FileStructure,
+        structure: &Structure,
         reader: &mut R,
         request: &crate::ThumbnailRequest,
     ) -> Result<Option<Vec<u8>>>;

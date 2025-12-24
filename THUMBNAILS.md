@@ -36,7 +36,7 @@ External crates implement actual image decoding and thumbnail generation using t
 
 ## Core API
 
-### FileStructure Methods
+### Structure Methods
 
 ```rust
 /// Get the byte range of compressed image data
@@ -279,7 +279,7 @@ pub fn generate_jpeg_thumbnail_fast(data: &[u8]) -> Result<Vec<u8>> {
 ### When EXIF Support is Added
 
 ```rust
-impl FileStructure {
+impl Structure {
     /// Extract EXIF thumbnail from JPEG
     fn jpeg_embedded_thumbnail(&self) -> Result<Option<EmbeddedThumbnail>> {
         // Parse EXIF segment
@@ -293,7 +293,7 @@ impl FileStructure {
 ### When HEIF Support is Added
 
 ```rust
-impl FileStructure {
+impl Structure {
     /// Extract 'thmb' thumbnail from HEIF
     fn heif_embedded_thumbnail(&self) -> Result<Option<EmbeddedThumbnail>> {
         // Parse HEIF boxes

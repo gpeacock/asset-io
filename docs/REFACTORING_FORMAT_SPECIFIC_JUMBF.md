@@ -2,7 +2,7 @@
 
 ## Problem
 
-The original implementation had format-specific metadata extraction logic in `FileStructure`:
+The original implementation had format-specific metadata extraction logic in `Structure`:
 
 ```rust
 // BAD: Format-specific logic in generic structure code
@@ -33,19 +33,19 @@ Moved format-specific extraction logic into each format handler:
 
 ```rust
 pub trait FormatHandler: Send + Sync {
-    fn parse<R: Read + Seek>(&self, reader: &mut R) -> Result<FileStructure>;
+    fn parse<R: Read + Seek>(&self, reader: &mut R) -> Result<Structure>;
     fn write<R: Read + Seek, W: Write>(...) -> Result<()>;
     
     // NEW: Format-specific metadata extraction
     fn extract_xmp<R: Read + Seek>(
         &self,
-        structure: &FileStructure,
+        structure: &Structure,
         reader: &mut R,
     ) -> Result<Option<Vec<u8>>>;
     
     fn extract_jumbf<R: Read + Seek>(
         &self,
-        structure: &FileStructure,
+        structure: &Structure,
         reader: &mut R,
     ) -> Result<Option<Vec<u8>>>;
 }
@@ -99,7 +99,7 @@ impl PngHandler {
 }
 ```
 
-### 4. Simplified `FileStructure` to delegate
+### 4. Simplified `Structure` to delegate
 
 ```rust
 pub fn xmp<R: Read + Seek>(&mut self, reader: &mut R) -> Result<Option<Vec<u8>>> {
@@ -130,7 +130,7 @@ pub fn jumbf<R: Read + Seek>(&mut self, reader: &mut R) -> Result<Option<Vec<u8>
 ## Benefits
 
 1. **Separation of Concerns**: Format-specific logic lives with format implementations
-2. **Scalability**: Adding new formats (HEIF, WebP, AVIF, etc.) doesn't pollute `FileStructure`
+2. **Scalability**: Adding new formats (HEIF, WebP, AVIF, etc.) doesn't pollute `Structure`
 3. **Maintainability**: JPEG XT headers, PNG chunks, BMFF boxes - each handled by experts in that format
 4. **Testability**: Can unit-test format-specific extraction independently
 5. **Documentation**: Each handler documents its own metadata conventions
@@ -173,19 +173,19 @@ Each will have its own `extract_xmp_impl` and `extract_jumbf_impl` with format-a
 
 ## Migration Guide
 
-If you were directly using `FileStructure::xmp()` or `FileStructure::jumbf()`, no changes needed - the API is the same.
+If you were directly using `Structure::xmp()` or `Structure::jumbf()`, no changes needed - the API is the same.
 
 If you were implementing custom format handlers, add both methods:
 
 ```rust
 impl FormatHandler for MyHandler {
-    fn parse<R: Read + Seek>(&self, reader: &mut R) -> Result<FileStructure> { ... }
+    fn parse<R: Read + Seek>(&self, reader: &mut R) -> Result<Structure> { ... }
     fn write<R: Read + Seek, W: Write>(...) -> Result<()> { ... }
     
     // NEW: Required methods
     fn extract_xmp<R: Read + Seek>(
         &self,
-        structure: &FileStructure,
+        structure: &Structure,
         reader: &mut R,
     ) -> Result<Option<Vec<u8>>> {
         // Your format-specific XMP extraction logic
@@ -194,7 +194,7 @@ impl FormatHandler for MyHandler {
     
     fn extract_jumbf<R: Read + Seek>(
         &self,
-        structure: &FileStructure,
+        structure: &Structure,
         reader: &mut R,
     ) -> Result<Option<Vec<u8>>> {
         // Your format-specific JUMBF extraction logic
@@ -217,5 +217,5 @@ The refactoring is **behavior-preserving** - no functional changes, only archite
 
 ## Key Insight
 
-**Extended XMP is JPEG-specific!** PNG doesn't support multi-chunk XMP assembly. This was a critical finding during the refactoring - the original code in `FileStructure` was doing extended XMP assembly for all formats, but only JPEG uses this mechanism.
+**Extended XMP is JPEG-specific!** PNG doesn't support multi-chunk XMP assembly. This was a critical finding during the refactoring - the original code in `Structure` was doing extended XMP assembly for all formats, but only JPEG uses this mechanism.
 

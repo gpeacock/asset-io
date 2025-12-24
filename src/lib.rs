@@ -84,7 +84,7 @@ pub use segment::{
     ByteRange, ChunkedSegmentReader, LazyData, Location, Segment, SegmentMetadata,
     DEFAULT_CHUNK_SIZE, MAX_SEGMENT_SIZE,
 };
-pub use structure::FileStructure;
+pub use structure::Structure;
 pub use thumbnail::{
     format_hint, EmbeddedThumbnail, ThumbnailFormat, ThumbnailGenerator, ThumbnailOptions,
 };

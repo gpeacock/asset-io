@@ -3,7 +3,7 @@
 use crate::{
     error::{Error, Result},
     segment::{LazyData, Location, Segment},
-    structure::FileStructure,
+    structure::Structure,
     Format, FormatHandler, Updates,
 };
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
@@ -93,7 +93,7 @@ impl JpegHandler {
 
     /// Extract XMP data from JPEG file (handles extended XMP with multi-segment assembly)
     pub fn extract_xmp_impl<R: Read + Seek>(
-        structure: &crate::structure::FileStructure,
+        structure: &crate::structure::Structure,
         reader: &mut R,
     ) -> Result<Option<Vec<u8>>> {
         let Some(index) = structure.xmp_index() else {
@@ -198,7 +198,7 @@ impl JpegHandler {
 
     /// Extract JUMBF data from JPEG file (handles JPEG XT headers and multi-segment assembly)
     pub fn extract_jumbf_impl<R: Read + Seek>(
-        structure: &crate::structure::FileStructure,
+        structure: &crate::structure::Structure,
         reader: &mut R,
     ) -> Result<Option<Vec<u8>>> {
         if structure.jumbf_indices().is_empty() {
@@ -264,8 +264,8 @@ impl JpegHandler {
     }
 
     /// Fast single-pass parser
-    fn parse_impl<R: Read + Seek>(&self, reader: &mut R) -> Result<FileStructure> {
-        let mut structure = FileStructure::new(Format::Jpeg);
+    fn parse_impl<R: Read + Seek>(&self, reader: &mut R) -> Result<Structure> {
+        let mut structure = Structure::new(Format::Jpeg);
 
         // Check SOI marker
         if reader.read_u8()? != 0xFF || reader.read_u8()? != SOI {
@@ -673,13 +673,13 @@ impl FormatHandler for JpegHandler {
         }
     }
 
-    fn parse<R: Read + Seek>(&self, reader: &mut R) -> Result<FileStructure> {
+    fn parse<R: Read + Seek>(&self, reader: &mut R) -> Result<Structure> {
         self.parse_impl(reader)
     }
 
     fn extract_xmp<R: Read + Seek>(
         &self,
-        structure: &FileStructure,
+        structure: &Structure,
         reader: &mut R,
     ) -> Result<Option<Vec<u8>>> {
         Self::extract_xmp_impl(structure, reader)
@@ -687,7 +687,7 @@ impl FormatHandler for JpegHandler {
 
     fn extract_jumbf<R: Read + Seek>(
         &self,
-        structure: &FileStructure,
+        structure: &Structure,
         reader: &mut R,
     ) -> Result<Option<Vec<u8>>> {
         Self::extract_jumbf_impl(structure, reader)
@@ -695,7 +695,7 @@ impl FormatHandler for JpegHandler {
 
     fn write<R: Read + Seek, W: Write>(
         &self,
-        structure: &FileStructure,
+        structure: &Structure,
         reader: &mut R,
         writer: &mut W,
         updates: &Updates,
@@ -952,7 +952,7 @@ impl FormatHandler for JpegHandler {
     #[cfg(feature = "thumbnails")]
     fn generate_thumbnail<R: Read + Seek>(
         &self,
-        _structure: &FileStructure,
+        _structure: &Structure,
         _reader: &mut R,
         _request: &crate::ThumbnailRequest,
     ) -> Result<Option<Vec<u8>>> {
