@@ -154,6 +154,31 @@ impl<R: Read + Seek> Asset<R> {
     pub fn structure(&self) -> &FileStructure {
         &self.structure
     }
+
+    /// Get a mutable reference to the reader
+    /// 
+    /// This allows advanced operations like chunked reading for hashing
+    pub fn reader_mut(&mut self) -> &mut R {
+        &mut self.reader
+    }
+
+    /// Create a chunked reader for a byte range (convenience method)
+    pub fn read_range_chunked(
+        &mut self,
+        range: crate::ByteRange,
+        chunk_size: usize,
+    ) -> Result<crate::ChunkedSegmentReader<std::io::Take<&mut R>>> {
+        self.structure.read_range_chunked(&mut self.reader, range, chunk_size)
+    }
+
+    /// Create a chunked reader for a segment (convenience method)
+    pub fn read_segment_chunked(
+        &mut self,
+        segment_index: usize,
+        chunk_size: usize,
+    ) -> Result<crate::ChunkedSegmentReader<std::io::Take<&mut R>>> {
+        self.structure.read_segment_chunked(&mut self.reader, segment_index, chunk_size)
+    }
 }
 
 impl Asset<File> {

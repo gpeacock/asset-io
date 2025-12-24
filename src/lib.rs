@@ -77,7 +77,7 @@ mod structure;
 pub use asset::{Asset, AssetBuilder};
 pub use error::{Error, Result};
 pub use formats::FormatHandler;
-pub use segment::{LazyData, Location, Segment, XmpExtendedPart};
+pub use segment::{LazyData, Location, ByteRange, Segment, XmpExtendedPart, ChunkedSegmentReader, DEFAULT_CHUNK_SIZE};
 pub use structure::FileStructure;
 
 #[cfg(feature = "jpeg")]

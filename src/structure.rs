@@ -2,10 +2,10 @@
 
 use crate::{
     error::{Error, Result},
-    segment::{Location, Segment},
+    segment::{ByteRange, ChunkedSegmentReader, Location, Segment},
     Format,
 };
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom, Take};
 
 /// Represents the discovered structure of a file
 #[derive(Debug)]
@@ -24,6 +24,10 @@ pub struct FileStructure {
 
     /// Quick lookup: indices of JUMBF segments
     jumbf_indices: Vec<usize>,
+
+    /// Memory-mapped file data (optional, for zero-copy access)
+    #[cfg(feature = "memory-mapped")]
+    mmap: Option<std::sync::Arc<memmap2::Mmap>>,
 }
 
 impl FileStructure {
@@ -35,7 +39,26 @@ impl FileStructure {
             total_size: 0,
             xmp_index: None,
             jumbf_indices: Vec::new(),
+            #[cfg(feature = "memory-mapped")]
+            mmap: None,
         }
+    }
+
+    /// Attach memory-mapped data to this structure (zero-copy access)
+    #[cfg(feature = "memory-mapped")]
+    pub fn with_mmap(mut self, mmap: memmap2::Mmap) -> Self {
+        self.mmap = Some(std::sync::Arc::new(mmap));
+        self
+    }
+
+    /// Get a slice of data from memory-mapped file (zero-copy)
+    #[cfg(feature = "memory-mapped")]
+    pub fn get_mmap_slice(&self, range: ByteRange) -> Option<&[u8]> {
+        self.mmap.as_ref().map(|mmap| {
+            let start = range.offset as usize;
+            let end = start + range.size as usize;
+            &mmap[start..end]
+        })
     }
 
     /// Add a segment and update indices
@@ -232,7 +255,7 @@ impl FileStructure {
         Ok(())
     }
 
-    /// Get all hashable segments
+    /// Get all hashable segments (legacy method - only checks ImageData)
     pub fn hashable_segments(&self) -> Vec<usize> {
         self.segments
             .iter()
@@ -240,5 +263,126 @@ impl FileStructure {
             .filter(|(_, seg)| seg.is_hashable())
             .map(|(i, _)| i)
             .collect()
+    }
+
+    // ============================================================================
+    // Range-based Data Access API (for C2PA hashing)
+    // ============================================================================
+
+    /// Read a specific byte range from the file
+    /// 
+    /// This is useful for data hash models that need to hash arbitrary ranges.
+    pub fn read_range<R: Read + Seek>(
+        &self,
+        reader: &mut R,
+        range: ByteRange,
+    ) -> Result<Vec<u8>> {
+        reader.seek(SeekFrom::Start(range.offset))?;
+        let mut buffer = vec![0u8; range.size as usize];
+        reader.read_exact(&mut buffer)?;
+        Ok(buffer)
+    }
+
+    /// Create a chunked reader for a byte range
+    /// 
+    /// This allows streaming through a range without loading it all into memory.
+    /// Useful for hashing large ranges efficiently.
+    pub fn read_range_chunked<'a, R: Read + Seek>(
+        &self,
+        reader: &'a mut R,
+        range: ByteRange,
+        chunk_size: usize,
+    ) -> Result<ChunkedSegmentReader<Take<&'a mut R>>> {
+        reader.seek(SeekFrom::Start(range.offset))?;
+        let taken = reader.take(range.size);
+        Ok(ChunkedSegmentReader::new(taken, range.size, chunk_size))
+    }
+
+    /// Get byte ranges for all segments EXCEPT those matching the exclusion patterns
+    /// 
+    /// This is useful for C2PA data hash which needs to hash everything except
+    /// the C2PA segment itself.
+    /// 
+    /// # Example
+    /// ```no_run
+    /// # use jumbf_io::*;
+    /// # fn example(structure: &FileStructure) -> Result<()> {
+    /// // Hash everything except JUMBF segments
+    /// let ranges = structure.hashable_ranges(&["jumbf"]);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn hashable_ranges(&self, exclusions: &[&str]) -> Vec<ByteRange> {
+        let mut ranges = Vec::new();
+        let mut last_end = 0u64;
+
+        for segment in &self.segments {
+            let should_exclude = exclusions
+                .iter()
+                .any(|pattern| segment.path().contains(pattern));
+
+            if should_exclude {
+                let loc = segment.location();
+                // Add range before this excluded segment
+                if last_end < loc.offset {
+                    ranges.push(ByteRange {
+                        offset: last_end,
+                        size: loc.offset - last_end,
+                    });
+                }
+                last_end = loc.offset + loc.size;
+            }
+        }
+
+        // Add final range to end of file
+        if last_end < self.total_size {
+            ranges.push(ByteRange {
+                offset: last_end,
+                size: self.total_size - last_end,
+            });
+        }
+
+        ranges
+    }
+
+    /// Get segments matching a path pattern
+    /// 
+    /// Useful for box-based hashing where specific segments are hashed by name.
+    pub fn segments_by_path(&self, pattern: &str) -> Vec<(usize, &Segment)> {
+        self.segments
+            .iter()
+            .enumerate()
+            .filter(|(_, seg)| seg.path().contains(pattern))
+            .collect()
+    }
+
+    /// Get all segments except those matching exclusion patterns
+    /// 
+    /// Returns (index, segment, location) for each segment to be hashed.
+    pub fn segments_excluding(&self, exclusions: &[&str]) -> Vec<(usize, &Segment, Location)> {
+        self.segments
+            .iter()
+            .enumerate()
+            .filter(|(_, seg)| {
+                !exclusions.iter().any(|pattern| seg.path().contains(pattern))
+            })
+            .map(|(i, seg)| (i, seg, seg.location()))
+            .collect()
+    }
+
+    /// Create a chunked reader for a specific segment
+    /// 
+    /// This allows streaming through segment data without loading it all into memory.
+    pub fn read_segment_chunked<'a, R: Read + Seek>(
+        &self,
+        reader: &'a mut R,
+        segment_index: usize,
+        chunk_size: usize,
+    ) -> Result<ChunkedSegmentReader<Take<&'a mut R>>> {
+        let segment = &self.segments[segment_index];
+        let loc = segment.location();
+        reader.seek(SeekFrom::Start(loc.offset))?;
+        let taken = reader.take(loc.size);
+        Ok(ChunkedSegmentReader::new(taken, loc.size, chunk_size))
     }
 }

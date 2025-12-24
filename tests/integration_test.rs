@@ -3,6 +3,9 @@
 #[cfg(test)]
 mod fixture_tests {
     use jumbf_io::{test_utils::*, Asset, Updates, XmpUpdate};
+    
+    #[cfg(feature = "memory-mapped")]
+    use jumbf_io::FormatHandler;
 
     #[test]
     fn test_embedded_fixture_access() {
@@ -142,6 +145,86 @@ mod fixture_tests {
         } else {
             println!("JUMBF_TEST_FIXTURES not set, using default fixtures only");
         }
+    }
+
+    #[test]
+    #[cfg(feature = "memory-mapped")]
+    fn test_memory_mapped_access() {
+        use std::fs::File;
+        
+        // Open a fixture with memory mapping
+        let path = fixture_path(FIREFLY_TRAIN);
+        let file = File::open(&path).expect("Failed to open file");
+        
+        // Create memory map
+        let mmap = unsafe { memmap2::Mmap::map(&file).expect("Failed to mmap") };
+        let file_size = mmap.len() as u64;
+        
+        println!("Memory-mapped {} ({} bytes)", path.display(), file_size);
+        
+        // Parse the file structure
+        let handler = jumbf_io::JpegHandler::new();
+        let mut file_for_parse = File::open(&path).expect("Failed to open file");
+        let mut structure = handler.parse(&mut file_for_parse).expect("Failed to parse");
+        
+        // Attach mmap to structure
+        structure = structure.with_mmap(mmap);
+        
+        // Test 1: Get a byte range via mmap (zero-copy)
+        let range = jumbf_io::ByteRange {
+            offset: 0,
+            size: 100,
+        };
+        
+        let slice = structure.get_mmap_slice(range).expect("Should get mmap slice");
+        assert_eq!(slice.len(), 100);
+        assert_eq!(slice[0], 0xFF); // JPEG SOI marker
+        assert_eq!(slice[1], 0xD8);
+        
+        println!("  ✓ Zero-copy slice access works");
+        
+        // Test 2: Verify we can iterate through segments via mmap
+        let mut total_bytes_accessed = 0u64;
+        for (i, segment) in structure.segments.iter().enumerate() {
+            let loc = segment.location();
+            if let Some(slice) = structure.get_mmap_slice(jumbf_io::ByteRange {
+                offset: loc.offset,
+                size: loc.size,
+            }) {
+                assert_eq!(slice.len(), loc.size as usize);
+                total_bytes_accessed += loc.size;
+                
+                // Verify first segment is SOI marker
+                if i == 0 {
+                    assert_eq!(slice[0], 0xFF);
+                }
+            }
+        }
+        
+        println!("  ✓ Accessed {} bytes via mmap across {} segments", 
+                 total_bytes_accessed, structure.segments.len());
+        
+        // Test 3: LazyData with mmap
+        #[cfg(feature = "memory-mapped")]
+        {
+            use jumbf_io::LazyData;
+            use std::sync::Arc;
+            
+            let file = File::open(&path).expect("Failed to open file");
+            let mmap = unsafe { memmap2::Mmap::map(&file).expect("Failed to mmap") };
+            let mmap_arc = Arc::new(mmap);
+            
+            let lazy = LazyData::from_mmap(mmap_arc, 0, 100);
+            
+            // Get should work without any I/O
+            let data = lazy.get().expect("Should get data from mmap");
+            assert_eq!(data.len(), 100);
+            assert_eq!(data[0], 0xFF);
+            
+            println!("  ✓ LazyData::MemoryMapped works");
+        }
+        
+        println!("✓ All memory-mapped tests passed!");
     }
 }
 
