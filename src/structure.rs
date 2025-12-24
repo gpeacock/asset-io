@@ -183,26 +183,6 @@ impl FileStructure {
         Ok(())
     }
 
-    /// Get all image data segments (DEPRECATED)
-    ///
-    /// This method is deprecated. Use `segments_by_path("image_data")` or
-    /// `hashable_ranges()` with appropriate exclusions instead.
-    ///  
-    /// The decision of what to hash should be made by the caller based on their
-    /// hashing requirements, not baked into the parser.
-    #[deprecated(
-        since = "0.1.0",
-        note = "Use segments_by_path(\"image_data\") or hashable_ranges() instead"
-    )]
-    pub fn hashable_segments(&self) -> Vec<usize> {
-        self.segments
-            .iter()
-            .enumerate()
-            .filter(|(_, seg)| matches!(seg, crate::Segment::ImageData { .. }))
-            .map(|(i, _)| i)
-            .collect()
-    }
-
     // ============================================================================
     // Range-based Data Access API (for C2PA hashing)
     // ============================================================================

@@ -228,21 +228,6 @@ impl Segment {
         }
     }
 
-    /// Check if this segment is hashable (DEPRECATED)
-    ///
-    /// This method is deprecated. Hashing policy should be determined by the caller
-    /// using `hashable_ranges()` with exclusion patterns, not by the parser.
-    ///
-    /// This always returns false now. Use `segments_by_path("image_data")` or
-    /// `hashable_ranges()` with appropriate exclusions instead.
-    #[deprecated(
-        since = "0.1.0",
-        note = "Use hashable_ranges() with exclusion patterns instead"
-    )]
-    pub fn is_hashable(&self) -> bool {
-        false
-    }
-
     /// Get a human-readable path/identifier for this segment
     /// Used for box-based hashing and segment identification
     pub fn path(&self) -> &str {
