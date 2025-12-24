@@ -184,7 +184,13 @@ pub enum Segment {
         size: u64,
     },
 
-    /// EXIF metadata (JPEG-specific, but could apply to other formats)
+    /// EXIF metadata
+    /// 
+    /// Supported formats:
+    /// - JPEG: APP1 marker with "Exif\0\0" header (offset points after header)
+    /// - PNG: eXIf chunk with raw TIFF data (offset points to TIFF data)
+    /// - TIFF: Native format (EXIF is the file itself)
+    /// - HEIF/WebP: Can contain EXIF metadata
     #[cfg(feature = "thumbnails")]
     Exif {
         offset: u64,

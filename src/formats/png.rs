@@ -14,6 +14,7 @@ const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
 
 // Metadata chunk types
 const ITXT: &[u8] = b"iTXt";
+const EXIF: &[u8] = b"eXIf";
 
 // JUMBF/C2PA chunk types (following c2pa-rs convention)
 const C2PA: &[u8] = b"caBX";
@@ -229,6 +230,18 @@ impl PngHandler {
                             size: chunk_len,
                         }],
                         data: LazyData::NotLoaded,
+                    });
+                    reader.seek(SeekFrom::Current((chunk_len + 4) as i64))?; // Skip data + CRC
+                }
+
+                #[cfg(feature = "thumbnails")]
+                b"eXIf" => {
+                    // EXIF chunk (PNG extension, added in PNG 1.5.0 specification)
+                    // Contains raw EXIF data in TIFF format (without the "Exif\0\0" header used in JPEG)
+                    structure.add_segment(Segment::Exif {
+                        offset: data_offset,
+                        size: chunk_len,
+                        thumbnail: None, // TODO: Parse EXIF to extract thumbnail
                     });
                     reader.seek(SeekFrom::Current((chunk_len + 4) as i64))?; // Skip data + CRC
                 }
@@ -493,11 +506,13 @@ impl FormatHandler for PngHandler {
 
                 #[cfg(feature = "thumbnails")]
                 Segment::Exif { offset, size, .. } => {
-                    // PNG doesn't typically have EXIF, but if it does, copy it
+                    // Write eXIf chunk with proper structure
                     reader.seek(SeekFrom::Start(*offset))?;
-                    let mut buffer = vec![0u8; *size as usize];
-                    reader.read_exact(&mut buffer)?;
-                    writer.write_all(&buffer)?;
+                    let mut exif_data = vec![0u8; *size as usize];
+                    reader.read_exact(&mut exif_data)?;
+                    
+                    // Write as eXIf chunk
+                    Self::write_chunk(writer, EXIF, &exif_data)?;
                 }
             }
         }
