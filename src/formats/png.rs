@@ -31,6 +31,31 @@ impl PngHandler {
         Self
     }
 
+    /// Formats this handler supports
+    pub fn supported_formats() -> &'static [Format] {
+        &[Format::Png]
+    }
+
+    /// File extensions this handler accepts
+    pub fn extensions() -> &'static [&'static str] {
+        &["png"]
+    }
+
+    /// MIME types this handler accepts
+    pub fn mime_types() -> &'static [&'static str] {
+        &["image/png"]
+    }
+
+    /// Detect if this is a PNG file from header
+    pub fn detect(header: &[u8]) -> Option<Format> {
+        // PNG signature: 89 50 4E 47 0D 0A 1A 0A
+        if header.len() >= 8 && &header[0..8] == b"\x89PNG\r\n\x1a\n" {
+            Some(Format::Png)
+        } else {
+            None
+        }
+    }
+
     /// Extract XMP data from PNG file (simple iTXt chunk, no extended XMP)
     pub fn extract_xmp_impl<R: Read + Seek>(
         structure: &crate::structure::FileStructure,
@@ -353,6 +378,26 @@ impl Default for PngHandler {
 }
 
 impl FormatHandler for PngHandler {
+    fn supported_formats() -> &'static [Format] {
+        &[Format::Png]
+    }
+
+    fn extensions() -> &'static [&'static str] {
+        &["png"]
+    }
+
+    fn mime_types() -> &'static [&'static str] {
+        &["image/png"]
+    }
+
+    fn detect(header: &[u8]) -> Option<Format> {
+        if header.len() >= 8 && &header[0..8] == b"\x89PNG\r\n\x1a\n" {
+            Some(Format::Png)
+        } else {
+            None
+        }
+    }
+
     fn parse<R: Read + Seek>(&self, reader: &mut R) -> Result<FileStructure> {
         self.parse_impl(reader)
     }

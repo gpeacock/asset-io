@@ -35,6 +35,31 @@ impl JpegHandler {
         Self
     }
 
+    /// Formats this handler supports
+    pub fn supported_formats() -> &'static [Format] {
+        &[Format::Jpeg]
+    }
+
+    /// File extensions this handler accepts
+    pub fn extensions() -> &'static [&'static str] {
+        &["jpg", "jpeg", "jpe", "jfif"]
+    }
+
+    /// MIME types this handler accepts
+    pub fn mime_types() -> &'static [&'static str] {
+        &["image/jpeg", "image/jpg"]
+    }
+
+    /// Detect if this is a JPEG file from header
+    pub fn detect(header: &[u8]) -> Option<Format> {
+        // JPEG magic bytes: FF D8
+        if header.len() >= 2 && header[0] == 0xFF && header[1] == 0xD8 {
+            Some(Format::Jpeg)
+        } else {
+            None
+        }
+    }
+
     /// Extract XMP data from JPEG file (handles extended XMP with multi-segment assembly)
     pub fn extract_xmp_impl<R: Read + Seek>(
         structure: &crate::structure::FileStructure,
@@ -597,6 +622,26 @@ impl Default for JpegHandler {
 }
 
 impl FormatHandler for JpegHandler {
+    fn supported_formats() -> &'static [Format] {
+        &[Format::Jpeg]
+    }
+
+    fn extensions() -> &'static [&'static str] {
+        &["jpg", "jpeg", "jpe", "jfif"]
+    }
+
+    fn mime_types() -> &'static [&'static str] {
+        &["image/jpeg", "image/jpg"]
+    }
+
+    fn detect(header: &[u8]) -> Option<Format> {
+        if header.len() >= 2 && header[0] == 0xFF && header[1] == 0xD8 {
+            Some(Format::Jpeg)
+        } else {
+            None
+        }
+    }
+
     fn parse<R: Read + Seek>(&self, reader: &mut R) -> Result<FileStructure> {
         self.parse_impl(reader)
     }

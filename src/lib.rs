@@ -180,15 +180,96 @@ pub struct ThumbnailRequest {
     pub quality: u8,
 }
 
-/// Supported file formats
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Format {
-    /// JPEG/JPG format
-    #[cfg(feature = "jpeg")]
-    Jpeg,
+/// Register all supported formats in one place
+/// 
+/// This macro generates:
+/// - Format enum with variants
+/// - detect_format() function
+/// - get_handler() function  
+/// - Extension and MIME type lookup
+macro_rules! register_formats {
+    ($(
+        $(#[$meta:meta])*
+        $variant:ident => $handler:ty
+    ),* $(,)?) => {
+        /// Supported file formats
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub enum Format {
+            $(
+                $(#[$meta])*
+                $variant,
+            )*
+        }
 
-    /// PNG format
-    #[cfg(feature = "png")]
-    Png,
+        /// Detect format from file header
+        pub(crate) fn detect_format<R: std::io::Read + std::io::Seek>(
+            reader: &mut R
+        ) -> Result<Format> {
+            use std::io::{Read, Seek, SeekFrom};
+            
+            reader.seek(SeekFrom::Start(0))?;
+            let mut header = [0u8; 16];
+            let n = reader.read(&mut header)?;
+            let header = &header[..n];
 
+            if n < 2 {
+                return Err(Error::InvalidFormat("File too small".into()));
+            }
+
+            $(
+                $(#[$meta])*
+                if let Some(fmt) = <$handler>::detect(header) {
+                    return Ok(fmt);
+                }
+            )*
+
+            Err(Error::UnsupportedFormat)
+        }
+
+        /// Get handler for a format
+        pub(crate) fn get_handler(format: Format) -> Result<$crate::asset::Handler> {
+            match format {
+                $(
+                    $(#[$meta])*
+                    Format::$variant => Ok($crate::asset::Handler::$variant(<$handler>::new())),
+                )*
+            }
+        }
+
+        /// Detect format from file extension
+        pub fn detect_from_extension(ext: &str) -> Option<Format> {
+            let ext_lower = ext.to_lowercase();
+            $(
+                $(#[$meta])*
+                if <$handler>::extensions().contains(&ext_lower.as_str()) {
+                    return <$handler>::supported_formats().first().copied();
+                }
+            )*
+            None
+        }
+
+        /// Detect format from MIME type
+        pub fn detect_from_mime(mime: &str) -> Option<Format> {
+            $(
+                $(#[$meta])*
+                if <$handler>::mime_types().iter().any(|m| m.eq_ignore_ascii_case(mime)) {
+                    return <$handler>::supported_formats().first().copied();
+                }
+            )*
+            None
+        }
+    };
 }
+
+// ============================================================================
+// SINGLE POINT OF REGISTRATION
+// To add a new format, just add one line here!
+// ============================================================================
+register_formats! {
+    #[cfg(feature = "jpeg")]
+    Jpeg => formats::jpeg::JpegHandler,
+
+    #[cfg(feature = "png")]
+    Png => formats::png::PngHandler,
+}
+

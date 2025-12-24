@@ -4,9 +4,8 @@
 //! without needing to know the specific format.
 
 use crate::{
-    error::{Error, Result},
-    structure::FileStructure,
-    Format, FormatHandler, Updates,
+    detect_format, error::Result, get_handler, structure::FileStructure, Format, FormatHandler,
+    Updates,
 };
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -50,7 +49,7 @@ pub struct Asset<R: Read + Seek> {
 }
 
 /// Internal enum to hold format-specific handlers
-enum Handler {
+pub(crate) enum Handler {
     #[cfg(feature = "jpeg")]
     Jpeg(JpegHandler),
 
@@ -191,43 +190,6 @@ impl Asset<File> {
         self.reader.seek(SeekFrom::Start(0))?;
         self.handler
             .write(&self.structure, &mut self.reader, writer, updates)
-    }
-}
-
-/// Detect the format from the file header
-fn detect_format<R: Read + Seek>(reader: &mut R) -> Result<Format> {
-    reader.seek(SeekFrom::Start(0))?;
-
-    let mut header = [0u8; 16];
-    let n = reader.read(&mut header)?;
-
-    if n < 2 {
-        return Err(Error::InvalidFormat("File too small".into()));
-    }
-
-    // JPEG: FF D8
-    #[cfg(feature = "jpeg")]
-    if header[0] == 0xFF && header[1] == 0xD8 {
-        return Ok(Format::Jpeg);
-    }
-
-    // PNG: 89 50 4E 47 0D 0A 1A 0A
-    #[cfg(feature = "png")]
-    if n >= 8 && &header[0..8] == b"\x89PNG\r\n\x1a\n" {
-        return Ok(Format::Png);
-    }
-
-    Err(Error::UnsupportedFormat)
-}
-
-/// Get a handler for the detected format
-fn get_handler(format: Format) -> Result<Handler> {
-    match format {
-        #[cfg(feature = "jpeg")]
-        Format::Jpeg => Ok(Handler::Jpeg(JpegHandler::new())),
-
-        #[cfg(feature = "png")]
-        Format::Png => Ok(Handler::Png(PngHandler::new())),
     }
 }
 
