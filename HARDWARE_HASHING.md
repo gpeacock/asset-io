@@ -1,6 +1,6 @@
 # Hardware-Accelerated Hashing
 
-This document explains how `jumbf-io`'s memory-mapped API is optimized for hardware-accelerated hashing, particularly for C2PA use cases.
+This document explains how `asset-io`'s memory-mapped API is optimized for hardware-accelerated hashing, particularly for C2PA use cases.
 
 ## Overview
 
@@ -9,7 +9,7 @@ Modern CPUs include specialized instructions for cryptographic hashing:
 - **ARM Crypto Extensions** - Apple Silicon, AWS Graviton, other ARM processors
 - **AVX2/AVX-512** - For algorithms like BLAKE3
 
-The `jumbf-io` memory-mapped API is designed to maximize the performance of these hardware accelerators.
+The `asset-io` memory-mapped API is designed to maximize the performance of these hardware accelerators.
 
 ## Why Memory-Mapped is Optimal for Hardware Hashing
 
@@ -67,7 +67,7 @@ Hardware works best when the CPU isn't busy managing buffers:
 C2PA uses SHA-256 for content hashing, excluding the C2PA manifest itself. Here's the complete workflow:
 
 ```rust
-use jumbf_io::{JpegHandler, FormatHandler};
+use asset_io::{JpegHandler, FormatHandler};
 use sha2::{Sha256, Digest};
 use std::fs::File;
 
@@ -265,7 +265,7 @@ for range in ranges {
 
 ## Summary
 
-The `jumbf-io` memory-mapped API is **perfectly optimized** for hardware-accelerated hashing because:
+The `asset-io` memory-mapped API is **perfectly optimized** for hardware-accelerated hashing because:
 
 ✅ **Zero-copy access** - Direct memory → hash engine  
 ✅ **Contiguous buffers** - Optimal for hardware instructions  

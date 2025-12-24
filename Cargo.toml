@@ -1,12 +1,12 @@
 [package]
-name = "jumbf-io"
+name = "asset-io"
 version = "0.1.0"
 edition = "2021"
 authors = ["Greg Peacock <gpeacock@adobe.com>"]
 license = "MIT OR Apache-2.0"
-description = "High-performance streaming JUMBF and XMP I/O for media files"
-repository = "https://github.com/contentauth/jumbf-io"
-keywords = ["jumbf", "c2pa", "xmp", "jpeg", "streaming"]
+description = "High-performance streaming I/O for media asset metadata (JUMBF, XMP, C2PA, thumbnails)"
+repository = "https://github.com/contentauth/asset-io"
+keywords = ["asset", "c2pa", "xmp", "jumbf", "metadata"]
 categories = ["multimedia", "parsing"]
 
 [dependencies]

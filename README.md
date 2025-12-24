@@ -1,6 +1,6 @@
-# jumbf-io
+# asset-io
 
-High-performance, format-agnostic streaming I/O for JUMBF and XMP metadata in media files.
+High-performance, format-agnostic streaming I/O for media asset metadata (JUMBF, XMP, C2PA, thumbnails).
 
 ## Features
 
@@ -17,7 +17,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-jumbf-io = "0.1"
+asset-io = "0.1"
 ```
 
 ### Format-Agnostic API (Recommended)
@@ -25,9 +25,9 @@ jumbf-io = "0.1"
 The simplest way to use this library - automatically detects file formats:
 
 ```rust
-use jumbf_io::{Asset, Updates, XmpUpdate, JumbfUpdate};
+use asset_io::{Asset, Updates, XmpUpdate, JumbfUpdate};
 
-fn main() -> jumbf_io::Result<()> {
+fn main() -> asset_io::Result<()> {
     // Open any supported file - format is auto-detected
     let mut asset = Asset::open("image.jpg")?;
     
@@ -57,10 +57,10 @@ fn main() -> jumbf_io::Result<()> {
 For more control over the parsing and writing process:
 
 ```rust
-use jumbf_io::{JpegHandler, FormatHandler, Updates};
+use asset_io::{JpegHandler, FormatHandler, Updates};
 use std::fs::File;
 
-fn main() -> jumbf_io::Result<()> {
+fn main() -> asset_io::Result<()> {
     let mut file = File::open("image.jpg")?;
     let handler = JpegHandler::new();
     

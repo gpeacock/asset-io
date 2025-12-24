@@ -19,7 +19,7 @@
 //! External crates implement the `ThumbnailGenerator` trait:
 //!
 //! ```rust,ignore
-//! use jumbf_io::{ThumbnailGenerator, ThumbnailOptions, Asset};
+//! use asset_io::{ThumbnailGenerator, ThumbnailOptions, Asset};
 //! use image::DynamicImage;
 //!
 //! pub struct ImageThumbnailGenerator;
@@ -140,7 +140,7 @@ impl EmbeddedThumbnail {
 /// # Example
 ///
 /// ```rust,ignore
-/// use jumbf_io::{ThumbnailGenerator, Result};
+/// use asset_io::{ThumbnailGenerator, Result};
 /// use image::DynamicImage;
 ///
 /// pub struct FastThumbnailGenerator;

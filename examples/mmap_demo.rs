@@ -3,14 +3,14 @@
 // This demonstrates using memory-mapped files for instant, zero-allocation
 // access to file data. Perfect for hashing large files efficiently.
 
-use jumbf_io::{ByteRange, JpegHandler, FormatHandler};
+use asset_io::{ByteRange, JpegHandler, FormatHandler};
 use std::fs::File;
 use std::time::Instant;
 
-fn main() -> jumbf_io::Result<()> {
+fn main() -> asset_io::Result<()> {
     #[cfg(all(feature = "test-utils", feature = "memory-mapped"))]
     {
-        use jumbf_io::test_utils::{fixture_path, FIREFLY_TRAIN, P1000708};
+        use asset_io::test_utils::{fixture_path, FIREFLY_TRAIN, P1000708};
         
         println!("=== Memory-Mapped File Demo ===\n");
         println!("Demonstrates zero-copy file access for maximum performance\n");
@@ -48,7 +48,7 @@ fn main() -> jumbf_io::Result<()> {
 }
 
 #[cfg(all(feature = "test-utils", feature = "memory-mapped"))]
-fn demo_basic_mmap(path: &str) -> jumbf_io::Result<()> {
+fn demo_basic_mmap(path: &str) -> asset_io::Result<()> {
     println!("  File: {}", path);
     
     // Open and memory-map the file
@@ -80,7 +80,7 @@ fn demo_basic_mmap(path: &str) -> jumbf_io::Result<()> {
 }
 
 #[cfg(all(feature = "test-utils", feature = "memory-mapped"))]
-fn demo_performance_comparison(path: &str) -> jumbf_io::Result<()> {
+fn demo_performance_comparison(path: &str) -> asset_io::Result<()> {
     use std::io::{Read, Seek, SeekFrom};
     
     println!("  File: {}", path);
@@ -161,7 +161,7 @@ fn demo_performance_comparison(path: &str) -> jumbf_io::Result<()> {
 }
 
 #[cfg(all(feature = "test-utils", feature = "memory-mapped"))]
-fn demo_zero_copy_hashing(path: &str) -> jumbf_io::Result<()> {
+fn demo_zero_copy_hashing(path: &str) -> asset_io::Result<()> {
     use std::io::{Read, Seek, SeekFrom};
     
     println!("  File: {}", path);

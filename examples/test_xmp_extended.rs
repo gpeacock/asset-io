@@ -1,7 +1,7 @@
-use jumbf_io::{Asset, Updates, XmpUpdate};
-use jumbf_io::test_utils::{fixture_path, FIREFLY_TRAIN};
+use asset_io::{Asset, Updates, XmpUpdate};
+use asset_io::test_utils::{fixture_path, FIREFLY_TRAIN};
 
-fn main() -> jumbf_io::Result<()> {
+fn main() -> asset_io::Result<()> {
     println!("=== Testing XMP Extended Support ===\n");
     println!("Note: This demonstrates XMP Extended splitting for large XMP data.\n");
 

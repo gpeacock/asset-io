@@ -8,9 +8,9 @@
 //! # Usage
 //!
 //! ```no_run
-//! use jumbf_io::test_utils::*;
+//! use asset_io::test_utils::*;
 //!
-//! # fn example() -> jumbf_io::Result<()> {
+//! # fn example() -> asset_io::Result<()> {
 //! // Use predefined fixture constants
 //! let path = fixture_path(FIREFLY_TRAIN);
 //!

@@ -1,10 +1,10 @@
-use jumbf_io::{Asset, Updates, XmpUpdate, JumbfUpdate};
+use asset_io::{Asset, Updates, XmpUpdate, JumbfUpdate};
 use std::fs;
 
 // Always use test_utils now
-use jumbf_io::test_utils::{fixture_path, list_fixtures, is_embedded};
+use asset_io::test_utils::{fixture_path, list_fixtures, is_embedded};
 
-fn main() -> jumbf_io::Result<()> {
+fn main() -> asset_io::Result<()> {
     println!("=== Testing All Fixtures ===\n");
     
     // Get all available fixtures (from defined + extended directory if set)
@@ -101,7 +101,7 @@ struct FixtureInfo {
     jumbf_remove_works: bool,
 }
 
-fn test_fixture(path: &str) -> jumbf_io::Result<FixtureInfo> {
+fn test_fixture(path: &str) -> asset_io::Result<FixtureInfo> {
     // Parse the file
     let mut asset = Asset::open(path)?;
     
@@ -126,7 +126,7 @@ fn test_fixture(path: &str) -> jumbf_io::Result<FixtureInfo> {
     std::process::Command::new("identify")
         .arg(copy_path)
         .output()
-        .map_err(|e| jumbf_io::Error::Io(std::io::Error::new(
+        .map_err(|e| asset_io::Error::Io(std::io::Error::new(
             std::io::ErrorKind::Other,
             format!("identify failed: {}", e)
         )))?;
@@ -148,7 +148,7 @@ fn test_fixture(path: &str) -> jumbf_io::Result<FixtureInfo> {
     std::process::Command::new("identify")
         .arg(xmp_mod_path)
         .output()
-        .map_err(|e| jumbf_io::Error::Io(std::io::Error::new(
+        .map_err(|e| asset_io::Error::Io(std::io::Error::new(
             std::io::ErrorKind::Other,
             format!("identify failed: {}", e)
         )))?;
@@ -169,7 +169,7 @@ fn test_fixture(path: &str) -> jumbf_io::Result<FixtureInfo> {
     std::process::Command::new("identify")
         .arg(jumbf_rm_path)
         .output()
-        .map_err(|e| jumbf_io::Error::Io(std::io::Error::new(
+        .map_err(|e| asset_io::Error::Io(std::io::Error::new(
             std::io::ErrorKind::Other,
             format!("identify failed: {}", e)
         )))?;

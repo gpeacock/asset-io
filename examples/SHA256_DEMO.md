@@ -155,7 +155,7 @@ Why? Hardware can run continuously without I/O stalls!
 This example demonstrates the exact pattern used for C2PA content authentication:
 
 ```rust
-use jumbf_io::{JpegHandler, FormatHandler};
+use asset_io::{JpegHandler, FormatHandler};
 use sha2::{Sha256, Digest};
 use std::fs::File;
 

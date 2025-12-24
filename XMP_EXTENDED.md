@@ -78,7 +78,7 @@ pub enum Segment {
 
 ### Reading Extended XMP
 ```rust
-use jumbf_io::Asset;
+use asset_io::Asset;
 
 let mut asset = Asset::open("large_xmp.jpg")?;
 
@@ -91,7 +91,7 @@ if let Some(xmp) = asset.xmp()? {
 
 ### Writing Large XMP
 ```rust
-use jumbf_io::{Asset, Updates, XmpUpdate};
+use asset_io::{Asset, Updates, XmpUpdate};
 
 // Create large XMP (>65KB)
 let large_xmp = create_xmp_metadata(); // e.g., 100KB

@@ -306,7 +306,7 @@ impl FileStructure {
     /// 
     /// # Example
     /// ```no_run
-    /// # use jumbf_io::*;
+    /// # use asset_io::*;
     /// # fn example(structure: &FileStructure) -> Result<()> {
     /// // Hash everything except JUMBF segments
     /// let ranges = structure.hashable_ranges(&["jumbf"]);

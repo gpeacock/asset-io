@@ -4,13 +4,13 @@
 // The core library provides efficient access to image data, and external crates
 // handle the actual decoding and thumbnail generation.
 
-use jumbf_io::{FormatHandler, JpegHandler, ThumbnailOptions};
+use asset_io::{FormatHandler, JpegHandler, ThumbnailOptions};
 use std::fs::File;
 
-fn main() -> jumbf_io::Result<()> {
+fn main() -> asset_io::Result<()> {
     #[cfg(feature = "test-utils")]
     {
-        use jumbf_io::test_utils::{fixture_path, P1000708};
+        use asset_io::test_utils::{fixture_path, P1000708};
 
         println!("=== Thumbnail Generation Interface Demo ===\n");
 

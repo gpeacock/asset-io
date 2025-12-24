@@ -1,6 +1,6 @@
 # Testing Guide
 
-This document explains the test fixture system in `jumbf-io` and how to run tests with different configurations.
+This document explains the test fixture system in `asset-io` and how to run tests with different configurations.
 
 ## Test Fixture System
 
@@ -124,7 +124,7 @@ Example CI workflow:
 The `test_utils` module provides a convenient API:
 
 ```rust
-use jumbf_io::test_utils::*;
+use asset_io::test_utils::*;
 
 // Use predefined fixture constants
 let path = fixture_path(FIREFLY_TRAIN);

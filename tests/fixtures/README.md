@@ -1,6 +1,6 @@
 # Test Fixtures
 
-This directory contains a minimal set of JPEG test files for the jumbf-io library.
+This directory contains a minimal set of JPEG test files for the asset-io library.
 
 ## Committed Fixtures (3 files, ~1.1 MB)
 
@@ -55,7 +55,7 @@ define_fixtures!(
 ## Using in Tests
 
 ```rust
-use jumbf_io::test_utils::*;
+use asset_io::test_utils::*;
 
 // Use predefined constants
 let path = fixture_path(FIREFLY_TRAIN);

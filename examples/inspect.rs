@@ -3,11 +3,11 @@
 //! This example shows how to parse a JPEG file and inspect its structure
 //! without loading the entire file into memory.
 
-use jumbf_io::{FormatHandler, JpegHandler};
+use asset_io::{FormatHandler, JpegHandler};
 use std::env;
 use std::fs::File;
 
-fn main() -> jumbf_io::Result<()> {
+fn main() -> asset_io::Result<()> {
     let args: Vec<String> = env::args().collect();
 
     if args.len() < 2 {
@@ -55,11 +55,11 @@ fn main() -> jumbf_io::Result<()> {
     for (i, segment) in structure.segments.iter().enumerate() {
         let location = segment.location();
         let seg_type = match segment {
-            jumbf_io::Segment::Header { .. } => "Header".to_string(),
-            jumbf_io::Segment::Xmp { .. } => "XMP   ".to_string(),
-            jumbf_io::Segment::Jumbf { .. } => "JUMBF ".to_string(),
-            jumbf_io::Segment::ImageData { .. } => "Image ".to_string(),
-            jumbf_io::Segment::Other { marker, .. } => format!("Other (0x{:02X})", marker),
+            asset_io::Segment::Header { .. } => "Header".to_string(),
+            asset_io::Segment::Xmp { .. } => "XMP   ".to_string(),
+            asset_io::Segment::Jumbf { .. } => "JUMBF ".to_string(),
+            asset_io::Segment::ImageData { .. } => "Image ".to_string(),
+            asset_io::Segment::Other { marker, .. } => format!("Other (0x{:02X})", marker),
         };
         println!(
             "  [{:3}] {} at offset {}, size {}",

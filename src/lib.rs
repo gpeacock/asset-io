@@ -16,9 +16,9 @@
 //! which automatically detects the file format:
 //!
 //! ```no_run
-//! use jumbf_io::{Asset, Updates, XmpUpdate, JumbfUpdate};
+//! use asset_io::{Asset, Updates, XmpUpdate, JumbfUpdate};
 //!
-//! # fn main() -> jumbf_io::Result<()> {
+//! # fn main() -> asset_io::Result<()> {
 //! // Open any supported file - format is auto-detected
 //! let mut asset = Asset::open("image.jpg")?;
 //!
@@ -46,10 +46,10 @@
 //! For more control, you can use format-specific handlers:
 //!
 //! ```no_run
-//! use jumbf_io::{FormatHandler, JpegHandler, Updates};
+//! use asset_io::{FormatHandler, JpegHandler, Updates};
 //! use std::fs::File;
 //!
-//! # fn main() -> jumbf_io::Result<()> {
+//! # fn main() -> asset_io::Result<()> {
 //! // Parse file structure in single pass
 //! let mut file = File::open("image.jpg")?;
 //! let handler = JpegHandler::new();

@@ -1,8 +1,8 @@
-use jumbf_io::{Asset, JumbfUpdate, Updates, XmpUpdate};
+use asset_io::{Asset, JumbfUpdate, Updates, XmpUpdate};
 use std::fs;
 
 /// Quick reference showing all supported metadata operations
-fn main() -> jumbf_io::Result<()> {
+fn main() -> asset_io::Result<()> {
     let input = "image.jpg";
 
     // ============================================

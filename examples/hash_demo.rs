@@ -3,12 +3,12 @@
 // This shows how to hash assets without loading entire segments into memory,
 // supporting multiple C2PA hashing models.
 
-use jumbf_io::{Asset, DEFAULT_CHUNK_SIZE};
+use asset_io::{Asset, DEFAULT_CHUNK_SIZE};
 
-fn main() -> jumbf_io::Result<()> {
+fn main() -> asset_io::Result<()> {
     #[cfg(feature = "test-utils")]
     {
-        use jumbf_io::test_utils::{fixture_path, FIREFLY_TRAIN};
+        use asset_io::test_utils::{fixture_path, FIREFLY_TRAIN};
         
         println!("=== C2PA Hashing Demo ===\n");
         
@@ -60,7 +60,7 @@ fn main() -> jumbf_io::Result<()> {
 /// 
 /// This is the most common C2PA hash model - it hashes everything in the asset
 /// except the C2PA manifest itself (which contains the hash).
-fn compute_data_hash(path: &str) -> jumbf_io::Result<Vec<u8>> {
+fn compute_data_hash(path: &str) -> asset_io::Result<Vec<u8>> {
     let mut asset = Asset::open(path)?;
     
     // Get ranges excluding JUMBF (C2PA) segments
@@ -94,7 +94,7 @@ fn compute_data_hash(path: &str) -> jumbf_io::Result<Vec<u8>> {
 /// 
 /// This model hashes specific segments (boxes in BMFF terminology), excluding
 /// metadata segments.
-fn compute_box_hash(path: &str) -> jumbf_io::Result<Vec<u8>> {
+fn compute_box_hash(path: &str) -> asset_io::Result<Vec<u8>> {
     let mut asset = Asset::open(path)?;
     
     // Exclude metadata segments
@@ -127,7 +127,7 @@ fn compute_box_hash(path: &str) -> jumbf_io::Result<Vec<u8>> {
 /// Example 3: Hash only image data
 /// 
 /// This demonstrates hashing a specific type of segment.
-fn compute_image_hash(path: &str) -> jumbf_io::Result<Vec<u8>> {
+fn compute_image_hash(path: &str) -> asset_io::Result<Vec<u8>> {
     let mut asset = Asset::open(path)?;
     
     let image_segments: Vec<_> = asset.structure().segments_by_path("image_data")
@@ -156,7 +156,7 @@ fn compute_image_hash(path: &str) -> jumbf_io::Result<Vec<u8>> {
 }
 
 /// Example 4: Demonstrate custom chunk size
-fn compute_chunked_hash(path: &str, chunk_size: usize) -> jumbf_io::Result<Vec<u8>> {
+fn compute_chunked_hash(path: &str, chunk_size: usize) -> asset_io::Result<Vec<u8>> {
     let mut asset = Asset::open(path)?;
     
     println!("   Using {}KB chunk size", chunk_size / 1024);

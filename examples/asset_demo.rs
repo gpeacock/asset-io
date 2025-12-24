@@ -3,10 +3,10 @@
 //! This example shows how to work with media files without knowing
 //! their format upfront. The library automatically detects the format.
 
-use jumbf_io::{Asset, JumbfUpdate, Updates, XmpUpdate};
+use asset_io::{Asset, JumbfUpdate, Updates, XmpUpdate};
 use std::env;
 
-fn main() -> jumbf_io::Result<()> {
+fn main() -> asset_io::Result<()> {
     let args: Vec<String> = env::args().collect();
 
     if args.len() < 2 {

@@ -1,6 +1,6 @@
 # Thumbnail Generation Interface
 
-The `jumbf-io` crate provides a **format-agnostic interface** for thumbnail generation without adding image decoding dependencies to the core library.
+The `asset-io` crate provides a **format-agnostic interface** for thumbnail generation without adding image decoding dependencies to the core library.
 
 ## Design Philosophy
 
@@ -84,7 +84,7 @@ pub trait ThumbnailGenerator {
 ### Pattern 1: Three-Tier Optimization
 
 ```rust
-use jumbf_io::{Asset, ThumbnailOptions};
+use asset_io::{Asset, ThumbnailOptions};
 
 fn generate_thumbnail(asset: &mut Asset<impl Read + Seek>) -> Result<Vec<u8>> {
     let structure = asset.structure();
@@ -121,7 +121,7 @@ fn generate_thumbnail(asset: &mut Asset<impl Read + Seek>) -> Result<Vec<u8>> {
 ### Pattern 2: Format-Agnostic Decoder
 
 ```rust
-use jumbf_io::{Format, ThumbnailGenerator};
+use asset_io::{Format, ThumbnailGenerator};
 use image::{DynamicImage, ImageFormat};
 
 pub struct UniversalThumbnailGenerator;
@@ -239,18 +239,18 @@ Streaming:              64 KB (chunk size) + decode overhead
 
 ```toml
 [dependencies]
-jumbf-io = "0.1"
+asset-io = "0.1"
 image = "0.25"
 ```
 
 ```rust
-use jumbf_io::{Asset, ThumbnailOptions, ThumbnailGenerator};
+use asset_io::{Asset, ThumbnailOptions, ThumbnailGenerator};
 use image::ImageFormat;
 
 pub fn generate_thumbnail<R: Read + Seek>(
     asset: &mut Asset<R>,
     options: ThumbnailOptions,
-) -> jumbf_io::Result<Vec<u8>> {
+) -> asset_io::Result<Vec<u8>> {
     // Implementation using the three-tier pattern
     // ...
 }
@@ -260,7 +260,7 @@ pub fn generate_thumbnail<R: Read + Seek>(
 
 ```toml
 [dependencies]
-jumbf-io = "0.1"
+asset-io = "0.1"
 mozjpeg = "0.10"
 ```
 
@@ -312,7 +312,7 @@ impl FileStructure {
 
 ## Summary
 
-The thumbnail generation interface demonstrates the same philosophy as the rest of `jumbf-io`:
+The thumbnail generation interface demonstrates the same philosophy as the rest of `asset-io`:
 
 1. **Core provides access** - Zero-copy slices, embedded data, streaming
 2. **External crates do work** - Decoding, resizing, encoding

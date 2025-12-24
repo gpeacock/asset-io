@@ -2,10 +2,10 @@
 
 #[cfg(test)]
 mod fixture_tests {
-    use jumbf_io::{test_utils::*, Asset, Updates, XmpUpdate};
+    use asset_io::{test_utils::*, Asset, Updates, XmpUpdate};
     
     #[cfg(feature = "memory-mapped")]
-    use jumbf_io::FormatHandler;
+    use asset_io::FormatHandler;
 
     #[test]
     fn test_embedded_fixture_access() {
@@ -163,7 +163,7 @@ mod fixture_tests {
         println!("Memory-mapped {} ({} bytes)", path.display(), file_size);
         
         // Parse the file structure
-        let handler = jumbf_io::JpegHandler::new();
+        let handler = asset_io::JpegHandler::new();
         let mut file_for_parse = File::open(&path).expect("Failed to open file");
         let mut structure = handler.parse(&mut file_for_parse).expect("Failed to parse");
         
@@ -171,7 +171,7 @@ mod fixture_tests {
         structure = structure.with_mmap(mmap);
         
         // Test 1: Get a byte range via mmap (zero-copy)
-        let range = jumbf_io::ByteRange {
+        let range = asset_io::ByteRange {
             offset: 0,
             size: 100,
         };
@@ -187,7 +187,7 @@ mod fixture_tests {
         let mut total_bytes_accessed = 0u64;
         for (i, segment) in structure.segments.iter().enumerate() {
             let loc = segment.location();
-            if let Some(slice) = structure.get_mmap_slice(jumbf_io::ByteRange {
+            if let Some(slice) = structure.get_mmap_slice(asset_io::ByteRange {
                 offset: loc.offset,
                 size: loc.size,
             }) {
@@ -207,7 +207,7 @@ mod fixture_tests {
         // Test 3: LazyData with mmap
         #[cfg(feature = "memory-mapped")]
         {
-            use jumbf_io::LazyData;
+            use asset_io::LazyData;
             use std::sync::Arc;
             
             let file = File::open(&path).expect("Failed to open file");
@@ -230,7 +230,7 @@ mod fixture_tests {
 
 #[cfg(test)]
 mod thumbnail_tests {
-    use jumbf_io::{test_utils, FormatHandler, JpegHandler};
+    use asset_io::{test_utils, FormatHandler, JpegHandler};
     use std::fs::File;
     
     #[test]
@@ -334,7 +334,7 @@ mod thumbnail_tests {
     fn test_thumbnail_options() {
         println!("\n=== Testing ThumbnailOptions ===");
         
-        use jumbf_io::ThumbnailOptions;
+        use asset_io::ThumbnailOptions;
         
         let default_opts = ThumbnailOptions::default();
         assert_eq!(default_opts.max_width, 256);
@@ -357,7 +357,7 @@ mod thumbnail_tests {
     fn test_embedded_thumbnail_fits() {
         println!("\n=== Testing EmbeddedThumbnail::fits() ===");
         
-        use jumbf_io::{EmbeddedThumbnail, ThumbnailFormat};
+        use asset_io::{EmbeddedThumbnail, ThumbnailFormat};
         
         let thumb = EmbeddedThumbnail::with_dimensions(
             vec![0u8; 100],

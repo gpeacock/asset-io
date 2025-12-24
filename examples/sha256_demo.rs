@@ -3,13 +3,13 @@
 // Demonstrates hardware-accelerated hashing using Intel SHA-NI or ARM Crypto Extensions
 // (automatically detected and used by the sha2 crate).
 
-use jumbf_io::{JpegHandler, FormatHandler};
+use asset_io::{JpegHandler, FormatHandler};
 use sha2::{Sha256, Digest};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::time::Instant;
 
-fn main() -> jumbf_io::Result<()> {
+fn main() -> asset_io::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     
     // Get file path from command line or use default fixture
@@ -18,7 +18,7 @@ fn main() -> jumbf_io::Result<()> {
     } else {
         #[cfg(feature = "test-utils")]
         {
-            use jumbf_io::test_utils::{fixture_path, P1000708};
+            use asset_io::test_utils::{fixture_path, P1000708};
             fixture_path(P1000708).to_str().unwrap().to_string()
         }
         #[cfg(not(feature = "test-utils"))]
@@ -118,7 +118,7 @@ fn main() -> jumbf_io::Result<()> {
 }
 
 /// Hash using traditional file I/O (with buffering)
-fn hash_with_file_io(path: &str) -> jumbf_io::Result<(Vec<u8>, std::time::Duration)> {
+fn hash_with_file_io(path: &str) -> asset_io::Result<(Vec<u8>, std::time::Duration)> {
     let start = Instant::now();
     
     let mut file = File::open(path)?;
@@ -156,7 +156,7 @@ fn hash_with_file_io(path: &str) -> jumbf_io::Result<(Vec<u8>, std::time::Durati
 
 /// Hash using memory-mapped zero-copy (maximum performance)
 #[cfg(feature = "memory-mapped")]
-fn hash_with_mmap(path: &str) -> jumbf_io::Result<(Vec<u8>, std::time::Duration)> {
+fn hash_with_mmap(path: &str) -> asset_io::Result<(Vec<u8>, std::time::Duration)> {
     let start = Instant::now();
     
     // Open and memory-map the file

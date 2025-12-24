@@ -20,9 +20,9 @@ use crate::formats::jpeg::JpegHandler;
 /// # Example
 ///
 /// ```no_run
-/// use jumbf_io::{Asset, Updates, XmpUpdate};
+/// use asset_io::{Asset, Updates, XmpUpdate};
 ///
-/// # fn main() -> jumbf_io::Result<()> {
+/// # fn main() -> asset_io::Result<()> {
 /// // Open any supported media file - format is auto-detected
 /// let mut asset = Asset::open("image.jpg")?;
 ///

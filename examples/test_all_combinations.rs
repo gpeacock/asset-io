@@ -1,9 +1,9 @@
 //! Comprehensive test of all XMP and JUMBF modification combinations
 
-use jumbf_io::{Asset, JumbfUpdate, Updates, XmpUpdate};
+use asset_io::{Asset, JumbfUpdate, Updates, XmpUpdate};
 use std::fs;
 
-fn main() -> jumbf_io::Result<()> {
+fn main() -> asset_io::Result<()> {
     let input = "/Users/gpeacock/Desktop/CC-MCP demo/L1000353.JPG";
     let test_xmp = b"<test>New XMP content</test>".to_vec();
     let _test_jumbf = create_test_jumbf();
@@ -119,7 +119,7 @@ fn main() -> jumbf_io::Result<()> {
     Ok(())
 }
 
-fn test_modification(input: &str, output: &str, updates: Updates) -> jumbf_io::Result<()> {
+fn test_modification(input: &str, output: &str, updates: Updates) -> asset_io::Result<()> {
     // Parse and write
     let mut asset = Asset::open(input)?;
     asset.write_to(output, &updates)?;
