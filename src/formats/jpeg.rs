@@ -26,6 +26,37 @@ const EXIF_SIGNATURE: &[u8] = b"Exif\0\0";
 const C2PA_MARKER: &[u8] = b"c2pa";
 const MAX_MARKER_SIZE: usize = 65533; // Max size for JPEG marker segment
 
+/// Get human-readable label for a JPEG marker
+fn marker_label(marker: u8) -> &'static str {
+    match marker {
+        0xD8 => "SOI",
+        0xD9 => "EOI",
+        0xDA => "SOS",
+        0xDB => "DQT",
+        0xC0 => "SOF0",
+        0xC4 => "DHT",
+        0xDD => "DRI",
+        0xFE => "COM",
+        0xE0 => "APP0",
+        0xE1 => "APP1",
+        0xE2 => "APP2",
+        0xE3 => "APP3",
+        0xE4 => "APP4",
+        0xE5 => "APP5",
+        0xE6 => "APP6",
+        0xE7 => "APP7",
+        0xE8 => "APP8",
+        0xE9 => "APP9",
+        0xEA => "APP10",
+        0xEB => "APP11",
+        0xEC => "APP12",
+        0xED => "APP13",
+        0xEE => "APP14",
+        0xEF => "APP15",
+        _ => "OTHER",
+    }
+}
+
 /// JPEG format handler
 pub struct JpegHandler;
 
@@ -267,7 +298,7 @@ impl JpegHandler {
                     structure.add_segment(Segment::Other {
                         offset,
                         size: 2,
-                        marker: EOI,
+                        label: marker_label(EOI),
                     });
                     structure.total_size = offset + 2;
                     break;
@@ -295,7 +326,7 @@ impl JpegHandler {
                     structure.add_segment(Segment::Other {
                         offset: image_end,
                         size: 2,
-                        marker: EOI,
+                        label: marker_label(EOI),
                     });
 
                     structure.total_size = image_end + 2;
@@ -345,7 +376,7 @@ impl JpegHandler {
                             structure.add_segment(Segment::Other {
                                 offset: segment_start,
                                 size: size + 2,
-                                marker: APP1,
+                                label: marker_label(APP1),
                             });
                         } else {
                             // Read GUID (32 bytes as ASCII hex string)
@@ -412,7 +443,7 @@ impl JpegHandler {
                                 structure.add_segment(Segment::Other {
                                     offset: segment_start,
                                     size: size + 2,
-                                    marker: APP1,
+                                    label: marker_label(APP1),
                                 });
                             }
 
@@ -488,7 +519,7 @@ impl JpegHandler {
                             structure.add_segment(Segment::Other {
                                 offset: segment_start,
                                 size: size + 2,
-                                marker: APP1,
+                                label: marker_label(APP1),
                             });
                         }
 
@@ -502,7 +533,7 @@ impl JpegHandler {
                             structure.add_segment(Segment::Other {
                                 offset: segment_start,
                                 size: size + 2,
-                                marker: APP1,
+                                label: marker_label(APP1),
                             });
                         }
                     }
@@ -580,7 +611,7 @@ impl JpegHandler {
                         structure.add_segment(Segment::Other {
                             offset: segment_start,
                             size: size + 2,
-                            marker: APP11,
+                            label: marker_label(APP11),
                         });
                     }
 
@@ -592,7 +623,7 @@ impl JpegHandler {
                     structure.add_segment(Segment::Other {
                         offset,
                         size: 2,
-                        marker,
+                        label: marker_label(marker),
                     });
                     offset += 2;
                 }
@@ -603,7 +634,7 @@ impl JpegHandler {
                     structure.add_segment(Segment::Other {
                         offset,
                         size: size + 2,
-                        marker,
+                        label: marker_label(marker),
                     });
                     offset += 2 + size;
                     reader.seek(SeekFrom::Start(offset))?;
@@ -852,7 +883,7 @@ impl FormatHandler for JpegHandler {
                     }
                 }
 
-                Segment::Other { marker, .. } if *marker == APP1 && !xmp_written => {
+                Segment::Other { label, .. } if *label == "APP1" && !xmp_written => {
                     // First APP1 segment - good place to insert XMP if we're adding it
                     if let crate::XmpUpdate::Set(new_xmp) = &updates.xmp {
                         if !has_xmp {
@@ -866,7 +897,7 @@ impl FormatHandler for JpegHandler {
                     copy_other_segment(segment, reader, writer, &mut current_read_pos)?;
                 }
 
-                Segment::Other { marker, .. } if *marker == APP11 && !jumbf_written => {
+                Segment::Other { label, .. } if *label == "APP11" && !jumbf_written => {
                     // First APP11 segment - good place to insert JUMBF if we're adding it
                     if let crate::JumbfUpdate::Set(new_jumbf) = &updates.jumbf {
                         if !has_jumbf {

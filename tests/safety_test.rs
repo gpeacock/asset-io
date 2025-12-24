@@ -3,7 +3,13 @@
 //! These tests verify that safety limits and checks are in place.
 //! Comprehensive testing should be done with fuzzing (cargo-fuzz).
 
-use asset_io::{ByteRange, Format, FormatHandler, MAX_SEGMENT_SIZE};
+use asset_io::MAX_SEGMENT_SIZE;
+
+#[cfg(feature = "memory-mapped")]
+use asset_io::{ByteRange, Format};
+
+#[cfg(feature = "png")]
+use asset_io::FormatHandler;
 
 #[test]
 fn test_max_segment_size_constant() {

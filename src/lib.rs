@@ -181,7 +181,7 @@ pub struct ThumbnailRequest {
 }
 
 /// Register all supported formats in one place
-/// 
+///
 /// This macro generates:
 /// - Format enum with variants
 /// - detect_format() function
@@ -205,8 +205,8 @@ macro_rules! register_formats {
         pub(crate) fn detect_format<R: std::io::Read + std::io::Seek>(
             reader: &mut R
         ) -> Result<Format> {
-            use std::io::{Read, Seek, SeekFrom};
-            
+            use std::io::SeekFrom;
+
             reader.seek(SeekFrom::Start(0))?;
             let mut header = [0u8; 16];
             let n = reader.read(&mut header)?;
@@ -272,4 +272,3 @@ register_formats! {
     #[cfg(feature = "png")]
     Png => formats::png::PngHandler,
 }
-

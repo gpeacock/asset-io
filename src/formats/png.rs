@@ -22,6 +22,28 @@ const C2PA: &[u8] = b"caBX";
 // XMP keyword in iTXt chunks
 const XMP_KEYWORD: &[u8] = b"XML:com.adobe.xmp\0";
 
+/// Get human-readable label for a PNG chunk type
+fn chunk_label(chunk_type: &[u8; 4]) -> &'static str {
+    match chunk_type {
+        b"IHDR" => "IHDR",
+        b"PLTE" => "PLTE",
+        b"IDAT" => "IDAT",
+        b"IEND" => "IEND",
+        b"tRNS" => "tRNS",
+        b"gAMA" => "gAMA",
+        b"cHRM" => "cHRM",
+        b"sRGB" => "sRGB",
+        b"iCCP" => "iCCP",
+        b"iTXt" => "iTXt",
+        b"tEXt" => "tEXt",
+        b"zTXt" => "zTXt",
+        b"bKGD" => "bKGD",
+        b"pHYs" => "pHYs",
+        b"tIME" => "tIME",
+        _ => "OTHER",
+    }
+}
+
 /// PNG format handler
 pub struct PngHandler;
 
@@ -152,7 +174,7 @@ impl PngHandler {
                     structure.add_segment(Segment::Other {
                         offset: chunk_start,
                         size: 8 + chunk_len + 4, // length + type + data + CRC
-                        marker: 0,               // PNG doesn't use markers
+                        label: chunk_label(&chunk_type),
                     });
                     reader.seek(SeekFrom::Current((chunk_len + 4) as i64))?; // Skip data + CRC
                 }
@@ -171,7 +193,7 @@ impl PngHandler {
                     structure.add_segment(Segment::Other {
                         offset: chunk_start,
                         size: 8 + chunk_len + 4,
-                        marker: 0xFF, // Use special marker for IEND
+                        label: chunk_label(&chunk_type),
                     });
                     reader.seek(SeekFrom::Current((chunk_len + 4) as i64))?;
                     found_iend = true;
@@ -240,7 +262,7 @@ impl PngHandler {
                         structure.add_segment(Segment::Other {
                             offset: chunk_start,
                             size: 8 + chunk_len + 4,
-                            marker: 1, // iTXt marker
+                            label: chunk_label(&chunk_type),
                         });
                         // Skip remaining data + CRC
                         let remaining = chunk_len - keyword_len as u64 + 4;
@@ -279,7 +301,7 @@ impl PngHandler {
                     structure.add_segment(Segment::Other {
                         offset: chunk_start,
                         size: 8 + chunk_len + 4,
-                        marker: chunk_type[0], // Use first byte as marker
+                        label: chunk_label(&chunk_type),
                     });
                     reader.seek(SeekFrom::Current((chunk_len + 4) as i64))?; // Skip data + CRC
                 }
@@ -518,10 +540,11 @@ impl FormatHandler for PngHandler {
                 Segment::Other {
                     offset,
                     size,
-                    marker,
+                    label,
+                    ..
                 } => {
                     // Check if this is IEND - we need to write new metadata before it
-                    if *marker == 0xFF {
+                    if *label == "IEND" {
                         // This is IEND - write any pending metadata first
                         use crate::{JumbfUpdate, XmpUpdate};
 

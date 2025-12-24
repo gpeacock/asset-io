@@ -206,8 +206,9 @@ pub enum Segment {
     Other {
         offset: u64,
         size: u64,
-        /// Format-specific marker/type
-        marker: u8,
+        /// Human-readable label for this segment type (e.g., "APP1", "IHDR", "COM")
+        /// Provided by format handlers
+        label: &'static str,
     },
 }
 
@@ -251,15 +252,7 @@ impl Segment {
             Self::Jumbf { .. } => "jumbf",
             Self::ImageData { .. } => "image_data",
             Self::Exif { .. } => "exif",
-            Self::Other { marker, .. } => {
-                // For JPEG markers, use hex representation
-                match *marker {
-                    0xE1 => "APP1",
-                    0xEB => "APP11",
-                    0xFE => "COM",
-                    _ => "other",
-                }
-            }
+            Self::Other { label, .. } => label,
         }
     }
 }

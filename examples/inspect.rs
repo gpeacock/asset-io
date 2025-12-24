@@ -1,37 +1,32 @@
-//! Example: Parse and inspect a JPEG file
+//! Example: Parse and inspect an image file
 //!
-//! This example shows how to parse a JPEG file and inspect its structure
+//! This example shows how to parse an image file (JPEG, PNG) and inspect its structure
 //! without loading the entire file into memory.
 
-use asset_io::{FormatHandler, JpegHandler};
+use asset_io::Asset;
 use std::env;
-use std::fs::File;
 
 fn main() -> asset_io::Result<()> {
     let args: Vec<String> = env::args().collect();
 
     if args.len() < 2 {
-        eprintln!("Usage: {} <jpeg_file>", args[0]);
+        eprintln!("Usage: {} <image_file>", args[0]);
         std::process::exit(1);
     }
 
     let filename = &args[1];
     println!("Parsing: {}", filename);
 
-    // Open file
-    let mut file = File::open(filename)?;
-
-    // Parse structure (single pass, no data loading)
-    let handler = JpegHandler::new();
-    let mut structure = handler.parse(&mut file)?;
+    // Auto-detect format and parse
+    let mut asset = Asset::open(filename)?;
 
     println!("\nFile structure:");
-    println!("  Format: {:?}", structure.format);
-    println!("  Total size: {} bytes", structure.total_size);
-    println!("  Segments: {}", structure.segments.len());
+    println!("  Format: {:?}", asset.format());
+    println!("  Total size: {} bytes", asset.structure().total_size);
+    println!("  Segments: {}", asset.structure().segments.len());
 
     // Check for XMP (loads lazily only if present)
-    match structure.xmp(&mut file)? {
+    match asset.xmp()? {
         Some(xmp) => {
             println!("\n✓ Found XMP metadata ({} bytes)", xmp.len());
             // Print first 100 chars
@@ -43,7 +38,7 @@ fn main() -> asset_io::Result<()> {
     }
 
     // Check for JUMBF (loads and assembles only if present)
-    match structure.jumbf(&mut file)? {
+    match asset.jumbf()? {
         Some(jumbf) => {
             println!("\n✓ Found JUMBF data ({} bytes)", jumbf.len());
         }
@@ -52,13 +47,25 @@ fn main() -> asset_io::Result<()> {
 
     // Show segment breakdown
     println!("\nSegment breakdown:");
-    for (i, segment) in structure.segments.iter().enumerate() {
+    for (i, segment) in asset.structure().segments.iter().enumerate() {
         let location = segment.location();
         let seg_type = match segment {
             asset_io::Segment::Header { .. } => "Header".to_string(),
-            asset_io::Segment::Xmp { .. } => "XMP   ".to_string(),
-            asset_io::Segment::Jumbf { .. } => "JUMBF ".to_string(),
-            asset_io::Segment::ImageData { .. } => "Image ".to_string(),
+            asset_io::Segment::Xmp { segments, .. } => {
+                if segments.len() > 1 {
+                    format!("XMP ({} parts)", segments.len())
+                } else {
+                    "XMP".to_string()
+                }
+            }
+            asset_io::Segment::Jumbf { segments, .. } => {
+                if segments.len() > 1 {
+                    format!("JUMBF ({} parts)", segments.len())
+                } else {
+                    "JUMBF".to_string()
+                }
+            }
+            asset_io::Segment::ImageData { .. } => "ImageData".to_string(),
             asset_io::Segment::Exif { .. } => {
                 #[cfg(feature = "thumbnails")]
                 {
@@ -66,21 +73,21 @@ fn main() -> asset_io::Result<()> {
                         if thumbnail.is_some() {
                             "EXIF (with thumbnail)".to_string()
                         } else {
-                            "EXIF  ".to_string()
+                            "EXIF".to_string()
                         }
                     } else {
-                        "EXIF  ".to_string()
+                        "EXIF".to_string()
                     }
                 }
                 #[cfg(not(feature = "thumbnails"))]
                 {
-                    "EXIF  ".to_string()
+                    "EXIF".to_string()
                 }
             }
-            asset_io::Segment::Other { marker, .. } => format!("Other (0x{:02X})", marker),
+            asset_io::Segment::Other { label, .. } => label.to_string(),
         };
         println!(
-            "  [{:3}] {} at offset {}, size {}",
+            "  [{:3}] {:20} at offset {:8}, size {:8}",
             i, seg_type, location.offset, location.size
         );
     }
