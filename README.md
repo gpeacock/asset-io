@@ -153,11 +153,11 @@ See `OPERATIONS.md` for complete API documentation.
 
 ## Documentation
 
-- [OPERATIONS.md](./OPERATIONS.md) - Complete API reference for all operations
-- [TESTING.md](./TESTING.md) - Comprehensive testing guide
-- [HARDWARE_HASHING.md](./HARDWARE_HASHING.md) - Hardware-accelerated hashing details
-- [THUMBNAILS.md](./THUMBNAILS.md) - Thumbnail generation interface guide
-- [XMP_EXTENDED.md](./XMP_EXTENDED.md) - XMP Extended implementation details
+- [docs/OPERATIONS.md](./docs/OPERATIONS.md) - Complete API reference for all operations
+- [docs/TESTING.md](./docs/TESTING.md) - Comprehensive testing guide
+- [docs/HARDWARE_HASHING.md](./docs/HARDWARE_HASHING.md) - Hardware-accelerated hashing details
+- [docs/THUMBNAILS.md](./docs/THUMBNAILS.md) - Thumbnail generation interface guide
+- [docs/XMP_EXTENDED.md](./docs/XMP_EXTENDED.md) - XMP Extended implementation details
 
 ## Use Cases
 
