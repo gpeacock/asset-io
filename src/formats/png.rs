@@ -2,7 +2,7 @@
 
 use crate::{
     error::{Error, Result},
-    segment::{LazyData, Segment},
+    segment::{LazyData, Location, Segment},
     structure::FileStructure,
     Format, FormatHandler, Updates,
 };
@@ -195,8 +195,12 @@ impl PngHandler {
                         structure.add_segment(Segment::Xmp {
                             offset: xmp_offset,
                             size: xmp_size,
+                            segments: vec![Location {
+                                offset: xmp_offset,
+                                size: xmp_size,
+                            }],
                             data: LazyData::NotLoaded,
-                            extended_parts: Vec::new(),
+                            metadata: None,
                         });
 
                         // Skip remaining XMP data + CRC

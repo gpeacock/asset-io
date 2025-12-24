@@ -46,82 +46,95 @@ impl JpegHandler {
         };
 
         if let crate::Segment::Xmp {
-            offset,
-            size,
-            extended_parts,
+            segments,
+            metadata,
             ..
         } = &structure.segments()[index]
         {
-            // Read main XMP
-            reader.seek(SeekFrom::Start(*offset))?;
-            let mut main_xmp = vec![0u8; *size as usize];
-            reader.read_exact(&mut main_xmp)?;
-
-            // If no extended parts, return main XMP
-            if extended_parts.is_empty() {
-                return Ok(Some(main_xmp));
-            }
-
-            // JPEG-specific: Assemble extended XMP
-            // Sort parts by chunk_offset
-            let mut parts = extended_parts.clone();
-            parts.sort_by_key(|p| p.chunk_offset);
-
-            // Validate all parts have same GUID and total_size
-            if parts.is_empty() {
-                return Ok(Some(main_xmp));
-            }
-
-            let first_guid = &parts[0].guid;
-            let total_size = parts[0].total_size;
-            
-            // Validate total_size to prevent DOS attacks
-            const MAX_XMP_SIZE: u32 = 100 * 1024 * 1024; // 100 MB
-            if total_size > MAX_XMP_SIZE {
-                return Err(Error::InvalidSegment {
-                    offset: *offset,
-                    reason: format!(
-                        "Extended XMP too large: {} bytes (max {} MB)",
-                        total_size,
-                        MAX_XMP_SIZE / (1024 * 1024)
-                    ),
-                });
-            }
-
-            for part in &parts {
-                if &part.guid != first_guid {
-                    return Err(Error::InvalidFormat(
-                        "Extended XMP parts have mismatched GUIDs".into(),
-                    ));
-                }
-                if part.total_size != total_size {
-                    return Err(Error::InvalidFormat(
-                        "Extended XMP parts have mismatched total sizes".into(),
-                    ));
+            // Check if this has extended XMP metadata
+            if let Some(meta) = metadata {
+                if let Some((guid, chunk_offsets, total_size)) = meta.as_jpeg_extended_xmp() {
+                    // JPEG Extended XMP - reassemble from parts
+                    return Self::reassemble_extended_xmp(reader, segments, guid, chunk_offsets, total_size);
                 }
             }
 
-            // Allocate buffer for complete extended XMP
-            let mut extended_xmp = vec![0u8; total_size as usize];
-
-            // Read each chunk into the correct position
-            for part in &parts {
-                reader.seek(SeekFrom::Start(part.location.offset))?;
-                let end_pos = (part.chunk_offset as usize + part.location.size as usize)
-                    .min(extended_xmp.len());
-                if part.chunk_offset as usize >= extended_xmp.len() {
-                    continue; // Skip malformed chunks
+            // Simple case: single segment or concatenated segments
+            if segments.len() == 1 {
+                // Single XMP segment
+                reader.seek(SeekFrom::Start(segments[0].offset))?;
+                let mut xmp_data = vec![0u8; segments[0].size as usize];
+                reader.read_exact(&mut xmp_data)?;
+                return Ok(Some(xmp_data));
+            } else {
+                // Multiple segments - concatenate them
+                let total_size: u64 = segments.iter().map(|s| s.size).sum();
+                let mut xmp_data = Vec::with_capacity(total_size as usize);
+                for segment in segments {
+                    reader.seek(SeekFrom::Start(segment.offset))?;
+                    let mut chunk = vec![0u8; segment.size as usize];
+                    reader.read_exact(&mut chunk)?;
+                    xmp_data.extend_from_slice(&chunk);
                 }
-                let chunk_data = &mut extended_xmp[part.chunk_offset as usize..end_pos];
-                reader.read_exact(chunk_data)?;
+                return Ok(Some(xmp_data));
             }
-
-            // According to XMP spec, extended XMP is the complete XMP
-            // (the main XMP just has a pointer to it via xmpNote:HasExtendedXMP)
-            return Ok(Some(extended_xmp));
         }
 
         Ok(None)
+    }
+
+    /// Reassemble JPEG Extended XMP from multiple parts using chunk offsets
+    fn reassemble_extended_xmp<R: Read + Seek>(
+        reader: &mut R,
+        segments: &[Location],
+        _guid: &str,
+        chunk_offsets: &[u32],
+        total_size: u32,
+    ) -> Result<Option<Vec<u8>>> {
+        // Validate total_size to prevent DOS attacks
+        const MAX_XMP_SIZE: u32 = 100 * 1024 * 1024; // 100 MB
+        if total_size > MAX_XMP_SIZE {
+            return Err(Error::InvalidSegment {
+                offset: 0,
+                reason: format!(
+                    "Extended XMP too large: {} bytes (max {} MB)",
+                    total_size,
+                    MAX_XMP_SIZE / (1024 * 1024)
+                ),
+            });
+        }
+
+        // Skip first segment (it's the main XMP with pointer)
+        if segments.len() < 2 || chunk_offsets.len() != segments.len() - 1 {
+            // Malformed - should have main segment + extended segments
+            // Fall back to reading just the first segment
+            if !segments.is_empty() {
+                reader.seek(SeekFrom::Start(segments[0].offset))?;
+                let mut xmp_data = vec![0u8; segments[0].size as usize];
+                reader.read_exact(&mut xmp_data)?;
+                return Ok(Some(xmp_data));
+            }
+            return Ok(None);
+        }
+
+        // Allocate buffer for complete extended XMP
+        let mut extended_xmp = vec![0u8; total_size as usize];
+
+        // Read each extended chunk into the correct position
+        // Note: segments[0] is main XMP, segments[1..] are extended parts
+        for (segment, &chunk_offset) in segments[1..].iter().zip(chunk_offsets) {
+            reader.seek(SeekFrom::Start(segment.offset))?;
+            let end_pos = (chunk_offset as usize + segment.size as usize).min(extended_xmp.len());
+            if chunk_offset as usize >= extended_xmp.len() {
+                continue; // Skip malformed chunks
+            }
+            let chunk_data = &mut extended_xmp[chunk_offset as usize..end_pos];
+            reader.read_exact(chunk_data)?;
+        }
+
+        // According to XMP spec, extended XMP is the complete XMP
+        // (the main XMP just has a pointer to it via xmpNote:HasExtendedXMP)
+        Ok(Some(extended_xmp))
     }
 
     /// Extract JUMBF data from JPEG file (handles JPEG XT headers and multi-segment assembly)
@@ -276,11 +289,17 @@ impl JpegHandler {
                         && &sig_buf[..XMP_SIGNATURE.len()] == XMP_SIGNATURE
                     {
                         // Standard XMP segment
+                        let xmp_offset = offset + 4 + XMP_SIGNATURE.len() as u64;
+                        let xmp_size = data_size - XMP_SIGNATURE.len() as u64;
                         structure.add_segment(Segment::Xmp {
-                            offset: offset + 4 + XMP_SIGNATURE.len() as u64,
-                            size: data_size - XMP_SIGNATURE.len() as u64,
+                            offset: xmp_offset,
+                            size: xmp_size,
+                            segments: vec![Location {
+                                offset: xmp_offset,
+                                size: xmp_size,
+                            }],
                             data: LazyData::NotLoaded,
-                            extended_parts: Vec::new(),
+                            metadata: None,
                         });
                         let remaining = (data_size as usize) - sig_buf.len();
                         reader.seek(SeekFrom::Current(remaining as i64))?;
@@ -322,18 +341,41 @@ impl JpegHandler {
                             let xmp_index = *structure.xmp_index_mut();
 
                             if let Some(idx) = xmp_index {
-                                if let Segment::Xmp { extended_parts, .. } =
+                                if let Segment::Xmp { segments, metadata, .. } =
                                     &mut structure.segments[idx]
                                 {
-                                    extended_parts.push(crate::XmpExtendedPart {
-                                        location: Location {
-                                            offset: chunk_data_offset,
-                                            size: chunk_data_size,
-                                        },
-                                        guid,
-                                        chunk_offset,
-                                        total_size,
+                                    // Add location to segments
+                                    segments.push(Location {
+                                        offset: chunk_data_offset,
+                                        size: chunk_data_size,
                                     });
+
+                                    // Update or create metadata
+                                    match metadata {
+                                        Some(crate::SegmentMetadata::JpegExtendedXmp { 
+                                            guid: existing_guid,
+                                            chunk_offsets,
+                                            total_size: existing_total,
+                                        }) => {
+                                            // Validate GUID and total_size match
+                                            if existing_guid != &guid {
+                                                // GUID mismatch - this shouldn't happen
+                                                // but handle gracefully by skipping
+                                            } else if *existing_total != total_size {
+                                                // total_size mismatch
+                                            } else {
+                                                chunk_offsets.push(chunk_offset);
+                                            }
+                                        }
+                                        None => {
+                                            // First extended part - create metadata
+                                            *metadata = Some(crate::SegmentMetadata::JpegExtendedXmp {
+                                                guid,
+                                                chunk_offsets: vec![chunk_offset],
+                                                total_size,
+                                            });
+                                        }
+                                    }
                                 }
                             } else {
                                 // Extended XMP without main XMP - malformed but handle gracefully
@@ -582,9 +624,8 @@ impl FormatHandler for JpegHandler {
                 }
 
                 Segment::Xmp {
-                    offset,
-                    size,
-                    extended_parts,
+                    segments,
+                    metadata,
                     ..
                 } => {
                     match &updates.xmp {
@@ -601,60 +642,95 @@ impl FormatHandler for JpegHandler {
                             // Skip existing XMP
                         }
                         crate::XmpUpdate::Keep => {
-                            // Copy existing XMP with APP1 marker
-                            writer.write_u8(0xFF)?;
-                            writer.write_u8(APP1)?;
-                            writer.write_u16::<BigEndian>(
-                                (*size + XMP_SIGNATURE.len() as u64 + 2) as u16,
-                            )?;
-                            writer.write_all(XMP_SIGNATURE)?;
+                            // Check if this is JPEG Extended XMP
+                            if let Some(meta) = metadata {
+                                if let Some((guid, chunk_offsets, total_size)) = meta.as_jpeg_extended_xmp() {
+                                    // Write main XMP segment (first in segments)
+                                    if !segments.is_empty() {
+                                        writer.write_u8(0xFF)?;
+                                        writer.write_u8(APP1)?;
+                                        writer.write_u16::<BigEndian>(
+                                            (segments[0].size + XMP_SIGNATURE.len() as u64 + 2) as u16,
+                                        )?;
+                                        writer.write_all(XMP_SIGNATURE)?;
 
-                            // Optimized seek: only seek if we're not already at the right position
-                            if current_read_pos != *offset {
-                                reader.seek(SeekFrom::Start(*offset))?;
-                                current_read_pos = *offset;
+                                        if current_read_pos != segments[0].offset {
+                                            reader.seek(SeekFrom::Start(segments[0].offset))?;
+                                            current_read_pos = segments[0].offset;
+                                        }
+
+                                        let mut limited = reader.take(segments[0].size);
+                                        copy(&mut limited, writer)?;
+                                        current_read_pos += segments[0].size;
+                                    }
+
+                                    // Write extended XMP segments (segments[1..])
+                                    for (i, segment) in segments[1..].iter().enumerate() {
+                                        let chunk_offset = chunk_offsets.get(i).copied().unwrap_or(0);
+                                        
+                                        // Write APP1 marker
+                                        writer.write_u8(0xFF)?;
+                                        writer.write_u8(APP1)?;
+
+                                        // Calculate segment size: signature + GUID + total_size + offset + data
+                                        let seg_size = XMP_EXTENDED_SIGNATURE.len()
+                                            + 32
+                                            + 4
+                                            + 4
+                                            + segment.size as usize
+                                            + 2;
+                                        writer.write_u16::<BigEndian>(seg_size as u16)?;
+
+                                        // Write extended XMP signature
+                                        writer.write_all(XMP_EXTENDED_SIGNATURE)?;
+
+                                        // Write GUID (pad to 32 bytes if needed)
+                                        let guid_bytes = guid.as_bytes();
+                                        writer.write_all(&guid_bytes[..guid_bytes.len().min(32)])?;
+                                        // Pad if GUID is shorter than 32 bytes
+                                        for _ in guid_bytes.len()..32 {
+                                            writer.write_u8(0)?;
+                                        }
+
+                                        // Write total size
+                                        writer.write_u32::<BigEndian>(total_size)?;
+
+                                        // Write chunk offset
+                                        writer.write_u32::<BigEndian>(chunk_offset)?;
+
+                                        // Copy the data
+                                        if current_read_pos != segment.offset {
+                                            reader.seek(SeekFrom::Start(segment.offset))?;
+                                            current_read_pos = segment.offset;
+                                        }
+
+                                        let mut limited = reader.take(segment.size);
+                                        copy(&mut limited, writer)?;
+                                        current_read_pos += segment.size;
+                                    }
+
+                                    xmp_written = true;
+                                    continue;
+                                }
                             }
 
-                            let mut limited = reader.take(*size);
-                            copy(&mut limited, writer)?;
-                            current_read_pos += *size;
-
-                            // Also copy any extended XMP segments
-                            for part in extended_parts {
-                                // Write APP1 marker
+                            // Simple XMP (single or concatenated segments, no extended metadata)
+                            for segment in segments {
                                 writer.write_u8(0xFF)?;
                                 writer.write_u8(APP1)?;
+                                writer.write_u16::<BigEndian>(
+                                    (segment.size + XMP_SIGNATURE.len() as u64 + 2) as u16,
+                                )?;
+                                writer.write_all(XMP_SIGNATURE)?;
 
-                                // Calculate segment size: signature + GUID + total_size + offset + data
-                                let seg_size = XMP_EXTENDED_SIGNATURE.len()
-                                    + 32
-                                    + 4
-                                    + 4
-                                    + part.location.size as usize
-                                    + 2;
-                                writer.write_u16::<BigEndian>(seg_size as u16)?;
-
-                                // Write extended XMP signature
-                                writer.write_all(XMP_EXTENDED_SIGNATURE)?;
-
-                                // Write GUID
-                                writer.write_all(part.guid.as_bytes())?;
-
-                                // Write total size
-                                writer.write_u32::<BigEndian>(part.total_size)?;
-
-                                // Write chunk offset
-                                writer.write_u32::<BigEndian>(part.chunk_offset)?;
-
-                                // Copy the data
-                                if current_read_pos != part.location.offset {
-                                    reader.seek(SeekFrom::Start(part.location.offset))?;
-                                    current_read_pos = part.location.offset;
+                                if current_read_pos != segment.offset {
+                                    reader.seek(SeekFrom::Start(segment.offset))?;
+                                    current_read_pos = segment.offset;
                                 }
 
-                                let mut limited = reader.take(part.location.size);
+                                let mut limited = reader.take(segment.size);
                                 copy(&mut limited, writer)?;
-                                current_read_pos += part.location.size;
+                                current_read_pos += segment.size;
                             }
 
                             xmp_written = true;

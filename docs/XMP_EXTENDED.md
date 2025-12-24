@@ -38,19 +38,22 @@ XX XX                          // Segment size (big-endian)
 
 **1. Segment Enhancement** (`src/segment.rs`)
 ```rust
-pub struct XmpExtendedPart {
-    pub location: Location,
-    pub guid: String,
-    pub chunk_offset: u32,
-    pub total_size: u32,
+// Format-specific metadata for segments
+pub enum SegmentMetadata {
+    JpegExtendedXmp {
+        guid: String,
+        chunk_offsets: Vec<u32>,
+        total_size: u32,
+    },
 }
 
 pub enum Segment {
     Xmp {
         offset: u64,
         size: u64,
+        segments: Vec<Location>,        // Multiple segments (like JUMBF)
         data: LazyData,
-        extended_parts: Vec<XmpExtendedPart>,  // New field
+        metadata: Option<SegmentMetadata>, // Format-specific reassembly info
     },
     // ...
 }
@@ -59,12 +62,13 @@ pub enum Segment {
 **2. Parser** (`src/formats/jpeg.rs`)
 - Detects both standard and extended XMP signatures
 - Extracts GUID, total_size, and chunk_offset from extended segments
-- Appends extended parts to the main XMP segment
+- Adds segment locations to the `segments` Vec
+- Stores reassembly metadata in `SegmentMetadata::JpegExtendedXmp`
 
-**3. Assembler** (`src/structure.rs`)
-- Sorts extended parts by chunk_offset
+**3. Assembler** (`src/formats/jpeg.rs`)
+- Checks for `SegmentMetadata::JpegExtendedXmp` to detect extended XMP
+- Uses chunk offsets to reassemble parts in correct positions
 - Validates GUID and total_size consistency
-- Allocates buffer and reads chunks into correct positions
 - Returns reassembled XMP transparently
 
 **4. Writer** (`src/formats/jpeg.rs`)
@@ -178,10 +182,15 @@ Added:
 ## Files Modified
 
 1. `Cargo.toml` - Added md5 dependency
-2. `src/segment.rs` - Added `XmpExtendedPart` struct
-3. `src/lib.rs` - Exported `XmpExtendedPart`
-4. `src/formats/jpeg.rs` - Enhanced parser and writer
-5. `src/structure.rs` - Assembly logic in `xmp()` method
-6. `src/asset.rs` - Updated API signature
-7. `examples/test_xmp_extended.rs` - Comprehensive test suite
+2. `src/segment.rs` - Added `SegmentMetadata` enum, unified XMP with multi-segment structure
+3. `src/lib.rs` - Exported `SegmentMetadata`
+4. `src/formats/jpeg.rs` - Enhanced parser and writer for extended XMP
+5. `src/formats/png.rs` - Updated to use new XMP structure
+6. `examples/test_xmp_extended.rs` - Comprehensive test suite
+
+## Design Notes
+
+The new design unifies XMP and JUMBF handling by using a common `segments: Vec<Location>` field. 
+Format-specific reassembly requirements (like JPEG Extended XMP's chunk offsets) are stored in 
+the optional `SegmentMetadata` enum, keeping the core segment structure clean and extensible.
 

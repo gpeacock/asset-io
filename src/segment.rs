@@ -27,17 +27,36 @@ pub const DEFAULT_CHUNK_SIZE: usize = 65536;
 /// - Image data: Handled via streaming, not single allocation
 pub const MAX_SEGMENT_SIZE: u64 = 256 * 1024 * 1024;
 
-/// Information about an extended XMP chunk
+/// Format-specific metadata for segments
+/// 
+/// This allows storing format-specific information needed for proper
+/// reassembly or interpretation of multi-part segments.
 #[derive(Debug, Clone)]
-pub struct XmpExtendedPart {
-    /// Location of the chunk data (after headers)
-    pub location: Location,
-    /// GUID identifying this XMP set (all parts share same GUID)
-    pub guid: String,
-    /// Offset where this chunk belongs in the reassembled XMP
-    pub chunk_offset: u32,
-    /// Total size of the complete extended XMP when reassembled
-    pub total_size: u32,
+pub enum SegmentMetadata {
+    /// JPEG Extended XMP reassembly information
+    /// 
+    /// JPEG Extended XMP uses a special format where chunks have explicit offsets
+    /// and need to be reassembled in a specific order (not just concatenated).
+    JpegExtendedXmp {
+        /// GUID identifying this XMP set (all parts share same GUID)
+        guid: String,
+        /// Offset where each chunk belongs in the reassembled XMP
+        /// Indexed by segment index in the segments Vec
+        chunk_offsets: Vec<u32>,
+        /// Total size of the complete extended XMP when reassembled
+        total_size: u32,
+    },
+}
+
+impl SegmentMetadata {
+    /// Get JPEG Extended XMP metadata if this is that variant
+    pub fn as_jpeg_extended_xmp(&self) -> Option<(&str, &[u32], u32)> {
+        match self {
+            Self::JpegExtendedXmp { guid, chunk_offsets, total_size } => {
+                Some((guid.as_str(), chunk_offsets.as_slice(), *total_size))
+            }
+        }
+    }
 }
 
 /// Lazy-loaded data - only reads when accessed
@@ -141,13 +160,12 @@ pub enum Segment {
     Xmp {
         offset: u64,
         size: u64,
+        /// Multiple segments (e.g., JPEG Extended XMP spans multiple APP1)
+        segments: Vec<Location>,
         /// Lazy-loaded data
         data: LazyData,
-        /// Extended XMP segments if this is a multi-part XMP (JPEG-specific)
-        /// 
-        /// Note: This is format-specific (JPEG Extended XMP) and should eventually
-        /// be moved to a JPEG-specific structure. For now, it's always empty for non-JPEG formats.
-        extended_parts: Vec<XmpExtendedPart>,
+        /// Optional format-specific metadata for multi-segment reassembly
+        metadata: Option<SegmentMetadata>,
     },
 
     /// JUMBF/C2PA data
