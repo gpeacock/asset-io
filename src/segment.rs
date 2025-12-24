@@ -19,7 +19,7 @@ pub type ByteRange = Location;
 pub const DEFAULT_CHUNK_SIZE: usize = 65536;
 
 /// Maximum size for a single segment to prevent DOS attacks (256 MB)
-/// 
+///
 /// This prevents malicious files from requesting multi-GB allocations.
 /// Legitimate segments are typically much smaller:
 /// - XMP: Usually < 1 MB
@@ -28,13 +28,13 @@ pub const DEFAULT_CHUNK_SIZE: usize = 65536;
 pub const MAX_SEGMENT_SIZE: u64 = 256 * 1024 * 1024;
 
 /// Format-specific metadata for segments
-/// 
+///
 /// This allows storing format-specific information needed for proper
 /// reassembly or interpretation of multi-part segments.
 #[derive(Debug, Clone)]
 pub enum SegmentMetadata {
     /// JPEG Extended XMP reassembly information
-    /// 
+    ///
     /// JPEG Extended XMP uses a special format where chunks have explicit offsets
     /// and need to be reassembled in a specific order (not just concatenated).
     JpegExtendedXmp {
@@ -52,9 +52,11 @@ impl SegmentMetadata {
     /// Get JPEG Extended XMP metadata if this is that variant
     pub fn as_jpeg_extended_xmp(&self) -> Option<(&str, &[u32], u32)> {
         match self {
-            Self::JpegExtendedXmp { guid, chunk_offsets, total_size } => {
-                Some((guid.as_str(), chunk_offsets.as_slice(), *total_size))
-            }
+            Self::JpegExtendedXmp {
+                guid,
+                chunk_offsets,
+                total_size,
+            } => Some((guid.as_str(), chunk_offsets.as_slice(), *total_size)),
         }
     }
 }
@@ -81,11 +83,7 @@ pub enum LazyData {
 impl LazyData {
     /// Create from a memory-mapped slice
     #[cfg(feature = "memory-mapped")]
-    pub fn from_mmap(
-        mmap: std::sync::Arc<memmap2::Mmap>,
-        offset: usize,
-        size: usize,
-    ) -> Self {
+    pub fn from_mmap(mmap: std::sync::Arc<memmap2::Mmap>, offset: usize, size: usize) -> Self {
         Self::MemoryMapped { mmap, offset, size }
     }
 
@@ -104,7 +102,7 @@ impl LazyData {
                         ),
                     });
                 }
-                
+
                 let mut buffer = vec![0u8; location.size as usize];
                 reader.read_exact(&mut buffer)?;
                 *self = Self::Loaded(buffer);
@@ -117,22 +115,26 @@ impl LazyData {
             #[cfg(feature = "memory-mapped")]
             Self::MemoryMapped { mmap, offset, size } => {
                 // Validate bounds for memory-mapped access
-                let end = offset.checked_add(*size)
-                    .ok_or_else(|| crate::Error::InvalidSegment {
-                        offset: 0,
-                        reason: "Memory-mapped region overflow".into(),
-                    })?;
-                
+                let end =
+                    offset
+                        .checked_add(*size)
+                        .ok_or_else(|| crate::Error::InvalidSegment {
+                            offset: 0,
+                            reason: "Memory-mapped region overflow".into(),
+                        })?;
+
                 if end > mmap.len() {
                     return Err(crate::Error::InvalidSegment {
                         offset: *offset as u64,
                         reason: format!(
                             "Memory-mapped region out of bounds: {}..{} (file size: {})",
-                            offset, end, mmap.len()
+                            offset,
+                            end,
+                            mmap.len()
                         ),
                     });
                 }
-                
+
                 // Return slice from mmap (zero-copy!)
                 Ok(&mmap[*offset..end])
             }
@@ -179,19 +181,16 @@ pub enum Segment {
     },
 
     /// Image data (can be hashed without loading)
-    ImageData {
-        offset: u64,
-        size: u64,
-    },
+    ImageData { offset: u64, size: u64 },
 
     /// EXIF metadata
-    /// 
+    ///
     /// Supported formats:
     /// - JPEG: APP1 marker with "Exif\0\0" header (offset points after header)
     /// - PNG: eXIf chunk with raw TIFF data (offset points to TIFF data)
     /// - TIFF: Native format (EXIF is the file itself)
     /// - HEIF/WebP: Can contain EXIF metadata
-    /// 
+    ///
     /// Note: The segment itself is always available. The `thumbnail` field is only
     /// populated when the `thumbnails` feature is enabled and EXIF is parsed.
     Exif {
@@ -229,10 +228,10 @@ impl Segment {
     }
 
     /// Check if this segment is hashable (DEPRECATED)
-    /// 
+    ///
     /// This method is deprecated. Hashing policy should be determined by the caller
     /// using `hashable_ranges()` with exclusion patterns, not by the parser.
-    /// 
+    ///
     /// This always returns false now. Use `segments_by_path("image_data")` or
     /// `hashable_ranges()` with appropriate exclusions instead.
     #[deprecated(
@@ -242,7 +241,7 @@ impl Segment {
     pub fn is_hashable(&self) -> bool {
         false
     }
-    
+
     /// Get a human-readable path/identifier for this segment
     /// Used for box-based hashing and segment identification
     pub fn path(&self) -> &str {
@@ -266,7 +265,7 @@ impl Segment {
 }
 
 /// Iterator over chunks of segment data for streaming
-/// 
+///
 /// This allows hashing large segments without loading them entirely into memory.
 pub struct ChunkedSegmentReader<R: Read> {
     reader: R,
@@ -283,21 +282,21 @@ impl<R: Read> ChunkedSegmentReader<R> {
             chunk_size,
         }
     }
-    
+
     /// Read the next chunk
     pub fn read_chunk(&mut self) -> Result<Option<Vec<u8>>> {
         if self.remaining == 0 {
             return Ok(None);
         }
-        
+
         let to_read = (self.remaining as usize).min(self.chunk_size);
         let mut buffer = vec![0u8; to_read];
         self.reader.read_exact(&mut buffer)?;
         self.remaining -= to_read as u64;
-        
+
         Ok(Some(buffer))
     }
-    
+
     /// Get remaining bytes
     pub fn remaining(&self) -> u64 {
         self.remaining
@@ -306,7 +305,7 @@ impl<R: Read> ChunkedSegmentReader<R> {
 
 impl<R: Read> Iterator for ChunkedSegmentReader<R> {
     type Item = Result<Vec<u8>>;
-    
+
     fn next(&mut self) -> Option<Self::Item> {
         self.read_chunk().transpose()
     }

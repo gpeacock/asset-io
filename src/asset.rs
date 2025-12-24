@@ -57,8 +57,6 @@ enum Handler {
     #[cfg(feature = "png")]
     Png(PngHandler),
 
-    #[cfg(feature = "bmff")]
-    Bmff, // TODO: Add BMFF handler
 }
 
 impl Handler {
@@ -69,9 +67,6 @@ impl Handler {
 
             #[cfg(feature = "png")]
             Handler::Png(h) => h.parse(reader),
-
-            #[cfg(feature = "bmff")]
-            Handler::Bmff => Err(Error::UnsupportedFormat),
         }
     }
 
@@ -88,9 +83,6 @@ impl Handler {
 
             #[cfg(feature = "png")]
             Handler::Png(h) => h.write(structure, reader, writer, updates),
-
-            #[cfg(feature = "bmff")]
-            Handler::Bmff => Err(Error::UnsupportedFormat),
         }
     }
 }
@@ -159,7 +151,7 @@ impl<R: Read + Seek> Asset<R> {
     }
 
     /// Get a mutable reference to the reader
-    /// 
+    ///
     /// This allows advanced operations like chunked reading for hashing
     pub fn reader_mut(&mut self) -> &mut R {
         &mut self.reader
@@ -171,7 +163,8 @@ impl<R: Read + Seek> Asset<R> {
         range: crate::ByteRange,
         chunk_size: usize,
     ) -> Result<crate::ChunkedSegmentReader<std::io::Take<&mut R>>> {
-        self.structure.read_range_chunked(&mut self.reader, range, chunk_size)
+        self.structure
+            .read_range_chunked(&mut self.reader, range, chunk_size)
     }
 
     /// Create a chunked reader for a segment (convenience method)
@@ -180,7 +173,8 @@ impl<R: Read + Seek> Asset<R> {
         segment_index: usize,
         chunk_size: usize,
     ) -> Result<crate::ChunkedSegmentReader<std::io::Take<&mut R>>> {
-        self.structure.read_segment_chunked(&mut self.reader, segment_index, chunk_size)
+        self.structure
+            .read_segment_chunked(&mut self.reader, segment_index, chunk_size)
     }
 }
 
@@ -224,12 +218,6 @@ fn detect_format<R: Read + Seek>(reader: &mut R) -> Result<Format> {
         return Ok(Format::Png);
     }
 
-    // MP4/MOV: Check for ftyp box (offset 4-8)
-    #[cfg(feature = "bmff")]
-    if n >= 12 && &header[4..8] == b"ftyp" {
-        return Ok(Format::Bmff);
-    }
-
     Err(Error::UnsupportedFormat)
 }
 
@@ -242,8 +230,7 @@ fn get_handler(format: Format) -> Result<Handler> {
         #[cfg(feature = "png")]
         Format::Png => Ok(Handler::Png(PngHandler::new())),
 
-        #[cfg(feature = "bmff")]
-        Format::Bmff => Err(Error::UnsupportedFormat), // TODO: Implement BMFF handler
+        _ => Err(Error::UnsupportedFormat),
     }
 }
 

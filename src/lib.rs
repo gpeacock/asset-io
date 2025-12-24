@@ -73,17 +73,20 @@ mod error;
 mod formats;
 mod segment;
 mod structure;
+pub mod thumbnail;
 #[cfg(feature = "thumbnails")]
 mod tiff;
-pub mod thumbnail;
 
 pub use asset::{Asset, AssetBuilder};
 pub use error::{Error, Result};
 pub use formats::FormatHandler;
-pub use segment::{LazyData, Location, ByteRange, Segment, SegmentMetadata, ChunkedSegmentReader, DEFAULT_CHUNK_SIZE, MAX_SEGMENT_SIZE};
+pub use segment::{
+    ByteRange, ChunkedSegmentReader, LazyData, Location, Segment, SegmentMetadata,
+    DEFAULT_CHUNK_SIZE, MAX_SEGMENT_SIZE,
+};
 pub use structure::FileStructure;
 pub use thumbnail::{
-    EmbeddedThumbnail, ThumbnailFormat, ThumbnailGenerator, ThumbnailOptions, format_hint,
+    format_hint, EmbeddedThumbnail, ThumbnailFormat, ThumbnailGenerator, ThumbnailOptions,
 };
 
 #[cfg(feature = "jpeg")]

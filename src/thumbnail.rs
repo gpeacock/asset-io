@@ -40,13 +40,13 @@ use crate::{error::Result, Format};
 pub struct ThumbnailOptions {
     /// Maximum thumbnail width in pixels
     pub max_width: u32,
-    
+
     /// Maximum thumbnail height in pixels
     pub max_height: u32,
-    
+
     /// JPEG quality for output (1-100)
     pub quality: u8,
-    
+
     /// Prefer embedded thumbnails if available (faster)
     pub prefer_embedded: bool,
 }
@@ -88,16 +88,16 @@ pub enum ThumbnailFormat {
 pub struct EmbeddedThumbnail {
     /// Offset of thumbnail data in the file
     pub offset: u64,
-    
+
     /// Size of thumbnail data in bytes
     pub size: u64,
-    
+
     /// Format of the thumbnail
     pub format: ThumbnailFormat,
-    
+
     /// Width in pixels (if known)
     pub width: Option<u32>,
-    
+
     /// Height in pixels (if known)
     pub height: Option<u32>,
 }
@@ -119,7 +119,7 @@ impl EmbeddedThumbnail {
             height,
         }
     }
-    
+
     /// Create a new embedded thumbnail with dimensions (for testing/legacy)
     pub fn with_dimensions(
         data: Vec<u8>,
@@ -136,7 +136,7 @@ impl EmbeddedThumbnail {
             height: Some(height),
         }
     }
-    
+
     /// Check if this thumbnail is within the requested size
     pub fn fits(&self, max_width: u32, max_height: u32) -> bool {
         match (self.width, self.height) {
@@ -167,7 +167,7 @@ impl EmbeddedThumbnail {
 ///         
 ///         // Encode as JPEG
 ///         let mut buf = Vec::new();
-///         thumb.write_to(&mut std::io::Cursor::new(&mut buf), 
+///         thumb.write_to(&mut std::io::Cursor::new(&mut buf),
 ///                        image::ImageFormat::Jpeg)?;
 ///         Ok(buf)
 ///     }
@@ -197,4 +197,3 @@ pub fn format_hint(format: Format) -> &'static str {
         Format::Bmff => "mp4",
     }
 }
-

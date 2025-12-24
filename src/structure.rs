@@ -1,12 +1,12 @@
 //! File structure representation
 
+#[cfg(feature = "thumbnails")]
+use crate::thumbnail::EmbeddedThumbnail;
 use crate::{
     error::Result,
     segment::{ByteRange, ChunkedSegmentReader, Location, Segment},
     Format,
 };
-#[cfg(feature = "thumbnails")]
-use crate::thumbnail::EmbeddedThumbnail;
 use std::io::{Read, Seek, SeekFrom, Take};
 
 /// Represents the discovered structure of a file
@@ -54,7 +54,7 @@ impl FileStructure {
     }
 
     /// Get a slice of data from memory-mapped file (zero-copy)
-    /// 
+    ///
     /// Returns None if:
     /// - No memory map is attached
     /// - The range is out of bounds
@@ -64,7 +64,7 @@ impl FileStructure {
         self.mmap.as_ref().and_then(|mmap| {
             let start = range.offset as usize;
             let end = start.checked_add(range.size as usize)?;
-            mmap.get(start..end)  // Returns None instead of panicking
+            mmap.get(start..end) // Returns None instead of panicking
         })
     }
 
@@ -194,7 +194,7 @@ impl FileStructure {
     }
 
     /// Get all image data segments (DEPRECATED)
-    /// 
+    ///
     /// This method is deprecated. Use `segments_by_path("image_data")` or
     /// `hashable_ranges()` with appropriate exclusions instead.
     ///  
@@ -218,13 +218,9 @@ impl FileStructure {
     // ============================================================================
 
     /// Read a specific byte range from the file
-    /// 
+    ///
     /// This is useful for data hash models that need to hash arbitrary ranges.
-    pub fn read_range<R: Read + Seek>(
-        &self,
-        reader: &mut R,
-        range: ByteRange,
-    ) -> Result<Vec<u8>> {
+    pub fn read_range<R: Read + Seek>(&self, reader: &mut R, range: ByteRange) -> Result<Vec<u8>> {
         reader.seek(SeekFrom::Start(range.offset))?;
         let mut buffer = vec![0u8; range.size as usize];
         reader.read_exact(&mut buffer)?;
@@ -232,7 +228,7 @@ impl FileStructure {
     }
 
     /// Create a chunked reader for a byte range
-    /// 
+    ///
     /// This allows streaming through a range without loading it all into memory.
     /// Useful for hashing large ranges efficiently.
     pub fn read_range_chunked<'a, R: Read + Seek>(
@@ -247,10 +243,10 @@ impl FileStructure {
     }
 
     /// Get byte ranges for all segments EXCEPT those matching the exclusion patterns
-    /// 
+    ///
     /// This is useful for C2PA data hash which needs to hash everything except
     /// the C2PA segment itself.
-    /// 
+    ///
     /// # Example
     /// ```no_run
     /// # use asset_io::*;
@@ -294,7 +290,7 @@ impl FileStructure {
     }
 
     /// Get segments matching a path pattern
-    /// 
+    ///
     /// Useful for box-based hashing where specific segments are hashed by name.
     pub fn segments_by_path(&self, pattern: &str) -> Vec<(usize, &Segment)> {
         self.segments
@@ -305,21 +301,23 @@ impl FileStructure {
     }
 
     /// Get all segments except those matching exclusion patterns
-    /// 
+    ///
     /// Returns (index, segment, location) for each segment to be hashed.
     pub fn segments_excluding(&self, exclusions: &[&str]) -> Vec<(usize, &Segment, Location)> {
         self.segments
             .iter()
             .enumerate()
             .filter(|(_, seg)| {
-                !exclusions.iter().any(|pattern| seg.path().contains(pattern))
+                !exclusions
+                    .iter()
+                    .any(|pattern| seg.path().contains(pattern))
             })
             .map(|(i, seg)| (i, seg, seg.location()))
             .collect()
     }
 
     /// Create a chunked reader for a specific segment
-    /// 
+    ///
     /// This allows streaming through segment data without loading it all into memory.
     pub fn read_segment_chunked<'a, R: Read + Seek>(
         &self,
@@ -333,11 +331,11 @@ impl FileStructure {
         let taken = reader.take(loc.size);
         Ok(ChunkedSegmentReader::new(taken, loc.size, chunk_size))
     }
-    
+
     // ========================================================================
     // Thumbnail Generation Support
     // ========================================================================
-    
+
     /// Get the byte range of the main image data
     ///
     /// This returns the location of the compressed image data in the file,
@@ -350,7 +348,7 @@ impl FileStructure {
     ///
     /// ```rust,ignore
     /// let range = structure.image_data_range().unwrap();
-    /// 
+    ///
     /// // Zero-copy with memory mapping
     /// if let Some(slice) = structure.get_mmap_slice(range) {
     ///     // Pass directly to decoder
@@ -366,7 +364,7 @@ impl FileStructure {
             _ => None,
         })
     }
-    
+
     /// Try to extract an embedded thumbnail from the file
     ///
     /// Many image formats include pre-rendered thumbnails for quick preview:

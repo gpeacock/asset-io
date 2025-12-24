@@ -43,10 +43,10 @@ impl PngHandler {
         if let crate::Segment::Xmp { offset, size, .. } = &structure.segments()[index] {
             // PNG stores XMP in a single iTXt chunk - no extended XMP like JPEG
             reader.seek(SeekFrom::Start(*offset))?;
-            
+
             let mut xmp_data = vec![0u8; *size as usize];
             reader.read_exact(&mut xmp_data)?;
-            
+
             return Ok(Some(xmp_data));
         }
 
@@ -68,7 +68,7 @@ impl PngHandler {
             if let crate::Segment::Jumbf { offset, size, .. } = &structure.segments()[index] {
                 // PNG stores JUMBF directly in caBX chunks - no format-specific headers to strip
                 reader.seek(SeekFrom::Start(*offset))?;
-                
+
                 let mut buf = vec![0u8; *size as usize];
                 reader.read_exact(&mut buf)?;
                 result.extend_from_slice(&buf);
@@ -127,7 +127,7 @@ impl PngHandler {
                     structure.add_segment(Segment::Other {
                         offset: chunk_start,
                         size: 8 + chunk_len + 4, // length + type + data + CRC
-                        marker: 0, // PNG doesn't use markers
+                        marker: 0,               // PNG doesn't use markers
                     });
                     reader.seek(SeekFrom::Current((chunk_len + 4) as i64))?; // Skip data + CRC
                 }
@@ -165,11 +165,11 @@ impl PngHandler {
                         // iTXt format: keyword\0 + compression_flag(1) + compression_method(1) + language_tag\0 + translated_keyword\0 + text
                         // For XMP: "XML:com.adobe.xmp\0" + 0x00 + 0x00 + "\0" + "\0" + XMP_data
                         // Skip: compression_flag(1) + compression_method(1) + language_tag\0 + translated_keyword\0
-                        
+
                         // Read compression flag and method
                         let _compression_flag = reader.read_u8()?;
                         let _compression_method = reader.read_u8()?;
-                        
+
                         // Skip language tag (null-terminated)
                         let mut lang_consumed = 0;
                         loop {
@@ -179,7 +179,7 @@ impl PngHandler {
                                 break;
                             }
                         }
-                        
+
                         // Skip translated keyword (null-terminated)
                         let mut trans_consumed = 0;
                         loop {
@@ -190,8 +190,11 @@ impl PngHandler {
                             }
                         }
 
-                        let xmp_offset = data_offset + keyword_len as u64 + 2 + lang_consumed + trans_consumed;
-                        let xmp_size = chunk_len.saturating_sub(keyword_len as u64 + 2 + lang_consumed + trans_consumed);
+                        let xmp_offset =
+                            data_offset + keyword_len as u64 + 2 + lang_consumed + trans_consumed;
+                        let xmp_size = chunk_len.saturating_sub(
+                            keyword_len as u64 + 2 + lang_consumed + trans_consumed,
+                        );
 
                         structure.add_segment(Segment::Xmp {
                             offset: xmp_offset,
@@ -270,7 +273,7 @@ impl PngHandler {
     /// Calculate CRC32 for PNG chunk
     fn calculate_crc(chunk_type: &[u8], data: &[u8]) -> u32 {
         let mut crc = 0xFFFFFFFF_u32;
-        
+
         // Process chunk type
         for &byte in chunk_type {
             crc ^= byte as u32;
@@ -282,7 +285,7 @@ impl PngHandler {
                 }
             }
         }
-        
+
         // Process data
         for &byte in data {
             crc ^= byte as u32;
@@ -294,7 +297,7 @@ impl PngHandler {
                 }
             }
         }
-        
+
         crc ^ 0xFFFFFFFF
     }
 
@@ -302,17 +305,17 @@ impl PngHandler {
     fn write_chunk<W: Write>(writer: &mut W, chunk_type: &[u8], data: &[u8]) -> Result<()> {
         // Write length
         writer.write_u32::<BigEndian>(data.len() as u32)?;
-        
+
         // Write type
         writer.write_all(chunk_type)?;
-        
+
         // Write data
         writer.write_all(data)?;
-        
+
         // Calculate and write CRC
         let crc = Self::calculate_crc(chunk_type, data);
         writer.write_u32::<BigEndian>(crc)?;
-        
+
         Ok(())
     }
 
@@ -320,25 +323,25 @@ impl PngHandler {
     fn write_xmp_chunk<W: Write>(writer: &mut W, xmp_data: &[u8]) -> Result<()> {
         // Build iTXt data: keyword + flags + language + translated keyword + XMP
         let mut chunk_data = Vec::with_capacity(XMP_KEYWORD.len() + 4 + xmp_data.len());
-        
+
         // Keyword
         chunk_data.extend_from_slice(XMP_KEYWORD);
-        
+
         // Compression flag (0 = uncompressed)
         chunk_data.push(0);
-        
+
         // Compression method (0 = none)
         chunk_data.push(0);
-        
+
         // Language tag (empty, null-terminated)
         chunk_data.push(0);
-        
+
         // Translated keyword (empty, null-terminated)
         chunk_data.push(0);
-        
+
         // XMP data
         chunk_data.extend_from_slice(xmp_data);
-        
+
         Self::write_chunk(writer, ITXT, &chunk_data)
     }
 }
@@ -402,22 +405,18 @@ impl FormatHandler for PngHandler {
                     continue;
                 }
 
-                Segment::Xmp {
-                    offset,
-                    size,
-                    ..
-                } => {
+                Segment::Xmp { offset, size, .. } => {
                     use crate::XmpUpdate;
-                    
+
                     match &updates.xmp {
                         XmpUpdate::Keep => {
                             // Copy existing XMP chunk
                             // We need to read the XMP data from the file
                             reader.seek(SeekFrom::Start(*offset))?;
-                            
+
                             let mut xmp_data = vec![0u8; *size as usize];
                             reader.read_exact(&mut xmp_data)?;
-                            
+
                             Self::write_xmp_chunk(writer, &xmp_data)?;
                             xmp_written = true;
                         }
@@ -432,21 +431,17 @@ impl FormatHandler for PngHandler {
                     }
                 }
 
-                Segment::Jumbf {
-                    offset,
-                    size,
-                    ..
-                } => {
+                Segment::Jumbf { offset, size, .. } => {
                     use crate::JumbfUpdate;
-                    
+
                     match &updates.jumbf {
                         JumbfUpdate::Keep => {
                             // Copy existing JUMBF chunk
                             reader.seek(SeekFrom::Start(*offset))?;
-                            
+
                             let mut jumbf_data = vec![0u8; *size as usize];
                             reader.read_exact(&mut jumbf_data)?;
-                            
+
                             Self::write_chunk(writer, C2PA, &jumbf_data)?;
                             jumbf_written = true;
                         }
@@ -465,7 +460,7 @@ impl FormatHandler for PngHandler {
                     // Copy IDAT chunk with header and CRC
                     // We need to reconstruct the chunk structure
                     let chunk_start = offset - 8; // Back to length field
-                    
+
                     reader.seek(SeekFrom::Start(chunk_start))?;
 
                     // Copy chunk: length(4) + type(4) + data(size) + crc(4)
@@ -475,12 +470,16 @@ impl FormatHandler for PngHandler {
                     writer.write_all(&buffer)?;
                 }
 
-                Segment::Other { offset, size, marker } => {
+                Segment::Other {
+                    offset,
+                    size,
+                    marker,
+                } => {
                     // Check if this is IEND - we need to write new metadata before it
                     if *marker == 0xFF {
                         // This is IEND - write any pending metadata first
-                        use crate::{XmpUpdate, JumbfUpdate};
-                        
+                        use crate::{JumbfUpdate, XmpUpdate};
+
                         if !xmp_written {
                             if let XmpUpdate::Set(new_xmp) = &updates.xmp {
                                 Self::write_xmp_chunk(writer, new_xmp)?;
@@ -509,7 +508,7 @@ impl FormatHandler for PngHandler {
                     reader.seek(SeekFrom::Start(*offset))?;
                     let mut exif_data = vec![0u8; *size as usize];
                     reader.read_exact(&mut exif_data)?;
-                    
+
                     // Write as eXIf chunk
                     Self::write_chunk(writer, EXIF, &exif_data)?;
                 }
@@ -553,11 +552,11 @@ mod tests {
             0x00, // Filter: adaptive
             0x00, // Interlace: none
         ];
-        
+
         let crc = PngHandler::calculate_crc(chunk_type, data);
         // Just verify it produces a consistent value
         assert_eq!(crc, PngHandler::calculate_crc(chunk_type, data));
-        
+
         // And that different data produces different CRC
         let mut different_data = data.to_vec();
         different_data[0] = 0xFF;
@@ -569,10 +568,10 @@ mod tests {
     fn test_png_minimal_parse() {
         // Minimal valid PNG: signature + IHDR + IEND
         let mut data = Vec::new();
-        
+
         // PNG signature
         data.extend_from_slice(PNG_SIGNATURE);
-        
+
         // IHDR chunk (1x1 RGB image)
         data.extend_from_slice(&[
             0x00, 0x00, 0x00, 0x0D, // Length: 13
@@ -588,18 +587,18 @@ mod tests {
             0x00, // Interlace: none
         ]);
         data.extend_from_slice(&0x90770c9e_u32.to_be_bytes()); // CRC
-        
+
         // IEND chunk
         data.extend_from_slice(&[
             0x00, 0x00, 0x00, 0x00, // Length: 0
         ]);
         data.extend_from_slice(b"IEND");
         data.extend_from_slice(&0xAE426082_u32.to_be_bytes()); // CRC
-        
+
         let mut reader = Cursor::new(data);
         let handler = PngHandler::new();
         let structure = handler.parse(&mut reader).unwrap();
-        
+
         assert_eq!(structure.format, Format::Png);
         assert!(structure.segments.len() >= 2); // At least Header + IEND
     }
@@ -610,9 +609,8 @@ mod tests {
         let mut reader = Cursor::new(data);
         let handler = PngHandler::new();
         let result = handler.parse(&mut reader);
-        
+
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), Error::InvalidFormat(_)));
     }
 }
-

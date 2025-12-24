@@ -37,12 +37,18 @@ fn main() -> asset_io::Result<()> {
                 if let (Some(w), Some(h)) = (thumb.width, thumb.height) {
                     println!("     Size: {}x{}", w, h);
                 }
-                println!("     Location: offset={}, size={} bytes", thumb.offset, thumb.size);
+                println!(
+                    "     Location: offset={}, size={} bytes",
+                    thumb.offset, thumb.size
+                );
 
                 // Check if it fits our requirements
                 let options = ThumbnailOptions::default();
                 if thumb.fits(options.max_width, options.max_height) {
-                    println!("     ✓ Fits requirements ({}x{})", options.max_width, options.max_height);
+                    println!(
+                        "     ✓ Fits requirements ({}x{})",
+                        options.max_width, options.max_height
+                    );
                     println!("     → Can use directly without decoding!");
                 } else {
                     println!("     ⚠ Too large, would need resizing");
@@ -64,7 +70,11 @@ fn main() -> asset_io::Result<()> {
         if let Some(range) = structure.image_data_range() {
             println!("   ✓ Image data found");
             println!("     Offset: {} bytes", range.offset);
-            println!("     Size: {} bytes ({:.2} MB)", range.size, range.size as f64 / 1024.0 / 1024.0);
+            println!(
+                "     Size: {} bytes ({:.2} MB)",
+                range.size,
+                range.size as f64 / 1024.0 / 1024.0
+            );
             println!();
             println!("   This range can be:");
             println!("   • Accessed via memory-mapping (zero-copy)");
@@ -95,7 +105,10 @@ fn main() -> asset_io::Result<()> {
                 if let Some(slice) = structure.get_mmap_slice(range) {
                     println!("   ✓ Got zero-copy slice!");
                     println!("     Size: {} bytes", slice.len());
-                    println!("     First 16 bytes: {:02X?}", &slice[..16.min(slice.len())]);
+                    println!(
+                        "     First 16 bytes: {:02X?}",
+                        &slice[..16.min(slice.len())]
+                    );
                     println!();
                     println!("   External decoder would receive:");
                     println!("   • Direct pointer to image data");

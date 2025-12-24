@@ -23,13 +23,7 @@
 //! # }
 //! ```
 
-use std::{
-    collections::HashMap,
-    fs,
-    io::Cursor,
-    path::PathBuf,
-    sync::LazyLock,
-};
+use std::{collections::HashMap, fs, io::Cursor, path::PathBuf, sync::LazyLock};
 
 use crate::{Error, Result};
 
@@ -46,7 +40,7 @@ macro_rules! define_fixtures {
         )*
 
         // Create embedded registry (small files compiled into binary)
-        static EMBEDDED_FIXTURES: LazyLock<HashMap<&'static str, (&'static [u8], &'static str)>> = 
+        static EMBEDDED_FIXTURES: LazyLock<HashMap<&'static str, (&'static [u8], &'static str)>> =
             LazyLock::new(|| {
                 #[allow(unused_mut)]
                 let mut map = HashMap::new();
@@ -65,7 +59,7 @@ macro_rules! define_fixtures {
         pub fn get_registry() -> &'static HashMap<&'static str, (&'static [u8], &'static str)> {
             &EMBEDDED_FIXTURES
         }
-        
+
         /// List all defined fixtures
         pub fn list_all_fixtures() -> Vec<&'static str> {
             vec![$($file),*]
@@ -83,7 +77,7 @@ define_fixtures!(
 );
 
 /// Get path to a fixture file
-/// 
+///
 /// Search order:
 /// 1. JUMBF_TEST_FIXTURES env var (for extended test sets)
 /// 2. Default tests/fixtures directory
@@ -95,7 +89,7 @@ pub fn fixture_path(file_name: &str) -> PathBuf {
             return path;
         }
     }
-    
+
     // Default to tests/fixtures (relative to project root)
     let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     path.push("tests/fixtures");
@@ -104,9 +98,9 @@ pub fn fixture_path(file_name: &str) -> PathBuf {
 }
 
 /// Create test streams - embedded or file-based
-/// 
+///
 /// Returns: (format, input_cursor, output_cursor)
-/// 
+///
 /// If the fixture is embedded, returns a cursor with embedded data.
 /// Otherwise, reads from the filesystem.
 pub fn create_test_streams(fixture_name: &str) -> Result<TestStreams> {
@@ -114,18 +108,17 @@ pub fn create_test_streams(fixture_name: &str) -> Result<TestStreams> {
     if let Some(fixture) = get_registry().get(fixture_name) {
         let data = fixture.0;
         let format = fixture.1;
-        
+
         let input_cursor = Cursor::new(data.to_vec());
         let output_cursor = Cursor::new(Vec::new());
-        
+
         return Ok((format, input_cursor, output_cursor));
     }
-    
+
     // Fallback to file system
     let input_path = fixture_path(fixture_name);
-    let input_data = fs::read(&input_path)
-        .map_err(Error::Io)?;
-    
+    let input_data = fs::read(&input_path).map_err(Error::Io)?;
+
     let format = input_path
         .extension()
         .and_then(|ext| ext.to_str())
@@ -134,10 +127,10 @@ pub fn create_test_streams(fixture_name: &str) -> Result<TestStreams> {
             _ => "application/octet-stream",
         })
         .unwrap_or("application/octet-stream");
-    
+
     let input_cursor = Cursor::new(input_data);
     let output_cursor = Cursor::new(Vec::new());
-    
+
     Ok((format, input_cursor, output_cursor))
 }
 
@@ -147,25 +140,24 @@ pub fn fixture_bytes(name: &str) -> Result<Vec<u8>> {
     if let Some(fixture) = get_registry().get(name) {
         return Ok(fixture.0.to_vec());
     }
-    
+
     // Read from file
-    fs::read(fixture_path(name))
-        .map_err(Error::Io)
+    fs::read(fixture_path(name)).map_err(Error::Io)
 }
 
 /// List all available fixtures (from embedded + filesystem)
-/// 
+///
 /// This will:
 /// 1. List all defined fixtures
 /// 2. If JUMBF_TEST_FIXTURES is set, also list files from that directory
 pub fn list_fixtures() -> Result<Vec<String>> {
     let mut fixtures = Vec::new();
-    
+
     // Add all defined fixtures
     for name in list_all_fixtures() {
         fixtures.push(name.to_string());
     }
-    
+
     // Check for extended fixtures directory
     if let Ok(custom_dir) = std::env::var("JUMBF_TEST_FIXTURES") {
         let extended_path = PathBuf::from(custom_dir);
@@ -188,7 +180,7 @@ pub fn list_fixtures() -> Result<Vec<String>> {
             }
         }
     }
-    
+
     Ok(fixtures)
 }
 

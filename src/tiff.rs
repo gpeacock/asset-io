@@ -106,7 +106,7 @@ pub fn parse_thumbnail_info(exif_data: &[u8]) -> Result<Option<ThumbnailInfo>> {
 
     // Get IFD0 offset
     let ifd0_offset = byte_order.read_u32(&header[4..8]);
-    
+
     // Validate IFD0 offset is within bounds
     if ifd0_offset as usize >= exif_data.len() {
         return Ok(None); // Invalid offset
@@ -117,7 +117,7 @@ pub fn parse_thumbnail_info(exif_data: &[u8]) -> Result<Option<ThumbnailInfo>> {
         Some(offset) => offset,
         None => return Ok(None), // No IFD1
     };
-    
+
     // Validate IFD1 offset is within bounds
     if ifd1_offset as usize >= exif_data.len() {
         return Ok(None); // Invalid offset
@@ -138,7 +138,7 @@ fn parse_ifd(
     if offset as usize >= data_len {
         return Ok(None);
     }
-    
+
     cursor.seek(SeekFrom::Start(offset as u64))?;
 
     // Read tag count
@@ -147,7 +147,7 @@ fn parse_ifd(
         return Ok(None); // Can't read tag count
     }
     let tag_count = byte_order.read_u16(&count_bytes);
-    
+
     // Validate tag count to prevent DOS attacks
     if tag_count > MAX_IFD_TAGS {
         return Ok(None); // Suspiciously large number of tags
@@ -181,7 +181,7 @@ fn parse_thumbnail_from_ifd(
     if offset as usize >= data_len {
         return Ok(None);
     }
-    
+
     cursor.seek(SeekFrom::Start(offset as u64))?;
 
     // Read tag count
@@ -190,7 +190,7 @@ fn parse_thumbnail_from_ifd(
         return Ok(None);
     }
     let tag_count = byte_order.read_u16(&count_bytes);
-    
+
     // Validate tag count
     if tag_count > MAX_IFD_TAGS {
         return Ok(None);
@@ -259,4 +259,3 @@ mod tests {
         assert_eq!(le.read_u32(&[0x78, 0x56, 0x34, 0x12]), 0x12345678);
     }
 }
-

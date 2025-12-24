@@ -1,5 +1,5 @@
-use asset_io::{Asset, Updates, XmpUpdate};
 use asset_io::test_utils::{fixture_path, FIREFLY_TRAIN};
+use asset_io::{Asset, Updates, XmpUpdate};
 
 fn main() -> asset_io::Result<()> {
     println!("=== Testing XMP Extended Support ===\n");
@@ -44,7 +44,7 @@ fn main() -> asset_io::Result<()> {
     println!("\nTest 2: Parsing file with extended XMP");
     if let Ok(mut asset) = Asset::open("/tmp/test_xmp_extended_write.jpg") {
         println!("  Segments: {}", asset.structure().segments.len());
-        
+
         if let Some(xmp) = asset.xmp()? {
             println!("  ✓ Found XMP: {} bytes", xmp.len());
         }
@@ -52,11 +52,11 @@ fn main() -> asset_io::Result<()> {
 
     // Test 3: Test boundary cases
     println!("\nTest 3: Boundary cases");
-    
+
     // Just under max size (should fit in single segment)
     let medium_xmp = create_large_xmp(65000);
     println!("  Testing {} byte XMP (just under limit)", medium_xmp.len());
-    
+
     let mut asset = Asset::open(input_str)?;
     asset.write_to(
         "/tmp/test_xmp_medium.jpg",
@@ -65,7 +65,7 @@ fn main() -> asset_io::Result<()> {
             ..Default::default()
         },
     )?;
-    
+
     let mut verify = Asset::open("/tmp/test_xmp_medium.jpg")?;
     if let Some(xmp) = verify.xmp()? {
         if xmp == medium_xmp {
@@ -76,7 +76,7 @@ fn main() -> asset_io::Result<()> {
     // Just over max size (should split)
     let over_xmp = create_large_xmp(66000);
     println!("  Testing {} byte XMP (just over limit)", over_xmp.len());
-    
+
     let mut asset = Asset::open(input_str)?;
     asset.write_to(
         "/tmp/test_xmp_over.jpg",
@@ -85,7 +85,7 @@ fn main() -> asset_io::Result<()> {
             ..Default::default()
         },
     )?;
-    
+
     let mut verify = Asset::open("/tmp/test_xmp_over.jpg")?;
     if let Some(xmp) = verify.xmp()? {
         if xmp == over_xmp {
@@ -121,13 +121,12 @@ fn create_large_xmp(target_size: usize) -> Vec<u8> {
 
     let mut result = String::new();
     result.push_str(header);
-    
+
     // Add padding data
     for i in 0..(padding_needed / 100) {
         result.push_str(&format!("Line {} of test data. ", i));
     }
-    
+
     result.push_str(footer);
     result.into_bytes()
 }
-

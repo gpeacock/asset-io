@@ -45,16 +45,20 @@ impl JpegHandler {
         };
 
         if let crate::Segment::Xmp {
-            segments,
-            metadata,
-            ..
+            segments, metadata, ..
         } = &structure.segments()[index]
         {
             // Check if this has extended XMP metadata
             if let Some(meta) = metadata {
                 if let Some((guid, chunk_offsets, total_size)) = meta.as_jpeg_extended_xmp() {
                     // JPEG Extended XMP - reassemble from parts
-                    return Self::reassemble_extended_xmp(reader, segments, guid, chunk_offsets, total_size);
+                    return Self::reassemble_extended_xmp(
+                        reader,
+                        segments,
+                        guid,
+                        chunk_offsets,
+                        total_size,
+                    );
                 }
             }
 
@@ -308,7 +312,7 @@ impl JpegHandler {
                         // Extended XMP segment
                         // Format: signature (35) + GUID (32) + full_length (4) + offset (4) + data
                         const HEADER_SIZE: u64 = 32 + 4 + 4; // GUID + full_length + offset
-                        
+
                         if data_size < XMP_EXTENDED_SIGNATURE.len() as u64 + HEADER_SIZE {
                             // Malformed extended XMP - skip it
                             let remaining = (data_size as usize) - sig_buf.len();
@@ -340,8 +344,9 @@ impl JpegHandler {
                             let xmp_index = *structure.xmp_index_mut();
 
                             if let Some(idx) = xmp_index {
-                                if let Segment::Xmp { segments, metadata, .. } =
-                                    &mut structure.segments[idx]
+                                if let Segment::Xmp {
+                                    segments, metadata, ..
+                                } = &mut structure.segments[idx]
                                 {
                                     // Add location to segments
                                     segments.push(Location {
@@ -351,7 +356,7 @@ impl JpegHandler {
 
                                     // Update or create metadata
                                     match metadata {
-                                        Some(crate::SegmentMetadata::JpegExtendedXmp { 
+                                        Some(crate::SegmentMetadata::JpegExtendedXmp {
                                             guid: existing_guid,
                                             chunk_offsets,
                                             total_size: existing_total,
@@ -368,11 +373,12 @@ impl JpegHandler {
                                         }
                                         None => {
                                             // First extended part - create metadata
-                                            *metadata = Some(crate::SegmentMetadata::JpegExtendedXmp {
-                                                guid,
-                                                chunk_offsets: vec![chunk_offset],
-                                                total_size,
-                                            });
+                                            *metadata =
+                                                Some(crate::SegmentMetadata::JpegExtendedXmp {
+                                                    guid,
+                                                    chunk_offsets: vec![chunk_offset],
+                                                    total_size,
+                                                });
                                         }
                                     }
                                 }
@@ -403,18 +409,22 @@ impl JpegHandler {
                                 let remaining_to_read = (data_size as usize) - sig_buf.len();
                                 let mut remaining_data = vec![0u8; remaining_to_read];
                                 reader.read_exact(&mut remaining_data)?;
-                                
+
                                 // Reconstruct full EXIF data (TIFF part only, without "Exif\0\0")
                                 let exif_tiff_start = EXIF_SIGNATURE.len();
                                 let mut exif_data = Vec::new();
                                 exif_data.extend_from_slice(&sig_buf[exif_tiff_start..]);
                                 exif_data.extend_from_slice(&remaining_data);
-                                
+
                                 // Parse TIFF structure to find thumbnail
-                                let thumbnail = match crate::tiff::parse_thumbnail_info(&exif_data) {
+                                let thumbnail = match crate::tiff::parse_thumbnail_info(&exif_data)
+                                {
                                     Ok(Some(thumb_info)) => {
                                         // Create EmbeddedThumbnail with location relative to EXIF segment start
-                                        let thumb_offset = segment_start + 4 + EXIF_SIGNATURE.len() as u64 + thumb_info.offset as u64;
+                                        let thumb_offset = segment_start
+                                            + 4
+                                            + EXIF_SIGNATURE.len() as u64
+                                            + thumb_info.offset as u64;
                                         Some(crate::thumbnail::EmbeddedThumbnail::new(
                                             thumb_offset,
                                             thumb_info.size as u64,
@@ -426,14 +436,14 @@ impl JpegHandler {
                                     Ok(None) => None,
                                     Err(_) => None, // Ignore EXIF parsing errors
                                 };
-                                
+
                                 structure.add_segment(Segment::Exif {
                                     offset: segment_start,
                                     size: size + 2,
                                     thumbnail,
                                 });
                             }
-                            
+
                             #[cfg(not(feature = "thumbnails"))]
                             {
                                 // Just record the EXIF segment without parsing thumbnails
@@ -441,7 +451,7 @@ impl JpegHandler {
                                     offset: segment_start,
                                     size: size + 2,
                                 });
-                                
+
                                 // Skip remaining EXIF data
                                 let remaining = (data_size as usize) - sig_buf.len();
                                 reader.seek(SeekFrom::Current(remaining as i64))?;
@@ -456,7 +466,7 @@ impl JpegHandler {
                                 marker: APP1,
                             });
                         }
-                        
+
                         // If not XMP or EXIF, treat as Other APP1 segment
                         if sig_buf.len() < EXIF_SIGNATURE.len()
                             || &sig_buf[..EXIF_SIGNATURE.len()] != EXIF_SIGNATURE
@@ -642,9 +652,7 @@ impl FormatHandler for JpegHandler {
                 }
 
                 Segment::Xmp {
-                    segments,
-                    metadata,
-                    ..
+                    segments, metadata, ..
                 } => {
                     match &updates.xmp {
                         crate::XmpUpdate::Remove => {
@@ -662,13 +670,16 @@ impl FormatHandler for JpegHandler {
                         crate::XmpUpdate::Keep => {
                             // Check if this is JPEG Extended XMP
                             if let Some(meta) = metadata {
-                                if let Some((guid, chunk_offsets, total_size)) = meta.as_jpeg_extended_xmp() {
+                                if let Some((guid, chunk_offsets, total_size)) =
+                                    meta.as_jpeg_extended_xmp()
+                                {
                                     // Write main XMP segment (first in segments)
                                     if !segments.is_empty() {
                                         writer.write_u8(0xFF)?;
                                         writer.write_u8(APP1)?;
                                         writer.write_u16::<BigEndian>(
-                                            (segments[0].size + XMP_SIGNATURE.len() as u64 + 2) as u16,
+                                            (segments[0].size + XMP_SIGNATURE.len() as u64 + 2)
+                                                as u16,
                                         )?;
                                         writer.write_all(XMP_SIGNATURE)?;
 
@@ -684,8 +695,9 @@ impl FormatHandler for JpegHandler {
 
                                     // Write extended XMP segments (segments[1..])
                                     for (i, segment) in segments[1..].iter().enumerate() {
-                                        let chunk_offset = chunk_offsets.get(i).copied().unwrap_or(0);
-                                        
+                                        let chunk_offset =
+                                            chunk_offsets.get(i).copied().unwrap_or(0);
+
                                         // Write APP1 marker
                                         writer.write_u8(0xFF)?;
                                         writer.write_u8(APP1)?;
@@ -704,7 +716,8 @@ impl FormatHandler for JpegHandler {
 
                                         // Write GUID (pad to 32 bytes if needed)
                                         let guid_bytes = guid.as_bytes();
-                                        writer.write_all(&guid_bytes[..guid_bytes.len().min(32)])?;
+                                        writer
+                                            .write_all(&guid_bytes[..guid_bytes.len().min(32)])?;
                                         // Pad if GUID is shorter than 32 bytes
                                         for _ in guid_bytes.len()..32 {
                                             writer.write_u8(0)?;
