@@ -20,14 +20,6 @@ pub enum Error {
     #[error("Unsupported format")]
     UnsupportedFormat,
 
-    /// JUMBF data not found
-    #[error("JUMBF data not found")]
-    JumbfNotFound,
-
-    /// XMP data not found
-    #[error("XMP data not found")]
-    XmpNotFound,
-
     /// Invalid segment
     #[error("Invalid segment at offset {offset}: {reason}")]
     InvalidSegment { offset: u64, reason: String },
