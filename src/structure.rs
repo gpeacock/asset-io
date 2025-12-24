@@ -54,12 +54,17 @@ impl FileStructure {
     }
 
     /// Get a slice of data from memory-mapped file (zero-copy)
+    /// 
+    /// Returns None if:
+    /// - No memory map is attached
+    /// - The range is out of bounds
+    /// - Integer overflow would occur
     #[cfg(feature = "memory-mapped")]
     pub fn get_mmap_slice(&self, range: ByteRange) -> Option<&[u8]> {
-        self.mmap.as_ref().map(|mmap| {
+        self.mmap.as_ref().and_then(|mmap| {
             let start = range.offset as usize;
-            let end = start + range.size as usize;
-            &mmap[start..end]
+            let end = start.checked_add(range.size as usize)?;
+            mmap.get(start..end)  // Returns None instead of panicking
         })
     }
 

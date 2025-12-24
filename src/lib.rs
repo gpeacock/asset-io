@@ -80,7 +80,7 @@ pub mod thumbnail;
 pub use asset::{Asset, AssetBuilder};
 pub use error::{Error, Result};
 pub use formats::FormatHandler;
-pub use segment::{LazyData, Location, ByteRange, Segment, XmpExtendedPart, ChunkedSegmentReader, DEFAULT_CHUNK_SIZE};
+pub use segment::{LazyData, Location, ByteRange, Segment, XmpExtendedPart, ChunkedSegmentReader, DEFAULT_CHUNK_SIZE, MAX_SEGMENT_SIZE};
 pub use structure::FileStructure;
 pub use thumbnail::{
     EmbeddedThumbnail, ThumbnailFormat, ThumbnailGenerator, ThumbnailOptions, format_hint,

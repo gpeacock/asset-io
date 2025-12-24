@@ -74,6 +74,19 @@ impl JpegHandler {
 
             let first_guid = &parts[0].guid;
             let total_size = parts[0].total_size;
+            
+            // Validate total_size to prevent DOS attacks
+            const MAX_XMP_SIZE: u32 = 100 * 1024 * 1024; // 100 MB
+            if total_size > MAX_XMP_SIZE {
+                return Err(Error::InvalidSegment {
+                    offset: *offset,
+                    reason: format!(
+                        "Extended XMP too large: {} bytes (max {} MB)",
+                        total_size,
+                        MAX_XMP_SIZE / (1024 * 1024)
+                    ),
+                });
+            }
 
             for part in &parts {
                 if &part.guid != first_guid {

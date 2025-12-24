@@ -73,6 +73,9 @@ pub struct ThumbnailInfo {
     pub height: Option<u32>,
 }
 
+/// Maximum number of tags in an IFD (prevents DOS attacks)
+const MAX_IFD_TAGS: u16 = 1000;
+
 /// Parse EXIF data to find embedded thumbnail location
 ///
 /// This expects the EXIF data starting AFTER the "Exif\0\0" signature,
@@ -103,35 +106,64 @@ pub fn parse_thumbnail_info(exif_data: &[u8]) -> Result<Option<ThumbnailInfo>> {
 
     // Get IFD0 offset
     let ifd0_offset = byte_order.read_u32(&header[4..8]);
+    
+    // Validate IFD0 offset is within bounds
+    if ifd0_offset as usize >= exif_data.len() {
+        return Ok(None); // Invalid offset
+    }
 
     // Parse IFD0 to find IFD1 offset
-    let ifd1_offset = match parse_ifd(&mut cursor, ifd0_offset, byte_order)? {
+    let ifd1_offset = match parse_ifd(&mut cursor, ifd0_offset, byte_order, exif_data.len())? {
         Some(offset) => offset,
         None => return Ok(None), // No IFD1
     };
+    
+    // Validate IFD1 offset is within bounds
+    if ifd1_offset as usize >= exif_data.len() {
+        return Ok(None); // Invalid offset
+    }
 
     // Parse IFD1 to find thumbnail tags
-    parse_thumbnail_from_ifd(&mut cursor, ifd1_offset, byte_order)
+    parse_thumbnail_from_ifd(&mut cursor, ifd1_offset, byte_order, exif_data.len())
 }
 
 /// Parse an IFD and return the offset to the next IFD (if any)
-fn parse_ifd(cursor: &mut Cursor<&[u8]>, offset: u32, byte_order: ByteOrder) -> Result<Option<u32>> {
+fn parse_ifd(
+    cursor: &mut Cursor<&[u8]>,
+    offset: u32,
+    byte_order: ByteOrder,
+    data_len: usize,
+) -> Result<Option<u32>> {
+    // Validate offset
+    if offset as usize >= data_len {
+        return Ok(None);
+    }
+    
     cursor.seek(SeekFrom::Start(offset as u64))?;
 
     // Read tag count
     let mut count_bytes = [0u8; 2];
-    cursor.read_exact(&mut count_bytes)?;
+    if cursor.read_exact(&mut count_bytes).is_err() {
+        return Ok(None); // Can't read tag count
+    }
     let tag_count = byte_order.read_u16(&count_bytes);
+    
+    // Validate tag count to prevent DOS attacks
+    if tag_count > MAX_IFD_TAGS {
+        return Ok(None); // Suspiciously large number of tags
+    }
 
     // Skip all tags (12 bytes each)
     cursor.seek(SeekFrom::Current((tag_count as i64) * 12))?;
 
     // Read next IFD offset
     let mut next_bytes = [0u8; 4];
-    cursor.read_exact(&mut next_bytes)?;
+    if cursor.read_exact(&mut next_bytes).is_err() {
+        return Ok(None); // Can't read next offset
+    }
     let next_offset = byte_order.read_u32(&next_bytes);
 
-    if next_offset == 0 {
+    if next_offset == 0 || next_offset as usize >= data_len {
         Ok(None)
     } else {
         Ok(Some(next_offset))
@@ -143,19 +175,34 @@ fn parse_thumbnail_from_ifd(
     cursor: &mut Cursor<&[u8]>,
     offset: u32,
     byte_order: ByteOrder,
+    data_len: usize,
 ) -> Result<Option<ThumbnailInfo>> {
+    // Validate offset
+    if offset as usize >= data_len {
+        return Ok(None);
+    }
+    
     cursor.seek(SeekFrom::Start(offset as u64))?;
 
     // Read tag count
     let mut count_bytes = [0u8; 2];
-    cursor.read_exact(&mut count_bytes)?;
+    if cursor.read_exact(&mut count_bytes).is_err() {
+        return Ok(None);
+    }
     let tag_count = byte_order.read_u16(&count_bytes);
+    
+    // Validate tag count
+    if tag_count > MAX_IFD_TAGS {
+        return Ok(None);
+    }
 
     // Read all tags
     let mut tags = Vec::new();
     for _ in 0..tag_count {
         let mut tag_bytes = [0u8; 12];
-        cursor.read_exact(&mut tag_bytes)?;
+        if cursor.read_exact(&mut tag_bytes).is_err() {
+            break; // Can't read tag, stop parsing
+        }
 
         let tag_id = byte_order.read_u16(&tag_bytes[0..2]);
         let tag_type = byte_order.read_u16(&tag_bytes[2..4]);

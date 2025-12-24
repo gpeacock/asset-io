@@ -18,6 +18,15 @@ pub type ByteRange = Location;
 /// Chunk size for streaming large segments (64KB)
 pub const DEFAULT_CHUNK_SIZE: usize = 65536;
 
+/// Maximum size for a single segment to prevent DOS attacks (256 MB)
+/// 
+/// This prevents malicious files from requesting multi-GB allocations.
+/// Legitimate segments are typically much smaller:
+/// - XMP: Usually < 1 MB
+/// - JUMBF: Usually < 10 MB  
+/// - Image data: Handled via streaming, not single allocation
+pub const MAX_SEGMENT_SIZE: u64 = 256 * 1024 * 1024;
+
 /// Information about an extended XMP chunk
 #[derive(Debug, Clone)]
 pub struct XmpExtendedPart {
@@ -65,6 +74,18 @@ impl LazyData {
     pub fn load<R: Read>(&mut self, reader: &mut R, location: Location) -> Result<&[u8]> {
         match self {
             Self::NotLoaded => {
+                // Validate segment size to prevent DOS attacks
+                if location.size > MAX_SEGMENT_SIZE {
+                    return Err(crate::Error::InvalidSegment {
+                        offset: location.offset,
+                        reason: format!(
+                            "Segment too large: {} bytes (max {} MB)",
+                            location.size,
+                            MAX_SEGMENT_SIZE / (1024 * 1024)
+                        ),
+                    });
+                }
+                
                 let mut buffer = vec![0u8; location.size as usize];
                 reader.read_exact(&mut buffer)?;
                 *self = Self::Loaded(buffer);
@@ -76,8 +97,25 @@ impl LazyData {
             Self::Loaded(data) => Ok(data),
             #[cfg(feature = "memory-mapped")]
             Self::MemoryMapped { mmap, offset, size } => {
+                // Validate bounds for memory-mapped access
+                let end = offset.checked_add(*size)
+                    .ok_or_else(|| crate::Error::InvalidSegment {
+                        offset: 0,
+                        reason: "Memory-mapped region overflow".into(),
+                    })?;
+                
+                if end > mmap.len() {
+                    return Err(crate::Error::InvalidSegment {
+                        offset: *offset as u64,
+                        reason: format!(
+                            "Memory-mapped region out of bounds: {}..{} (file size: {})",
+                            offset, end, mmap.len()
+                        ),
+                    });
+                }
+                
                 // Return slice from mmap (zero-copy!)
-                Ok(&mmap[*offset..*offset + *size])
+                Ok(&mmap[*offset..end])
             }
         }
     }
