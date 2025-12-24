@@ -109,55 +109,6 @@ impl Structure {
         &self.segments
     }
 
-    /// Get XMP data (loads lazily if needed, assembles extended parts if present)
-    /// Get XMP metadata (loads lazily, assembles extended parts if present)
-    ///
-    /// This method delegates to format-specific handlers for extraction,
-    /// as each format has its own conventions (e.g., JPEG Extended XMP, PNG iTXt chunks).
-    pub fn xmp<R: Read + Seek>(&mut self, reader: &mut R) -> Result<Option<Vec<u8>>> {
-        if self.xmp_index.is_none() {
-            return Ok(None);
-        }
-
-        // Delegate to format-specific XMP extraction
-        match self.format {
-            #[cfg(feature = "jpeg")]
-            crate::Format::Jpeg => {
-                use crate::formats::jpeg::JpegHandler;
-                JpegHandler::extract_xmp_impl(self, reader)
-            }
-            #[cfg(feature = "png")]
-            crate::Format::Png => {
-                use crate::formats::png::PngHandler;
-                PngHandler::extract_xmp_impl(self, reader)
-            }
-        }
-    }
-
-    /// Get JUMBF data (loads and assembles from multiple segments if needed)
-    ///
-    /// This method delegates to format-specific handlers for extraction,
-    /// as each format has its own conventions (e.g., JPEG XT headers, PNG caBX chunks).
-    pub fn jumbf<R: Read + Seek>(&mut self, reader: &mut R) -> Result<Option<Vec<u8>>> {
-        if self.jumbf_indices.is_empty() {
-            return Ok(None);
-        }
-
-        // Delegate to format-specific JUMBF extraction
-        match self.format {
-            #[cfg(feature = "jpeg")]
-            crate::Format::Jpeg => {
-                use crate::formats::jpeg::JpegHandler;
-                JpegHandler::extract_jumbf_impl(self, reader)
-            }
-            #[cfg(feature = "png")]
-            crate::Format::Png => {
-                use crate::formats::png::PngHandler;
-                PngHandler::extract_jumbf_impl(self, reader)
-            }
-        }
-    }
-
     /// Calculate hash of specified segments without loading entire file
     #[cfg(feature = "hashing")]
     pub fn calculate_hash<R: Read + Seek, H: std::io::Write>(
@@ -363,22 +314,7 @@ impl Structure {
     /// ```
     #[cfg(feature = "thumbnails")]
     pub fn embedded_thumbnail(&self) -> Result<Option<EmbeddedThumbnail>> {
-        // Delegate to format-specific extraction
-        match self.format {
-            #[cfg(feature = "jpeg")]
-            Format::Jpeg => self.extract_jpeg_thumbnail(),
-            #[cfg(feature = "png")]
-            Format::Png => {
-                // PNG doesn't have embedded thumbnails in metadata
-                Ok(None)
-            }
-        }
-    }
-
-    /// Extract EXIF thumbnail from JPEG (if present)
-    #[cfg(all(feature = "thumbnails", feature = "jpeg"))]
-    fn extract_jpeg_thumbnail(&self) -> Result<Option<EmbeddedThumbnail>> {
-        // Find EXIF segment
+        // Check if any EXIF segment has an embedded thumbnail
         for segment in &self.segments {
             if let Segment::Exif { thumbnail, .. } = segment {
                 return Ok(thumbnail.clone());

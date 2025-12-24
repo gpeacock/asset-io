@@ -83,6 +83,34 @@ impl Handler {
             Handler::Png(h) => h.write(structure, reader, writer, updates),
         }
     }
+
+    fn extract_xmp<R: Read + Seek>(
+        &self,
+        structure: &Structure,
+        reader: &mut R,
+    ) -> Result<Option<Vec<u8>>> {
+        match self {
+            #[cfg(feature = "jpeg")]
+            Handler::Jpeg(h) => h.extract_xmp(structure, reader),
+
+            #[cfg(feature = "png")]
+            Handler::Png(h) => h.extract_xmp(structure, reader),
+        }
+    }
+
+    fn extract_jumbf<R: Read + Seek>(
+        &self,
+        structure: &Structure,
+        reader: &mut R,
+    ) -> Result<Option<Vec<u8>>> {
+        match self {
+            #[cfg(feature = "jpeg")]
+            Handler::Jpeg(h) => h.extract_jumbf(structure, reader),
+
+            #[cfg(feature = "png")]
+            Handler::Png(h) => h.extract_jumbf(structure, reader),
+        }
+    }
 }
 
 impl Asset<File> {
@@ -135,12 +163,12 @@ impl<R: Read + Seek> Asset<R> {
 
     /// Get XMP metadata (loads lazily, assembles extended parts if present)
     pub fn xmp(&mut self) -> Result<Option<Vec<u8>>> {
-        self.structure.xmp(&mut self.reader)
+        self.handler.extract_xmp(&self.structure, &mut self.reader)
     }
 
     /// Get JUMBF data (loads and assembles lazily)
     pub fn jumbf(&mut self) -> Result<Option<Vec<u8>>> {
-        self.structure.jumbf(&mut self.reader)
+        self.handler.extract_jumbf(&self.structure, &mut self.reader)
     }
 
     /// Get the file structure

@@ -53,10 +53,10 @@
 //! // Parse file structure in single pass
 //! let mut file = File::open("image.jpg")?;
 //! let handler = JpegHandler::new();
-//! let mut structure = handler.parse(&mut file)?;
+//! let structure = handler.parse(&mut file)?;
 //!
-//! // Access XMP data (loaded lazily)
-//! if let Some(xmp) = structure.xmp(&mut file)? {
+//! // Access XMP data (loaded lazily via handler)
+//! if let Some(xmp) = handler.extract_xmp(&structure, &mut file)? {
 //!     println!("Found XMP: {} bytes", xmp.len());
 //! }
 //!
