@@ -3,6 +3,7 @@
 use crate::{
     error::{Error, Result},
     segment::{ByteRange, ChunkedSegmentReader, Location, Segment},
+    thumbnail::EmbeddedThumbnail,
     Format,
 };
 use std::io::{Read, Seek, SeekFrom, Take};
@@ -384,5 +385,91 @@ impl FileStructure {
         reader.seek(SeekFrom::Start(loc.offset))?;
         let taken = reader.take(loc.size);
         Ok(ChunkedSegmentReader::new(taken, loc.size, chunk_size))
+    }
+    
+    // ========================================================================
+    // Thumbnail Generation Support
+    // ========================================================================
+    
+    /// Get the byte range of the main image data
+    ///
+    /// This returns the location of the compressed image data in the file,
+    /// which can be used for efficient thumbnail generation. The data can be:
+    /// - Accessed via memory-mapping (zero-copy with `get_mmap_slice`)
+    /// - Streamed in chunks (constant memory with `stream_image_data`)
+    /// - Read all at once (for small images)
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let range = structure.image_data_range().unwrap();
+    /// 
+    /// // Zero-copy with memory mapping
+    /// if let Some(slice) = structure.get_mmap_slice(range) {
+    ///     // Pass directly to decoder
+    ///     let thumbnail = decoder.decode_and_thumbnail(slice)?;
+    /// }
+    /// ```
+    pub fn image_data_range(&self) -> Option<ByteRange> {
+        self.segments.iter().find_map(|seg| match seg {
+            Segment::ImageData { offset, size, .. } => Some(ByteRange {
+                offset: *offset,
+                size: *size,
+            }),
+            _ => None,
+        })
+    }
+    
+    /// Try to extract an embedded thumbnail from the file
+    ///
+    /// Many image formats include pre-rendered thumbnails for quick preview:
+    /// - JPEG: EXIF thumbnail (typically 160x120)
+    /// - HEIF/HEIC: 'thmb' item reference  
+    /// - WebP: VP8L thumbnail chunk
+    /// - TIFF: IFD0 thumbnail
+    /// - PNG: No embedded thumbnails
+    ///
+    /// This is the fastest way to get a thumbnail if available.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // Try embedded thumbnail first (fastest!)
+    /// if let Some(thumb) = structure.embedded_thumbnail()? {
+    ///     if thumb.fits(256, 256) {
+    ///         return Ok(thumb.data);  // Perfect!
+    ///     }
+    /// }
+    /// // Fall back to decoding main image
+    /// ```
+    pub fn embedded_thumbnail(&self) -> Result<Option<EmbeddedThumbnail>> {
+        // Dispatch to format-specific extraction
+        match self.format {
+            Format::Jpeg => self.jpeg_embedded_thumbnail(),
+            #[cfg(feature = "png")]
+            Format::Png => Ok(None), // PNG doesn't have embedded thumbnails
+            #[cfg(feature = "bmff")]
+            Format::Bmff => Ok(None), // TODO: Implement BMFF thumbnail extraction
+        }
+    }
+    
+    /// Extract EXIF thumbnail from JPEG (if present)
+    ///
+    /// JPEG files often contain a thumbnail in their EXIF metadata.
+    /// This is typically 160x120 pixels and encoded as JPEG.
+    ///
+    /// Note: This currently returns None. Full implementation requires
+    /// parsing the EXIF/TIFF structure, which will be added when
+    /// EXIF segment support is implemented.
+    fn jpeg_embedded_thumbnail(&self) -> Result<Option<EmbeddedThumbnail>> {
+        // TODO: When EXIF support is added, parse the EXIF segment
+        // and extract the thumbnail from IFD1 if present.
+        //
+        // The EXIF thumbnail is typically at:
+        // - IFD1 (the thumbnail IFD)
+        // - Tags: JPEGInterchangeFormat (offset) and JPEGInterchangeFormatLength (size)
+        //
+        // For now, return None
+        Ok(None)
     }
 }

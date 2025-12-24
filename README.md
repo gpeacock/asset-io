@@ -8,7 +8,8 @@ High-performance, format-agnostic streaming I/O for JUMBF and XMP metadata in me
 - 💾 **Memory Efficient** - Lazy loading, processes files larger than RAM
 - 🔍 **Format Agnostic** - Auto-detects JPEG, PNG, MP4, and more
 - 🛡️ **Type Safe** - Full Rust type safety and error handling
-- 📦 **Zero Dependencies** - Minimal dependency footprint
+- 📦 **Zero Dependencies** - Minimal dependency footprint (435 KB)
+- 🖼️ **Thumbnail Interface** - Pluggable thumbnail generation without decoder bloat
 
 ## Quick Start
 
@@ -140,9 +141,23 @@ cargo run --example asset_demo image.jpg
 
 # API quick reference (see all supported operations)
 cargo run --example api_quick_reference
+
+# Thumbnail generation interface demo
+cargo run --example thumbnail_demo --features memory-mapped
+
+# Hardware-accelerated SHA-256 hashing
+cargo run --example sha256_demo --features memory-mapped
 ```
 
 See `OPERATIONS.md` for complete API documentation.
+
+## Documentation
+
+- [OPERATIONS.md](./OPERATIONS.md) - Complete API reference for all operations
+- [TESTING.md](./TESTING.md) - Comprehensive testing guide
+- [HARDWARE_HASHING.md](./HARDWARE_HASHING.md) - Hardware-accelerated hashing details
+- [THUMBNAILS.md](./THUMBNAILS.md) - Thumbnail generation interface guide
+- [XMP_EXTENDED.md](./XMP_EXTENDED.md) - XMP Extended implementation details
 
 ## Use Cases
 
