@@ -86,7 +86,7 @@ pub use segment::{
 };
 pub use structure::Structure;
 pub use thumbnail::{
-    format_hint, EmbeddedThumbnail, ThumbnailFormat, ThumbnailGenerator, ThumbnailOptions,
+    EmbeddedThumbnail, ThumbnailFormat, ThumbnailGenerator, ThumbnailOptions,
 };
 
 #[cfg(feature = "jpeg")]

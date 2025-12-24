@@ -25,7 +25,7 @@
 //! pub struct ImageThumbnailGenerator;
 //!
 //! impl ThumbnailGenerator for ImageThumbnailGenerator {
-//!     fn generate(&self, data: &[u8], format_hint: Option<&str>) -> Result<Vec<u8>> {
+//!     fn generate(&self, data: &[u8], format: Option<Format>) -> Result<Vec<u8>> {
 //!         let img = image::load_from_memory(data)?;
 //!         let thumb = img.thumbnail(256, 256);
 //!         // ... encode as JPEG
@@ -160,7 +160,7 @@ impl EmbeddedThumbnail {
 /// pub struct FastThumbnailGenerator;
 ///
 /// impl ThumbnailGenerator for FastThumbnailGenerator {
-///     fn generate(&self, data: &[u8], format_hint: Option<&str>) -> Result<Vec<u8>> {
+///     fn generate(&self, data: &[u8], format: Option<Format>) -> Result<Vec<u8>> {
 ///         // Use 'image' crate to decode and generate thumbnail
 ///         let img = image::load_from_memory(data)?;
 ///         let thumb = img.thumbnail(256, 256);
@@ -179,20 +179,10 @@ pub trait ThumbnailGenerator {
     /// # Arguments
     ///
     /// * `data` - Raw compressed image data (JPEG, PNG, WebP, etc.)
-    /// * `format_hint` - Optional format hint ("jpeg", "png", "webp", etc.)
+    /// * `format` - Optional format hint to help the decoder
     ///
     /// # Returns
     ///
     /// Thumbnail encoded as JPEG (or other format) as raw bytes
-    fn generate(&self, data: &[u8], format_hint: Option<&str>) -> Result<Vec<u8>>;
-}
-
-/// Get a format hint string for a Format enum
-pub fn format_hint(format: Format) -> &'static str {
-    match format {
-        #[cfg(feature = "jpeg")]
-        Format::Jpeg => "jpeg",
-        #[cfg(feature = "png")]
-        Format::Png => "png",
-    }
+    fn generate(&self, data: &[u8], format: Option<Format>) -> Result<Vec<u8>>;
 }
