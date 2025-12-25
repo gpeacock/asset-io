@@ -3,9 +3,8 @@
 // Demonstrates hardware-accelerated hashing using Intel SHA-NI or ARM Crypto Extensions
 // (automatically detected and used by the sha2 crate).
 
-use asset_io::{FormatHandler, JpegHandler};
+use asset_io::Asset;
 use sha2::{Digest, Sha256};
-use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::time::Instant;
 
@@ -135,20 +134,18 @@ fn main() -> asset_io::Result<()> {
 fn hash_with_file_io(path: &str) -> asset_io::Result<(Vec<u8>, std::time::Duration)> {
     let start = Instant::now();
 
-    let mut file = File::open(path)?;
-    let handler = JpegHandler::new();
-    let structure = handler.parse(&mut file)?;
+    let mut asset = Asset::open(path)?;
 
     // Get ranges excluding JUMBF (C2PA data)
     let exclusions = vec!["jumbf"];
-    let ranges = structure.hashable_ranges(&exclusions);
+    let ranges = asset.structure().hashable_ranges(&exclusions);
 
     // SHA-256 hasher (uses hardware acceleration if available)
     let mut hasher = Sha256::new();
 
     // Read and hash each range
     for range in ranges {
-        file.seek(SeekFrom::Start(range.offset))?;
+        asset.reader_mut().seek(SeekFrom::Start(range.offset))?;
 
         // Buffer for reading (64KB chunks)
         let mut remaining = range.size;
@@ -156,7 +153,7 @@ fn hash_with_file_io(path: &str) -> asset_io::Result<(Vec<u8>, std::time::Durati
 
         while remaining > 0 {
             let to_read = remaining.min(buffer.len() as u64) as usize;
-            file.read_exact(&mut buffer[..to_read])?;
+            asset.reader_mut().read_exact(&mut buffer[..to_read])?;
             hasher.update(&buffer[..to_read]);
             remaining -= to_read as u64;
         }
@@ -173,28 +170,19 @@ fn hash_with_file_io(path: &str) -> asset_io::Result<(Vec<u8>, std::time::Durati
 fn hash_with_mmap(path: &str) -> asset_io::Result<(Vec<u8>, std::time::Duration)> {
     let start = Instant::now();
 
-    // Open and memory-map the file
-    let file = File::open(path)?;
-    let mmap = unsafe { memmap2::Mmap::map(&file)? };
-
-    // Parse structure
-    let mut file = File::open(path)?;
-    let handler = JpegHandler::new();
-    let structure = handler.parse(&mut file)?;
-
-    // Attach memory map
-    let structure = structure.with_mmap(mmap);
+    // Open with memory mapping (advisory lock + zero-copy access)
+    let asset = unsafe { Asset::open_with_mmap(path)? };
 
     // Get ranges excluding JUMBF (C2PA data)
     let exclusions = vec!["jumbf"];
-    let ranges = structure.hashable_ranges(&exclusions);
+    let ranges = asset.structure().hashable_ranges(&exclusions);
 
     // SHA-256 hasher (uses hardware acceleration if available)
     let mut hasher = Sha256::new();
 
     // Hash each range directly from memory map (zero-copy!)
     for range in ranges {
-        if let Some(slice) = structure.get_mmap_slice(range) {
+        if let Some(slice) = asset.structure().get_mmap_slice(range) {
             // Direct memory access - hardware can hash at full speed!
             hasher.update(slice);
         }

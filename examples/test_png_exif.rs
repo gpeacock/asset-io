@@ -56,7 +56,7 @@ fn main() {
 
     #[cfg(feature = "png")]
     {
-        use asset_io::{FormatHandler, PngHandler};
+        use asset_io::{Asset, Format};
 
         let png_data = create_png_with_exif();
         println!(
@@ -64,14 +64,15 @@ fn main() {
             png_data.len()
         );
 
-        let mut cursor = Cursor::new(png_data.clone());
-        let handler = PngHandler::new();
-        let structure = handler.parse(&mut cursor).expect("Failed to parse PNG");
+        let cursor = Cursor::new(png_data.clone());
+        let mut asset =
+            Asset::from_reader_with_format(cursor, Format::Png).expect("Failed to parse PNG");
 
-        println!("Parsed {} segments", structure.segments().len());
+        println!("Parsed {} segments", asset.structure().segments().len());
 
         // Check for EXIF segment
-        let exif_segment = structure
+        let exif_segment = asset
+            .structure()
             .segments()
             .iter()
             .find(|s| matches!(s, asset_io::Segment::Exif { .. }));
@@ -100,26 +101,20 @@ fn main() {
 
         // Test round-trip through writer
         println!("\nTesting round-trip write...");
-        cursor.set_position(0);
         let mut output = Vec::new();
-        handler
-            .write(
-                &structure,
-                &mut cursor,
-                &mut output,
-                &asset_io::Updates::default(),
-            )
+        asset
+            .write(&mut output, &asset_io::Updates::default())
             .expect("Failed to write PNG");
 
         println!("Written {} bytes", output.len());
 
         // Parse the written PNG
-        let mut output_cursor = Cursor::new(output);
-        let output_structure = handler
-            .parse(&mut output_cursor)
+        let output_cursor = Cursor::new(output);
+        let output_asset = Asset::from_reader_with_format(output_cursor, Format::Png)
             .expect("Failed to parse written PNG");
 
-        let has_exif_output = output_structure
+        let has_exif_output = output_asset
+            .structure()
             .segments()
             .iter()
             .any(|s| matches!(s, asset_io::Segment::Exif { .. }));

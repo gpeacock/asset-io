@@ -90,7 +90,7 @@ fn main() -> asset_io::Result<()> {
         #[cfg(feature = "memory-mapped")]
         {
             use std::fs::File;
-            
+
             println!("3. Zero-copy access with memory-mapping...");
 
             let file = File::open(&path)?;
@@ -101,7 +101,7 @@ fn main() -> asset_io::Result<()> {
             let _structure = asset2.structure();
             // TODO: Add with_mmap support to Asset
             // For now, just demonstrate the concept
-            
+
             println!("   Memory-mapping support would allow:");
             println!("   • Zero-copy access to image data");
             println!("   • Direct pointer to JPEG stream");

@@ -3,7 +3,7 @@
 // This demonstrates using memory-mapped files for instant, zero-allocation
 // access to file data. Perfect for hashing large files efficiently.
 
-use asset_io::{ByteRange, FormatHandler, JpegHandler};
+use asset_io::{Asset, ByteRange};
 use std::fs::File;
 use std::time::Instant;
 
@@ -51,26 +51,15 @@ fn main() -> asset_io::Result<()> {
 fn demo_basic_mmap(path: &str) -> asset_io::Result<()> {
     println!("  File: {}", path);
 
-    // Open and memory-map the file
-    let file = File::open(path)?;
-    let mmap = unsafe { memmap2::Mmap::map(&file)? };
-    let file_size = mmap.len();
+    // Open with memory mapping (advisory lock + zero-copy access)
+    let asset = unsafe { Asset::open_with_mmap(path)? };
 
-    println!("  Memory-mapped {} bytes", file_size);
-
-    // Parse structure
-    let handler = JpegHandler::new();
-    let mut parse_file = File::open(path)?;
-    let mut structure = handler.parse(&mut parse_file)?;
-
-    // Attach mmap
-    structure = structure.with_mmap(mmap);
-
-    println!("  Found {} segments", structure.segments.len());
+    println!("  Memory-mapped {} bytes", asset.structure().total_size);
+    println!("  Found {} segments", asset.structure().segments.len());
 
     // Access data with zero-copy
     let header_range = ByteRange { offset: 0, size: 2 };
-    if let Some(slice) = structure.get_mmap_slice(header_range) {
+    if let Some(slice) = asset.structure().get_mmap_slice(header_range) {
         println!(
             "  Header: {:02X} {:02X} (zero-copy access!)",
             slice[0], slice[1]
@@ -115,16 +104,21 @@ fn demo_performance_comparison(path: &str) -> asset_io::Result<()> {
     // Access pattern: read every segment
     print!("  Method 3: File I/O with seeks... ");
     let start = Instant::now();
-    let handler = JpegHandler::new();
-    let mut file = File::open(path)?;
-    let structure = handler.parse(&mut file)?;
+    let mut asset = Asset::open(path)?;
+
+    // Collect segment locations first to avoid borrowing conflicts
+    let segment_locs: Vec<_> = asset
+        .structure()
+        .segments
+        .iter()
+        .map(|s| s.location())
+        .collect();
 
     let mut total = 0u64;
-    for segment in &structure.segments {
-        let loc = segment.location();
-        file.seek(SeekFrom::Start(loc.offset))?;
+    for loc in segment_locs {
+        asset.reader_mut().seek(SeekFrom::Start(loc.offset))?;
         let mut buf = vec![0u8; loc.size as usize];
-        file.read_exact(&mut buf)?;
+        asset.reader_mut().read_exact(&mut buf)?;
         total += loc.size;
     }
     let seek_duration = start.elapsed();
@@ -133,16 +127,12 @@ fn demo_performance_comparison(path: &str) -> asset_io::Result<()> {
     // Method 4: Memory-mapped with structure
     print!("  Method 4: Memory-map with slices... ");
     let start = Instant::now();
-    let file = File::open(path)?;
-    let mmap = unsafe { memmap2::Mmap::map(&file)? };
-    let mut file = File::open(path)?;
-    let structure = handler.parse(&mut file)?;
-    let structure = structure.with_mmap(mmap);
+    let asset = unsafe { Asset::open_with_mmap(path)? };
 
     let mut total = 0u64;
-    for segment in &structure.segments {
+    for segment in &asset.structure().segments {
         let loc = segment.location();
-        if let Some(slice) = structure.get_mmap_slice(ByteRange {
+        if let Some(slice) = asset.structure().get_mmap_slice(ByteRange {
             offset: loc.offset,
             size: loc.size,
         }) {
@@ -181,18 +171,16 @@ fn demo_zero_copy_hashing(path: &str) -> asset_io::Result<()> {
     // Method 1: Traditional streaming hash
     print!("  Traditional streaming... ");
     let start = Instant::now();
-    let mut file = File::open(path)?;
-    let handler = JpegHandler::new();
-    let structure = handler.parse(&mut file)?;
+    let mut asset = Asset::open(path)?;
 
     let exclusions = vec!["jumbf"];
-    let ranges = structure.hashable_ranges(&exclusions);
+    let ranges = asset.structure().hashable_ranges(&exclusions);
 
     let mut hasher1 = SimpleHasher::new();
     for range in ranges {
-        file.seek(SeekFrom::Start(range.offset))?;
+        asset.reader_mut().seek(SeekFrom::Start(range.offset))?;
         let mut buf = vec![0u8; range.size as usize];
-        file.read_exact(&mut buf)?;
+        asset.reader_mut().read_exact(&mut buf)?;
         hasher1.update(&buf);
     }
     let hash1 = hasher1.finalize();
@@ -203,18 +191,14 @@ fn demo_zero_copy_hashing(path: &str) -> asset_io::Result<()> {
     // Method 2: Memory-mapped zero-copy hash
     print!("  Memory-mapped zero-copy... ");
     let start = Instant::now();
-    let file = File::open(path)?;
-    let mmap = unsafe { memmap2::Mmap::map(&file)? };
-    let mut file = File::open(path)?;
-    let structure = handler.parse(&mut file)?;
-    let structure = structure.with_mmap(mmap);
+    let asset = unsafe { Asset::open_with_mmap(path)? };
 
     let exclusions = vec!["jumbf"];
-    let ranges = structure.hashable_ranges(&exclusions);
+    let ranges = asset.structure().hashable_ranges(&exclusions);
 
     let mut hasher2 = SimpleHasher::new();
     for range in ranges {
-        if let Some(slice) = structure.get_mmap_slice(range) {
+        if let Some(slice) = asset.structure().get_mmap_slice(range) {
             hasher2.update(slice); // Zero-copy!
         }
     }

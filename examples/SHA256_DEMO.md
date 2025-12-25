@@ -61,25 +61,23 @@ C2PA Notes:
 ### File I/O Method
 
 ```rust
-let mut file = File::open(path)?;
-let handler = JpegHandler::new();
-let structure = handler.parse(&mut file)?;
+let mut asset = Asset::open(path)?;
 
 // Get all byte ranges except JUMBF
-let ranges = structure.hashable_ranges(&["jumbf"]);
+let ranges = asset.structure().hashable_ranges(&["jumbf"]);
 
 // SHA-256 with hardware acceleration
 let mut hasher = Sha256::new();
 
 // Read and hash each range in 64KB chunks
 for range in ranges {
-    file.seek(SeekFrom::Start(range.offset))?;
+    asset.reader_mut().seek(SeekFrom::Start(range.offset))?;
     let mut remaining = range.size;
     let mut buffer = vec![0u8; 65536];
     
     while remaining > 0 {
         let to_read = remaining.min(buffer.len() as u64) as usize;
-        file.read_exact(&mut buffer[..to_read])?;
+        asset.reader_mut().read_exact(&mut buffer[..to_read])?;
         hasher.update(&buffer[..to_read]);  // Hardware accelerated
         remaining -= to_read as u64;
     }
@@ -91,24 +89,18 @@ let hash = hasher.finalize();
 ### Memory-Mapped Method
 
 ```rust
-// Open and memory-map the file
-let file = File::open(path)?;
-let mmap = unsafe { memmap2::Mmap::map(&file)? };
-
-// Parse and attach memory map
-let mut file = File::open(path)?;
-let handler = JpegHandler::new();
-let structure = handler.parse(&mut file)?.with_mmap(mmap);
+// Open with memory mapping (advisory lock + zero-copy access)
+let asset = unsafe { Asset::open_with_mmap(path)? };
 
 // Get all byte ranges except JUMBF
-let ranges = structure.hashable_ranges(&["jumbf"]);
+let ranges = asset.structure().hashable_ranges(&["jumbf"]);
 
 // SHA-256 with hardware acceleration
 let mut hasher = Sha256::new();
 
 // Hash directly from memory map (zero-copy!)
 for range in ranges {
-    if let Some(slice) = structure.get_mmap_slice(range) {
+    if let Some(slice) = asset.structure().get_mmap_slice(range) {
         hasher.update(slice);  // Direct from mmap, hardware accelerated!
     }
 }
@@ -155,27 +147,21 @@ Why? Hardware can run continuously without I/O stalls!
 This example demonstrates the exact pattern used for C2PA content authentication:
 
 ```rust
-use asset_io::{JpegHandler, FormatHandler};
+use asset_io::Asset;
 use sha2::{Sha256, Digest};
 use std::fs::File;
 
 fn compute_c2pa_hash(path: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    // Memory-map for maximum performance
-    let file = File::open(path)?;
-    let mmap = unsafe { memmap2::Mmap::map(&file)? };
-    
-    // Parse JPEG structure
-    let mut file = File::open(path)?;
-    let handler = JpegHandler::new();
-    let structure = handler.parse(&mut file)?.with_mmap(mmap);
+    // Open with memory mapping (advisory lock + zero-copy access)
+    let asset = unsafe { Asset::open_with_mmap(path)? };
     
     // Get all ranges excluding C2PA manifest
-    let ranges = structure.hashable_ranges(&["jumbf"]);
+    let ranges = asset.structure().hashable_ranges(&["jumbf"]);
     
     // Compute SHA-256 (hardware accelerated)
     let mut hasher = Sha256::new();
     for range in ranges {
-        if let Some(slice) = structure.get_mmap_slice(range) {
+        if let Some(slice) = asset.structure().get_mmap_slice(range) {
             hasher.update(slice);
         }
     }

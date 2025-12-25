@@ -55,6 +55,14 @@ impl Structure {
         self
     }
 
+    /// Attach a memory map to this structure (in-place, zero-copy)
+    ///
+    /// This is more efficient than `with_mmap()` when you already have a mutable reference.
+    #[cfg(feature = "memory-mapped")]
+    pub fn set_mmap(&mut self, mmap: memmap2::Mmap) {
+        self.mmap = Some(std::sync::Arc::new(mmap));
+    }
+
     /// Get a slice of data from memory-mapped file (zero-copy)
     ///
     /// Returns None if:

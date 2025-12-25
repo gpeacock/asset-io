@@ -8,20 +8,17 @@
 //!
 //! Usage: cargo run --example png_demo --features png
 
-use asset_io::{Asset, FormatHandler, JumbfUpdate, PngHandler, Updates, XmpUpdate};
-use std::fs::File;
+use asset_io::{Asset, JumbfUpdate, Updates, XmpUpdate};
 
 fn main() -> asset_io::Result<()> {
     println!("=== PNG Format Demo ===\n");
 
-    // 1. Parse PNG file structure
+    // 1. Parse PNG file structure using Asset API
     println!("1. Parsing PNG file...");
-    let mut file = File::open("tests/fixtures/GreenCat.png")?;
-    let handler = PngHandler::new();
-    let structure = handler.parse(&mut file)?;
+    let asset = Asset::open("tests/fixtures/GreenCat.png")?;
 
-    println!("   ✓ Parsed {} segments", structure.segments.len());
-    println!("   ✓ Total size: {} bytes\n", structure.total_size);
+    println!("   ✓ Parsed {} segments", asset.structure().segments.len());
+    println!("   ✓ Total size: {} bytes\n", asset.structure().total_size);
 
     // 2. Read metadata using Asset API
     println!("2. Reading metadata...");
