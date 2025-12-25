@@ -288,3 +288,4 @@ impl<R: Read> Iterator for ChunkedSegmentReader<R> {
         self.read_chunk().transpose()
     }
 }
+

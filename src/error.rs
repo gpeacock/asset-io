@@ -24,3 +24,4 @@ pub enum Error {
     #[error("Invalid segment at offset {offset}: {reason}")]
     InvalidSegment { offset: u64, reason: String },
 }
+

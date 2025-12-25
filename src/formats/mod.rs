@@ -270,3 +270,4 @@ register_formats! {
     #[cfg(feature = "png")]
     Png => png::PngHandler,
 }
+

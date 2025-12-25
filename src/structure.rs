@@ -296,3 +296,4 @@ impl Structure {
         })
     }
 }
+

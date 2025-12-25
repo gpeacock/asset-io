@@ -1163,3 +1163,4 @@ mod tests {
         assert_eq!(structure.segments.len(), 2); // Header + EOI
     }
 }
+
