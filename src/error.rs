@@ -23,5 +23,10 @@ pub enum Error {
     /// Invalid segment
     #[error("Invalid segment at offset {offset}: {reason}")]
     InvalidSegment { offset: u64, reason: String },
+
+    /// XML parsing error (from quick-xml)
+    #[cfg(feature = "xmp")]
+    #[error("XML error: {0}")]
+    Xml(#[from] quick_xml::Error),
 }
 

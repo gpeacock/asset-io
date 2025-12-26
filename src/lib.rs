@@ -76,6 +76,8 @@ mod structure;
 pub mod thumbnail;
 #[cfg(feature = "exif")]
 mod tiff;
+#[cfg(feature = "xmp")]
+pub mod xmp;
 
 pub use asset::{Asset, AssetBuilder};
 pub use error::{Error, Result};

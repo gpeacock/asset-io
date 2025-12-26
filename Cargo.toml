@@ -2,7 +2,7 @@
 name = "asset-io"
 version = "0.1.0"
 edition = "2021"
-authors = ["Greg Peacock <gpeacock@adobe.com>"]
+authors = ["Gavin Peacock <gpeacock@adobe.com>"]
 license = "MIT OR Apache-2.0"
 description = "High-performance streaming I/O for media asset metadata (JUMBF, XMP, C2PA, thumbnails)"
 repository = "https://github.com/contentauth/asset-io"
@@ -16,10 +16,9 @@ thiserror = "1.0"
 md5 = "0.7"
 
 # Optional features
+quick-xml = { version = "0.36", optional = true, default-features = false }
 memmap2 = { version = "0.9", optional = true }
 fs2 = { version = "0.4", optional = true }
-
-# Hashing
 sha2 = { version = "0.10", optional = true }
 
 [dev-dependencies]
@@ -32,6 +31,7 @@ default = ["jpeg", "test-utils"]
 jpeg = []
 png = []
 exif = []  # EXIF parsing and embedded thumbnail extraction
+xmp = ["quick-xml"]  # XMP parsing and editing utilities
 memory-mapped = ["memmap2", "fs2"]
 hashing = ["sha2"]
 all-formats = ["jpeg", "png"]
@@ -51,7 +51,6 @@ required-features = ["png"]
 
 [[example]]
 name = "thumbnail_demo"
-# Thumbnail infrastructure is always available, no feature needed
 
 [[example]]
 name = "mmap_demo"
