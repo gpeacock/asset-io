@@ -52,6 +52,25 @@ use std::io::Cursor;
 
 const RDF_DESCRIPTION: &[u8] = b"rdf:Description";
 
+/// Validate that a key is a reasonable XMP property name.
+/// 
+/// This is a basic check - it doesn't validate against full XMP spec,
+/// just catches obvious errors like empty keys or keys with spaces/quotes.
+fn validate_key(key: &str) -> Result<()> {
+    if key.is_empty() {
+        return Err(crate::Error::InvalidFormat("XMP key cannot be empty".to_string()));
+    }
+    
+    // Check for characters that would break XML attribute syntax
+    if key.contains(|c: char| c.is_whitespace() || c == '"' || c == '\'' || c == '<' || c == '>') {
+        return Err(crate::Error::InvalidFormat(
+            format!("Invalid XMP key '{}': contains whitespace or XML special characters", key)
+        ));
+    }
+    
+    Ok(())
+}
+
 /// Get multiple values from XMP in a single pass.
 ///
 /// Returns a Vec with the same length as `keys`, where each position
@@ -153,6 +172,11 @@ pub fn get_keys(xmp: &str, keys: &[&str]) -> Vec<Option<String>> {
 /// ```
 pub fn apply_updates(xmp: &str, updates: &[(&str, Option<&str>)]) -> Result<String> {
     use quick_xml::{events::{BytesStart, Event}, name::QName, Reader, Writer};
+    
+    // Validate all keys upfront
+    for (key, _) in updates {
+        validate_key(key)?;
+    }
     
     let mut reader = Reader::from_str(xmp);
     reader.config_mut().trim_text(false);
@@ -481,6 +505,23 @@ mod tests {
                 input
             );
         }
+    }
+    
+    #[test]
+    fn test_key_validation() {
+        let xmp = r#"<rdf:Description dc:title="Photo" />"#;
+        
+        // These should fail
+        assert!(add_key(xmp, "", "value").is_err(), "Empty key should fail");
+        assert!(add_key(xmp, "dc:title with space", "value").is_err(), "Key with space should fail");
+        assert!(add_key(xmp, "dc:title\"quote", "value").is_err(), "Key with quote should fail");
+        assert!(add_key(xmp, "dc:title<tag", "value").is_err(), "Key with < should fail");
+        assert!(add_key(xmp, "dc:title>tag", "value").is_err(), "Key with > should fail");
+        
+        // These should succeed
+        assert!(add_key(xmp, "dc:title", "value").is_ok(), "Normal key should work");
+        assert!(add_key(xmp, "dc:subject", "value").is_ok(), "Another normal key should work");
+        assert!(add_key(xmp, "my_custom:field", "value").is_ok(), "Underscore key should work");
     }
 }
 
