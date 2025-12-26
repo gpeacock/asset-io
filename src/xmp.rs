@@ -7,34 +7,81 @@
 //! - XMP packets are XML-based RDF metadata
 //! - Properties can be attributes on rdf:Description or child elements
 //! - Packet padding maintains 2-4KB minimum size per spec
+//!
+//! # API Design
+//!
+//! ## Batch Operations (Efficient)
+//!
+//! For multiple keys, use batch operations to parse once:
+//!
+//! ```
+//! use asset_io::xmp::{extract_keys, apply_updates};
+//!
+//! let xmp = r#"<rdf:Description dc:title="Photo" dc:creator="John" />"#;
+//! 
+//! // Extract multiple values in one pass
+//! let values = extract_keys(xmp, &["dc:title", "dc:creator", "dc:format"]);
+//! assert_eq!(values[0], Some("Photo".to_string()));
+//! assert_eq!(values[1], Some("John".to_string()));
+//! assert_eq!(values[2], None);
+//!
+//! // Apply multiple updates in one pass
+//! let updates = [
+//!     ("dc:title", Some("New Photo")),
+//!     ("dc:subject", Some("Landscape")),
+//!     ("dc:creator", None),  // None = remove
+//! ];
+//! let updated = apply_updates(xmp, &updates).unwrap();
+//! ```
+//!
+//! ## Single Operations (Convenience)
+//!
+//! For 1-2 operations, use convenience functions:
+//!
+//! ```
+//! use asset_io::xmp::{extract_key, add_key, remove_key};
+//!
+//! let xmp = r#"<rdf:Description dc:title="Photo" />"#;
+//! let title = extract_key(xmp, "dc:title");
+//! let xmp = add_key(xmp, "dc:creator", "John").unwrap();
+//! let xmp = remove_key(&xmp, "dc:title").unwrap();
+//! ```
 
 use crate::error::Result;
 use std::io::Cursor;
 
 const RDF_DESCRIPTION: &[u8] = b"rdf:Description";
 
-/// Extract a value from XMP using a key.
+/// Extract multiple values from XMP in a single pass.
 ///
-/// Searches for the key as an attribute on `rdf:Description` or as a child element.
+/// Returns a Vec with the same length as `keys`, where each position
+/// corresponds to the key at that position. Missing keys return `None`.
+///
+/// This is much more efficient than calling [`extract_key()`] multiple times,
+/// as it only parses the XMP once.
 ///
 /// # Example
 ///
 /// ```
-/// use asset_io::xmp::extract_key;
+/// use asset_io::xmp::extract_keys;
 ///
-/// let xmp = r#"<rdf:Description dc:title="My Photo" />"#;
-/// assert_eq!(extract_key(xmp, "dc:title"), Some("My Photo".to_string()));
+/// let xmp = r#"<rdf:Description dc:title="Photo" dc:creator="John" />"#;
+/// let values = extract_keys(xmp, &["dc:title", "dc:creator", "dc:format"]);
+/// 
+/// assert_eq!(values[0], Some("Photo".to_string()));
+/// assert_eq!(values[1], Some("John".to_string()));
+/// assert_eq!(values[2], None);  // Not found
 /// ```
-pub fn extract_key(xmp: &str, key: &str) -> Option<String> {
-    use quick_xml::{
-        events::Event,
-        name::QName,
-        Reader,
-    };
+pub fn extract_keys(xmp: &str, keys: &[&str]) -> Vec<Option<String>> {
+    use quick_xml::{events::Event, name::QName, Reader};
     
     let mut reader = Reader::from_str(xmp);
     reader.config_mut().trim_text(true);
-
+    
+    // Track which keys we've found
+    let mut results = vec![None; keys.len()];
+    let mut found_count = 0;
+    
     loop {
         match reader.read_event() {
             Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => {
@@ -42,17 +89,34 @@ pub fn extract_key(xmp: &str, key: &str) -> Option<String> {
                     // Search attributes
                     for attr_result in e.attributes() {
                         if let Ok(attr) = attr_result {
-                            if attr.key == QName(key.as_bytes()) {
-                                if let Ok(s) = String::from_utf8(attr.value.to_vec()) {
-                                    return Some(s);
+                            // Check if this attribute matches any of our keys
+                            for (i, key) in keys.iter().enumerate() {
+                                if results[i].is_none() && attr.key == QName(key.as_bytes()) {
+                                    if let Ok(s) = String::from_utf8(attr.value.to_vec()) {
+                                        results[i] = Some(s);
+                                        found_count += 1;
+                                        
+                                        // Early exit if we found everything
+                                        if found_count == keys.len() {
+                                            return results;
+                                        }
+                                    }
                                 }
                             }
                         }
                     }
-                } else if e.name() == QName(key.as_bytes()) {
+                } else {
                     // Search as element
-                    if let Ok(s) = reader.read_text(e.name()) {
-                        return Some(s.to_string());
+                    for (i, key) in keys.iter().enumerate() {
+                        if results[i].is_none() && e.name() == QName(key.as_bytes()) {
+                            if let Ok(s) = reader.read_text(e.name()) {
+                                results[i] = Some(s.to_string());
+                                found_count += 1;
+                                if found_count == keys.len() {
+                                    return results;
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -60,92 +124,159 @@ pub fn extract_key(xmp: &str, key: &str) -> Option<String> {
             _ => {}
         }
     }
-    None
+    
+    results
 }
 
-/// Add or replace a key/value pair in XMP.
+/// Apply multiple updates to XMP in a single pass.
 ///
-/// If the key exists as an attribute on `rdf:Description`, it will be replaced.
-/// Otherwise, it will be added as a new attribute.
+/// Each update is a tuple of `(key, value)` where:
+/// - `Some(value)` = add or replace the key
+/// - `None` = remove the key
+///
+/// This is much more efficient than calling [`add_key()`] or [`remove_key()`]
+/// multiple times, as it only parses and rebuilds the XMP once.
 ///
 /// # Example
 ///
 /// ```
-/// use asset_io::xmp::{add_key, extract_key};
+/// use asset_io::xmp::apply_updates;
 ///
-/// let xmp = r#"<?xpacket begin=""?><rdf:RDF><rdf:Description /></rdf:RDF><?xpacket end="w"?>"#;
-/// let updated = add_key(xmp, "dc:title", "My Photo").unwrap();
-/// assert!(updated.contains(r#"dc:title="My Photo""#));
+/// let xmp = r#"<rdf:Description dc:title="Old" dc:creator="John" />"#;
+/// let updates = [
+///     ("dc:title", Some("New")),
+///     ("dc:subject", Some("Landscape")),
+///     ("dc:creator", None),  // Remove
+/// ];
+/// let updated = apply_updates(xmp, &updates).unwrap();
 /// ```
-pub fn add_key(xmp: &str, key: &str, value: &str) -> Result<String> {
-    use quick_xml::{
-        events::{BytesStart, Event},
-        name::QName,
-        Reader, Writer,
-    };
+pub fn apply_updates(xmp: &str, updates: &[(&str, Option<&str>)]) -> Result<String> {
+    use quick_xml::{events::{BytesStart, Event}, name::QName, Reader, Writer};
     
     let mut reader = Reader::from_str(xmp);
     reader.config_mut().trim_text(false);
     reader.config_mut().expand_empty_elements = false;
     
     let mut writer = Writer::new(Cursor::new(Vec::new()));
-    let mut added = false;
+    let mut applied = false;
     
     loop {
         let event = reader.read_event()?;
         match event {
-            Event::Start(ref e) if e.name() == QName(RDF_DESCRIPTION) && !added => {
-                let mut elem = BytesStart::from_content(
-                    String::from_utf8_lossy(RDF_DESCRIPTION),
-                    RDF_DESCRIPTION.len(),
-                );
+            Event::Start(ref e) if e.name() == QName(RDF_DESCRIPTION) && !applied => {
+                let mut elem = BytesStart::new(std::str::from_utf8(RDF_DESCRIPTION).unwrap());
                 
+                // Copy existing attributes, applying updates
                 for attr_result in e.attributes() {
                     match attr_result {
                         Ok(attr) => {
-                            if attr.key == QName(key.as_bytes()) {
-                                elem.push_attribute((key, value));
-                                added = true;
-                            } else {
+                            let attr_key = std::str::from_utf8(attr.key.as_ref()).ok();
+                            
+                            // Check if this attribute has an update
+                            let mut handled = false;
+                            if let Some(key_str) = attr_key {
+                                for (update_key, update_value) in updates {
+                                    if key_str == *update_key {
+                                        // Apply update: Some = replace, None = remove
+                                        if let Some(new_value) = update_value {
+                                            elem.push_attribute((*update_key, *new_value));
+                                        }
+                                        handled = true;
+                                        break;
+                                    }
+                                }
+                            }
+                            
+                            // Keep original if no update
+                            if !handled {
                                 elem.extend_attributes([attr]);
                             }
                         }
-                        Err(e) => return Err(crate::Error::InvalidFormat(format!("XMP attribute error: {}", e))),
+                        Err(e) => return Err(crate::Error::InvalidFormat(e.to_string())),
                     }
                 }
                 
-                if !added {
-                    elem.push_attribute((key, value));
-                    added = true;
+                // Add new keys that weren't in the original
+                for (key, value) in updates {
+                    if let Some(v) = value {
+                        // Check if this key was already in the attributes
+                        let mut already_exists = false;
+                        for attr_result in e.attributes() {
+                            if let Ok(attr) = attr_result {
+                                if let Ok(key_str) = std::str::from_utf8(attr.key.as_ref()) {
+                                    if key_str == *key {
+                                        already_exists = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        
+                        if !already_exists {
+                            elem.push_attribute((*key, *v));
+                        }
+                    }
                 }
                 
+                applied = true;
                 writer.write_event(Event::Start(elem))?;
             }
-            Event::Empty(ref e) if e.name() == QName(RDF_DESCRIPTION) && !added => {
-                let mut elem = BytesStart::from_content(
-                    String::from_utf8_lossy(RDF_DESCRIPTION),
-                    RDF_DESCRIPTION.len(),
-                );
+            Event::Empty(ref e) if e.name() == QName(RDF_DESCRIPTION) && !applied => {
+                let mut elem = BytesStart::new(std::str::from_utf8(RDF_DESCRIPTION).unwrap());
                 
+                // Copy existing attributes, applying updates
                 for attr_result in e.attributes() {
                     match attr_result {
                         Ok(attr) => {
-                            if attr.key == QName(key.as_bytes()) {
-                                elem.push_attribute((key, value));
-                                added = true;
-                            } else {
+                            let attr_key = std::str::from_utf8(attr.key.as_ref()).ok();
+                            
+                            // Check if this attribute has an update
+                            let mut handled = false;
+                            if let Some(key_str) = attr_key {
+                                for (update_key, update_value) in updates {
+                                    if key_str == *update_key {
+                                        // Apply update: Some = replace, None = remove
+                                        if let Some(new_value) = update_value {
+                                            elem.push_attribute((*update_key, *new_value));
+                                        }
+                                        handled = true;
+                                        break;
+                                    }
+                                }
+                            }
+                            
+                            // Keep original if no update
+                            if !handled {
                                 elem.extend_attributes([attr]);
                             }
                         }
-                        Err(e) => return Err(crate::Error::InvalidFormat(format!("XMP attribute error: {}", e))),
+                        Err(e) => return Err(crate::Error::InvalidFormat(e.to_string())),
                     }
                 }
                 
-                if !added {
-                    elem.push_attribute((key, value));
-                    added = true;
+                // Add new keys that weren't in the original
+                for (key, value) in updates {
+                    if let Some(v) = value {
+                        // Check if this key was already in the attributes
+                        let mut already_exists = false;
+                        for attr_result in e.attributes() {
+                            if let Ok(attr) = attr_result {
+                                if let Ok(key_str) = std::str::from_utf8(attr.key.as_ref()) {
+                                    if key_str == *key {
+                                        already_exists = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        
+                        if !already_exists {
+                            elem.push_attribute((*key, *v));
+                        }
+                    }
                 }
                 
+                applied = true;
                 writer.write_event(Event::Empty(elem))?;
             }
             Event::Eof => break,
@@ -157,9 +288,42 @@ pub fn add_key(xmp: &str, key: &str, value: &str) -> Result<String> {
     String::from_utf8(result).map_err(|e| crate::Error::InvalidFormat(e.to_string()))
 }
 
-/// Remove a key from XMP.
+/// Extract a single value from XMP (convenience wrapper).
 ///
-/// Removes the attribute from `rdf:Description` if it exists.
+/// For extracting multiple values, use [`extract_keys()`] instead to parse only once.
+///
+/// # Example
+///
+/// ```
+/// use asset_io::xmp::extract_key;
+///
+/// let xmp = r#"<rdf:Description dc:title="My Photo" />"#;
+/// assert_eq!(extract_key(xmp, "dc:title"), Some("My Photo".to_string()));
+/// ```
+pub fn extract_key(xmp: &str, key: &str) -> Option<String> {
+    extract_keys(xmp, &[key]).into_iter().next().flatten()
+}
+
+/// Add or replace a single key in XMP (convenience wrapper).
+///
+/// For multiple updates, use [`apply_updates()`] instead to parse only once.
+///
+/// # Example
+///
+/// ```
+/// use asset_io::xmp::{add_key, extract_key};
+///
+/// let xmp = r#"<?xpacket begin=""?><rdf:RDF><rdf:Description /></rdf:RDF><?xpacket end="w"?>"#;
+/// let updated = add_key(xmp, "dc:title", "My Photo").unwrap();
+/// assert!(updated.contains(r#"dc:title="My Photo""#));
+/// ```
+pub fn add_key(xmp: &str, key: &str, value: &str) -> Result<String> {
+    apply_updates(xmp, &[(key, Some(value))])
+}
+
+/// Remove a single key from XMP (convenience wrapper).
+///
+/// For multiple updates, use [`apply_updates()`] instead to parse only once.
 ///
 /// # Example
 ///
@@ -172,68 +336,7 @@ pub fn add_key(xmp: &str, key: &str, value: &str) -> Result<String> {
 /// assert_eq!(extract_key(&updated, "dc:creator"), Some("John".to_string()));
 /// ```
 pub fn remove_key(xmp: &str, key: &str) -> Result<String> {
-    use quick_xml::{
-        events::{BytesStart, Event},
-        name::QName,
-        Reader, Writer,
-    };
-    
-    let mut reader = Reader::from_str(xmp);
-    reader.config_mut().trim_text(false);
-    reader.config_mut().expand_empty_elements = false;
-    
-    let mut writer = Writer::new(Cursor::new(Vec::new()));
-    
-    loop {
-        let event = reader.read_event()?;
-        match event {
-            Event::Start(ref e) if e.name() == QName(RDF_DESCRIPTION) => {
-                let mut elem = BytesStart::from_content(
-                    String::from_utf8_lossy(RDF_DESCRIPTION),
-                    RDF_DESCRIPTION.len(),
-                );
-                
-                for attr_result in e.attributes() {
-                    match attr_result {
-                        Ok(attr) => {
-                            // Skip the key we want to remove
-                            if attr.key != QName(key.as_bytes()) {
-                                elem.extend_attributes([attr]);
-                            }
-                        }
-                        Err(e) => return Err(crate::Error::InvalidFormat(format!("XMP attribute error: {}", e))),
-                    }
-                }
-                
-                writer.write_event(Event::Start(elem))?;
-            }
-            Event::Empty(ref e) if e.name() == QName(RDF_DESCRIPTION) => {
-                let mut elem = BytesStart::from_content(
-                    String::from_utf8_lossy(RDF_DESCRIPTION),
-                    RDF_DESCRIPTION.len(),
-                );
-                
-                for attr_result in e.attributes() {
-                    match attr_result {
-                        Ok(attr) => {
-                            // Skip the key we want to remove
-                            if attr.key != QName(key.as_bytes()) {
-                                elem.extend_attributes([attr]);
-                            }
-                        }
-                        Err(e) => return Err(crate::Error::InvalidFormat(format!("XMP attribute error: {}", e))),
-                    }
-                }
-                
-                writer.write_event(Event::Empty(elem))?;
-            }
-            Event::Eof => break,
-            e => writer.write_event(e)?,
-        }
-    }
-    
-    let result = writer.into_inner().into_inner();
-    String::from_utf8(result).map_err(|e| crate::Error::InvalidFormat(e.to_string()))
+    apply_updates(xmp, &[(key, None)])
 }
 
 #[cfg(test)]
@@ -287,6 +390,82 @@ mod tests {
         let xmp = remove_key(TEST_XMP, "nonexistent").unwrap();
         // Should not error, just return unchanged XMP
         assert_eq!(extract_key(&xmp, "dc:format"), Some("image/jpeg".to_string()));
+    }
+
+    #[test]
+    fn test_extract_keys_batch() {
+        let values = extract_keys(TEST_XMP, &["dc:format", "xmpMM:DocumentID", "nonexistent"]);
+        assert_eq!(values.len(), 3);
+        assert_eq!(values[0], Some("image/jpeg".to_string()));
+        assert_eq!(values[1], Some("xmp.did:1234".to_string()));
+        assert_eq!(values[2], None);
+    }
+
+    #[test]
+    fn test_extract_keys_empty() {
+        let values = extract_keys(TEST_XMP, &[]);
+        assert_eq!(values.len(), 0);
+    }
+
+    #[test]
+    fn test_apply_updates_add_and_replace() {
+        let updates = [
+            ("dc:title", Some("My Photo")),
+            ("dc:format", Some("image/png")),  // Replace existing
+            ("dc:subject", Some("Landscape")),  // Add new
+        ];
+        let xmp = apply_updates(TEST_XMP, &updates).unwrap();
+        
+        assert_eq!(extract_key(&xmp, "dc:title"), Some("My Photo".to_string()));
+        assert_eq!(extract_key(&xmp, "dc:format"), Some("image/png".to_string()));
+        assert_eq!(extract_key(&xmp, "dc:subject"), Some("Landscape".to_string()));
+        // Original key should still be there
+        assert_eq!(extract_key(&xmp, "xmpMM:DocumentID"), Some("xmp.did:1234".to_string()));
+    }
+
+    #[test]
+    fn test_apply_updates_remove() {
+        let updates = [
+            ("dc:format", None),  // Remove
+            ("dc:title", Some("New")),  // Add
+        ];
+        let xmp = apply_updates(TEST_XMP, &updates).unwrap();
+        
+        assert_eq!(extract_key(&xmp, "dc:format"), None);
+        assert_eq!(extract_key(&xmp, "dc:title"), Some("New".to_string()));
+        assert_eq!(extract_key(&xmp, "xmpMM:DocumentID"), Some("xmp.did:1234".to_string()));
+    }
+
+    #[test]
+    fn test_apply_updates_mixed() {
+        let updates = [
+            ("dc:format", Some("image/png")),     // Replace
+            ("dc:title", Some("Photo")),          // Add
+            ("xmpMM:DocumentID", None),           // Remove
+            ("dc:creator", Some("John")),         // Add
+        ];
+        let xmp = apply_updates(TEST_XMP, &updates).unwrap();
+        
+        assert_eq!(extract_key(&xmp, "dc:format"), Some("image/png".to_string()));
+        assert_eq!(extract_key(&xmp, "dc:title"), Some("Photo".to_string()));
+        assert_eq!(extract_key(&xmp, "xmpMM:DocumentID"), None);
+        assert_eq!(extract_key(&xmp, "dc:creator"), Some("John".to_string()));
+    }
+
+    #[test]
+    fn test_batch_vs_single_consistency() {
+        // Batch operation
+        let updates = [("dc:title", Some("Test"))];
+        let batch_result = apply_updates(TEST_XMP, &updates).unwrap();
+        
+        // Single operation
+        let single_result = add_key(TEST_XMP, "dc:title", "Test").unwrap();
+        
+        // Both should produce the same result
+        assert_eq!(
+            extract_key(&batch_result, "dc:title"),
+            extract_key(&single_result, "dc:title")
+        );
     }
 }
 
