@@ -15,12 +15,12 @@
 //! For multiple keys, use batch operations to parse once:
 //!
 //! ```
-//! use asset_io::xmp::{extract_keys, apply_updates};
+//! use asset_io::xmp::{get_keys, apply_updates};
 //!
 //! let xmp = r#"<rdf:Description dc:title="Photo" dc:creator="John" />"#;
 //! 
-//! // Extract multiple values in one pass
-//! let values = extract_keys(xmp, &["dc:title", "dc:creator", "dc:format"]);
+//! // Get multiple values in one pass
+//! let values = get_keys(xmp, &["dc:title", "dc:creator", "dc:format"]);
 //! assert_eq!(values[0], Some("Photo".to_string()));
 //! assert_eq!(values[1], Some("John".to_string()));
 //! assert_eq!(values[2], None);
@@ -39,10 +39,10 @@
 //! For 1-2 operations, use convenience functions:
 //!
 //! ```
-//! use asset_io::xmp::{extract_key, add_key, remove_key};
+//! use asset_io::xmp::{get_key, add_key, remove_key};
 //!
 //! let xmp = r#"<rdf:Description dc:title="Photo" />"#;
-//! let title = extract_key(xmp, "dc:title");
+//! let title = get_key(xmp, "dc:title");
 //! let xmp = add_key(xmp, "dc:creator", "John").unwrap();
 //! let xmp = remove_key(&xmp, "dc:title").unwrap();
 //! ```
@@ -52,27 +52,27 @@ use std::io::Cursor;
 
 const RDF_DESCRIPTION: &[u8] = b"rdf:Description";
 
-/// Extract multiple values from XMP in a single pass.
+/// Get multiple values from XMP in a single pass.
 ///
 /// Returns a Vec with the same length as `keys`, where each position
 /// corresponds to the key at that position. Missing keys return `None`.
 ///
-/// This is much more efficient than calling [`extract_key()`] multiple times,
+/// This is much more efficient than calling [`get_key()`] multiple times,
 /// as it only parses the XMP once.
 ///
 /// # Example
 ///
 /// ```
-/// use asset_io::xmp::extract_keys;
+/// use asset_io::xmp::get_keys;
 ///
 /// let xmp = r#"<rdf:Description dc:title="Photo" dc:creator="John" />"#;
-/// let values = extract_keys(xmp, &["dc:title", "dc:creator", "dc:format"]);
+/// let values = get_keys(xmp, &["dc:title", "dc:creator", "dc:format"]);
 /// 
 /// assert_eq!(values[0], Some("Photo".to_string()));
 /// assert_eq!(values[1], Some("John".to_string()));
 /// assert_eq!(values[2], None);  // Not found
 /// ```
-pub fn extract_keys(xmp: &str, keys: &[&str]) -> Vec<Option<String>> {
+pub fn get_keys(xmp: &str, keys: &[&str]) -> Vec<Option<String>> {
     use quick_xml::{events::Event, name::QName, Reader};
     
     let mut reader = Reader::from_str(xmp);
@@ -288,20 +288,20 @@ pub fn apply_updates(xmp: &str, updates: &[(&str, Option<&str>)]) -> Result<Stri
     String::from_utf8(result).map_err(|e| crate::Error::InvalidFormat(e.to_string()))
 }
 
-/// Extract a single value from XMP (convenience wrapper).
+/// Get a single value from XMP (convenience wrapper).
 ///
-/// For extracting multiple values, use [`extract_keys()`] instead to parse only once.
+/// For getting multiple values, use [`get_keys()`] instead to parse only once.
 ///
 /// # Example
 ///
 /// ```
-/// use asset_io::xmp::extract_key;
+/// use asset_io::xmp::get_key;
 ///
 /// let xmp = r#"<rdf:Description dc:title="My Photo" />"#;
-/// assert_eq!(extract_key(xmp, "dc:title"), Some("My Photo".to_string()));
+/// assert_eq!(get_key(xmp, "dc:title"), Some("My Photo".to_string()));
 /// ```
-pub fn extract_key(xmp: &str, key: &str) -> Option<String> {
-    extract_keys(xmp, &[key]).into_iter().next().flatten()
+pub fn get_key(xmp: &str, key: &str) -> Option<String> {
+    get_keys(xmp, &[key]).into_iter().next().flatten()
 }
 
 /// Add or replace a single key in XMP (convenience wrapper).
@@ -311,7 +311,7 @@ pub fn extract_key(xmp: &str, key: &str) -> Option<String> {
 /// # Example
 ///
 /// ```
-/// use asset_io::xmp::{add_key, extract_key};
+/// use asset_io::xmp::{add_key, get_key};
 ///
 /// let xmp = r#"<?xpacket begin=""?><rdf:RDF><rdf:Description /></rdf:RDF><?xpacket end="w"?>"#;
 /// let updated = add_key(xmp, "dc:title", "My Photo").unwrap();
@@ -328,12 +328,12 @@ pub fn add_key(xmp: &str, key: &str, value: &str) -> Result<String> {
 /// # Example
 ///
 /// ```
-/// use asset_io::xmp::{remove_key, extract_key};
+/// use asset_io::xmp::{remove_key, get_key};
 ///
 /// let xmp = r#"<rdf:Description dc:title="My Photo" dc:creator="John" />"#;
 /// let updated = remove_key(xmp, "dc:title").unwrap();
-/// assert_eq!(extract_key(&updated, "dc:title"), None);
-/// assert_eq!(extract_key(&updated, "dc:creator"), Some("John".to_string()));
+/// assert_eq!(get_key(&updated, "dc:title"), None);
+/// assert_eq!(get_key(&updated, "dc:creator"), Some("John".to_string()));
 /// ```
 pub fn remove_key(xmp: &str, key: &str) -> Result<String> {
     apply_updates(xmp, &[(key, None)])
@@ -357,44 +357,44 @@ mod tests {
 <?xpacket end="w"?>"#;
 
     #[test]
-    fn test_extract_key() {
-        assert_eq!(extract_key(TEST_XMP, "dc:format"), Some("image/jpeg".to_string()));
-        assert_eq!(extract_key(TEST_XMP, "xmpMM:DocumentID"), Some("xmp.did:1234".to_string()));
-        assert_eq!(extract_key(TEST_XMP, "nonexistent"), None);
+    fn test_get_key() {
+        assert_eq!(get_key(TEST_XMP, "dc:format"), Some("image/jpeg".to_string()));
+        assert_eq!(get_key(TEST_XMP, "xmpMM:DocumentID"), Some("xmp.did:1234".to_string()));
+        assert_eq!(get_key(TEST_XMP, "nonexistent"), None);
     }
 
     #[test]
     fn test_add_key() {
         let xmp = add_key(TEST_XMP, "dc:title", "My Photo").unwrap();
-        assert_eq!(extract_key(&xmp, "dc:title"), Some("My Photo".to_string()));
+        assert_eq!(get_key(&xmp, "dc:title"), Some("My Photo".to_string()));
         // Original keys should still be there
-        assert_eq!(extract_key(&xmp, "dc:format"), Some("image/jpeg".to_string()));
+        assert_eq!(get_key(&xmp, "dc:format"), Some("image/jpeg".to_string()));
     }
 
     #[test]
     fn test_replace_key() {
         let xmp = add_key(TEST_XMP, "dc:format", "image/png").unwrap();
-        assert_eq!(extract_key(&xmp, "dc:format"), Some("image/png".to_string()));
+        assert_eq!(get_key(&xmp, "dc:format"), Some("image/png".to_string()));
     }
 
     #[test]
     fn test_remove_key() {
         let xmp = remove_key(TEST_XMP, "dc:format").unwrap();
-        assert_eq!(extract_key(&xmp, "dc:format"), None);
+        assert_eq!(get_key(&xmp, "dc:format"), None);
         // Other keys should still be there
-        assert_eq!(extract_key(&xmp, "xmpMM:DocumentID"), Some("xmp.did:1234".to_string()));
+        assert_eq!(get_key(&xmp, "xmpMM:DocumentID"), Some("xmp.did:1234".to_string()));
     }
 
     #[test]
     fn test_remove_nonexistent_key() {
         let xmp = remove_key(TEST_XMP, "nonexistent").unwrap();
         // Should not error, just return unchanged XMP
-        assert_eq!(extract_key(&xmp, "dc:format"), Some("image/jpeg".to_string()));
+        assert_eq!(get_key(&xmp, "dc:format"), Some("image/jpeg".to_string()));
     }
 
     #[test]
-    fn test_extract_keys_batch() {
-        let values = extract_keys(TEST_XMP, &["dc:format", "xmpMM:DocumentID", "nonexistent"]);
+    fn test_get_keys_batch() {
+        let values = get_keys(TEST_XMP, &["dc:format", "xmpMM:DocumentID", "nonexistent"]);
         assert_eq!(values.len(), 3);
         assert_eq!(values[0], Some("image/jpeg".to_string()));
         assert_eq!(values[1], Some("xmp.did:1234".to_string()));
@@ -402,8 +402,8 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_keys_empty() {
-        let values = extract_keys(TEST_XMP, &[]);
+    fn test_get_keys_empty() {
+        let values = get_keys(TEST_XMP, &[]);
         assert_eq!(values.len(), 0);
     }
 
@@ -416,11 +416,11 @@ mod tests {
         ];
         let xmp = apply_updates(TEST_XMP, &updates).unwrap();
         
-        assert_eq!(extract_key(&xmp, "dc:title"), Some("My Photo".to_string()));
-        assert_eq!(extract_key(&xmp, "dc:format"), Some("image/png".to_string()));
-        assert_eq!(extract_key(&xmp, "dc:subject"), Some("Landscape".to_string()));
+        assert_eq!(get_key(&xmp, "dc:title"), Some("My Photo".to_string()));
+        assert_eq!(get_key(&xmp, "dc:format"), Some("image/png".to_string()));
+        assert_eq!(get_key(&xmp, "dc:subject"), Some("Landscape".to_string()));
         // Original key should still be there
-        assert_eq!(extract_key(&xmp, "xmpMM:DocumentID"), Some("xmp.did:1234".to_string()));
+        assert_eq!(get_key(&xmp, "xmpMM:DocumentID"), Some("xmp.did:1234".to_string()));
     }
 
     #[test]
@@ -431,9 +431,9 @@ mod tests {
         ];
         let xmp = apply_updates(TEST_XMP, &updates).unwrap();
         
-        assert_eq!(extract_key(&xmp, "dc:format"), None);
-        assert_eq!(extract_key(&xmp, "dc:title"), Some("New".to_string()));
-        assert_eq!(extract_key(&xmp, "xmpMM:DocumentID"), Some("xmp.did:1234".to_string()));
+        assert_eq!(get_key(&xmp, "dc:format"), None);
+        assert_eq!(get_key(&xmp, "dc:title"), Some("New".to_string()));
+        assert_eq!(get_key(&xmp, "xmpMM:DocumentID"), Some("xmp.did:1234".to_string()));
     }
 
     #[test]
@@ -446,10 +446,10 @@ mod tests {
         ];
         let xmp = apply_updates(TEST_XMP, &updates).unwrap();
         
-        assert_eq!(extract_key(&xmp, "dc:format"), Some("image/png".to_string()));
-        assert_eq!(extract_key(&xmp, "dc:title"), Some("Photo".to_string()));
-        assert_eq!(extract_key(&xmp, "xmpMM:DocumentID"), None);
-        assert_eq!(extract_key(&xmp, "dc:creator"), Some("John".to_string()));
+        assert_eq!(get_key(&xmp, "dc:format"), Some("image/png".to_string()));
+        assert_eq!(get_key(&xmp, "dc:title"), Some("Photo".to_string()));
+        assert_eq!(get_key(&xmp, "xmpMM:DocumentID"), None);
+        assert_eq!(get_key(&xmp, "dc:creator"), Some("John".to_string()));
     }
 
     #[test]
@@ -463,8 +463,8 @@ mod tests {
         
         // Both should produce the same result
         assert_eq!(
-            extract_key(&batch_result, "dc:title"),
-            extract_key(&single_result, "dc:title")
+            get_key(&batch_result, "dc:title"),
+            get_key(&single_result, "dc:title")
         );
     }
 }
