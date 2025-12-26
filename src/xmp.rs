@@ -92,8 +92,9 @@ pub fn get_keys(xmp: &str, keys: &[&str]) -> Vec<Option<String>> {
                             // Check if this attribute matches any of our keys
                             for (i, key) in keys.iter().enumerate() {
                                 if results[i].is_none() && attr.key == QName(key.as_bytes()) {
-                                    if let Ok(s) = String::from_utf8(attr.value.to_vec()) {
-                                        results[i] = Some(s);
+                                    // Use decode_and_unescape_value to handle XML entities
+                                    if let Ok(s) = attr.decode_and_unescape_value(reader.decoder()) {
+                                        results[i] = Some(s.to_string());
                                         found_count += 1;
                                         
                                         // Early exit if we found everything
@@ -466,6 +467,36 @@ mod tests {
             get_key(&batch_result, "dc:title"),
             get_key(&single_result, "dc:title")
         );
+    }
+
+    #[test]
+    fn test_xml_entity_escaping() {
+        // Test that special XML characters are properly escaped and unescaped
+        let test_cases = [
+            ("&", "ampersand"),
+            ("<", "less than"),
+            (">", "greater than"),
+            ("\"", "double quote"),
+            ("'", "single quote"),
+            ("Photo & Video", "mixed ampersand"),
+            ("<tag>", "tags"),
+            ("Quote: \"test\"", "quoted text"),
+        ];
+        
+        let xmp = r#"<rdf:Description />"#;
+        
+        for (input, description) in test_cases {
+            let xmp_with_value = add_key(xmp, "dc:title", input).unwrap();
+            let value = get_key(&xmp_with_value, "dc:title");
+            // Should round-trip correctly
+            assert_eq!(
+                value,
+                Some(input.to_string()),
+                "XML entity round-trip failed for {}: input={:?}",
+                description,
+                input
+            );
+        }
     }
 }
 
