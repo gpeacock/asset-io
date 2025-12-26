@@ -46,6 +46,45 @@
 //! let xmp = add_key(xmp, "dc:creator", "John").unwrap();
 //! let xmp = remove_key(&xmp, "dc:title").unwrap();
 //! ```
+//!
+//! # Limitations
+//!
+//! This is a **minimal** XMP implementation optimized for simplicity and size.
+//! It has several known limitations:
+//!
+//! ## Not Supported
+//!
+//! - **Structured properties** (e.g., nested elements, alt/bag/seq containers)
+//! - **Arrays** (only simple string values)
+//! - **Child elements** (writing only modifies attributes on `rdf:Description`)
+//! - **XMP packet padding** (writes don't maintain the 2-4KB minimum size)
+//! - **Namespaces** (no validation, assumes caller provides correct prefixes)
+//! - **Multiple `rdf:Description` blocks** (only processes the first one)
+//! - **XML comments and processing instructions** (preserved but not parsed)
+//!
+//! ## What Works
+//!
+//! - Simple attribute-based properties (the most common XMP pattern)
+//! - Reading child elements with text content (e.g., `<dc:title>Photo</dc:title>`)
+//! - XML entity encoding/decoding (`&`, `<`, `>`, `"`, `'`)
+//! - UTF-8 text values
+//! - Streaming parsing (low memory overhead)
+//!
+//! ## When to Use This
+//!
+//! ✅ **Good for:**
+//! - Testing and development
+//! - Simple metadata queries (title, creator, etc.)
+//! - Lightweight embedded use cases
+//! - When you control the XMP structure
+//!
+//! ❌ **Not suitable for:**
+//! - Production XMP editing in complex applications
+//! - Structured/nested XMP properties
+//! - Full XMP spec compliance
+//! - XMP with multiple description blocks
+//!
+//! For full XMP support, consider the `xmp-toolkit` crate instead.
 
 use crate::error::Result;
 use std::io::Cursor;
