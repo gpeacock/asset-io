@@ -167,15 +167,20 @@ pub fn apply_updates(xmp: &str, updates: &[(&str, Option<&str>)]) -> Result<Stri
             Event::Start(ref e) if e.name() == QName(RDF_DESCRIPTION) && !applied => {
                 let mut elem = BytesStart::new(std::str::from_utf8(RDF_DESCRIPTION).unwrap());
                 
+                // Track which keys we've seen in the original attributes
+                let mut seen_keys = std::collections::HashSet::new();
+                
                 // Copy existing attributes, applying updates
                 for attr_result in e.attributes() {
                     match attr_result {
                         Ok(attr) => {
-                            let attr_key = std::str::from_utf8(attr.key.as_ref()).ok();
+                            let attr_key_str = std::str::from_utf8(attr.key.as_ref()).ok();
                             
                             // Check if this attribute has an update
                             let mut handled = false;
-                            if let Some(key_str) = attr_key {
+                            if let Some(key_str) = attr_key_str {
+                                seen_keys.insert(key_str.to_string());
+                                
                                 for (update_key, update_value) in updates {
                                     if key_str == *update_key {
                                         // Apply update: Some = replace, None = remove
@@ -197,23 +202,10 @@ pub fn apply_updates(xmp: &str, updates: &[(&str, Option<&str>)]) -> Result<Stri
                     }
                 }
                 
-                // Add new keys that weren't in the original
+                // Add new keys that weren't in the original (O(1) lookup now!)
                 for (key, value) in updates {
                     if let Some(v) = value {
-                        // Check if this key was already in the attributes
-                        let mut already_exists = false;
-                        for attr_result in e.attributes() {
-                            if let Ok(attr) = attr_result {
-                                if let Ok(key_str) = std::str::from_utf8(attr.key.as_ref()) {
-                                    if key_str == *key {
-                                        already_exists = true;
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                        
-                        if !already_exists {
+                        if !seen_keys.contains(*key) {
                             elem.push_attribute((*key, *v));
                         }
                     }
@@ -225,15 +217,20 @@ pub fn apply_updates(xmp: &str, updates: &[(&str, Option<&str>)]) -> Result<Stri
             Event::Empty(ref e) if e.name() == QName(RDF_DESCRIPTION) && !applied => {
                 let mut elem = BytesStart::new(std::str::from_utf8(RDF_DESCRIPTION).unwrap());
                 
+                // Track which keys we've seen in the original attributes
+                let mut seen_keys = std::collections::HashSet::new();
+                
                 // Copy existing attributes, applying updates
                 for attr_result in e.attributes() {
                     match attr_result {
                         Ok(attr) => {
-                            let attr_key = std::str::from_utf8(attr.key.as_ref()).ok();
+                            let attr_key_str = std::str::from_utf8(attr.key.as_ref()).ok();
                             
                             // Check if this attribute has an update
                             let mut handled = false;
-                            if let Some(key_str) = attr_key {
+                            if let Some(key_str) = attr_key_str {
+                                seen_keys.insert(key_str.to_string());
+                                
                                 for (update_key, update_value) in updates {
                                     if key_str == *update_key {
                                         // Apply update: Some = replace, None = remove
@@ -255,23 +252,10 @@ pub fn apply_updates(xmp: &str, updates: &[(&str, Option<&str>)]) -> Result<Stri
                     }
                 }
                 
-                // Add new keys that weren't in the original
+                // Add new keys that weren't in the original (O(1) lookup now!)
                 for (key, value) in updates {
                     if let Some(v) = value {
-                        // Check if this key was already in the attributes
-                        let mut already_exists = false;
-                        for attr_result in e.attributes() {
-                            if let Ok(attr) = attr_result {
-                                if let Ok(key_str) = std::str::from_utf8(attr.key.as_ref()) {
-                                    if key_str == *key {
-                                        already_exists = true;
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                        
-                        if !already_exists {
+                        if !seen_keys.contains(*key) {
                             elem.push_attribute((*key, *v));
                         }
                     }
