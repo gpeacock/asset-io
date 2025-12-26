@@ -118,6 +118,13 @@ fn validate_key(key: &str) -> Result<()> {
 /// This is much more efficient than calling [`get_key()`] multiple times,
 /// as it only parses the XMP once.
 ///
+/// # Multiple `rdf:Description` Blocks
+///
+/// Adobe and other tools often split XMP across multiple `rdf:Description`
+/// blocks organized by namespace. This function processes **all blocks**
+/// to provide a complete view of the metadata. If a key appears in multiple
+/// blocks, the **last occurrence wins**.
+///
 /// # Example
 ///
 /// ```
@@ -136,9 +143,8 @@ pub fn get_keys(xmp: &str, keys: &[&str]) -> Vec<Option<String>> {
     let mut reader = Reader::from_str(xmp);
     reader.config_mut().trim_text(true);
     
-    // Track which keys we've found
+    // Track which keys we've found (allow overwriting from later blocks)
     let mut results = vec![None; keys.len()];
-    let mut found_count = 0;
     
     loop {
         match reader.read_event() {
@@ -149,16 +155,11 @@ pub fn get_keys(xmp: &str, keys: &[&str]) -> Vec<Option<String>> {
                         if let Ok(attr) = attr_result {
                             // Check if this attribute matches any of our keys
                             for (i, key) in keys.iter().enumerate() {
-                                if results[i].is_none() && attr.key == QName(key.as_bytes()) {
+                                if attr.key == QName(key.as_bytes()) {
                                     // Use decode_and_unescape_value to handle XML entities
                                     if let Ok(s) = attr.decode_and_unescape_value(reader.decoder()) {
+                                        // Overwrite if found in later block (last wins)
                                         results[i] = Some(s.to_string());
-                                        found_count += 1;
-                                        
-                                        // Early exit if we found everything
-                                        if found_count == keys.len() {
-                                            return results;
-                                        }
                                     }
                                 }
                             }
@@ -167,13 +168,10 @@ pub fn get_keys(xmp: &str, keys: &[&str]) -> Vec<Option<String>> {
                 } else {
                     // Search as element
                     for (i, key) in keys.iter().enumerate() {
-                        if results[i].is_none() && e.name() == QName(key.as_bytes()) {
+                        if e.name() == QName(key.as_bytes()) {
                             if let Ok(s) = reader.read_text(e.name()) {
+                                // Overwrite if found in later block (last wins)
                                 results[i] = Some(s.to_string());
-                                found_count += 1;
-                                if found_count == keys.len() {
-                                    return results;
-                                }
                             }
                         }
                     }
@@ -195,6 +193,15 @@ pub fn get_keys(xmp: &str, keys: &[&str]) -> Vec<Option<String>> {
 ///
 /// This is much more efficient than calling [`add_key()`] or [`remove_key()`]
 /// multiple times, as it only parses and rebuilds the XMP once.
+///
+/// # Multiple `rdf:Description` Blocks
+///
+/// This function modifies **only the first** `rdf:Description` block.
+/// Other blocks are preserved unchanged. This ensures predictable behavior
+/// and avoids accidentally duplicating properties across blocks.
+///
+/// If you need to modify properties in other blocks, consider extracting
+/// and rewriting the specific block you need.
 ///
 /// # Example
 ///
@@ -561,6 +568,64 @@ mod tests {
         assert!(add_key(xmp, "dc:title", "value").is_ok(), "Normal key should work");
         assert!(add_key(xmp, "dc:subject", "value").is_ok(), "Another normal key should work");
         assert!(add_key(xmp, "my_custom:field", "value").is_ok(), "Underscore key should work");
+    }
+    
+    #[test]
+    fn test_multiple_rdf_description_blocks() {
+        // XMP with multiple rdf:Description blocks (common in Adobe files)
+        let xmp = r#"<?xml version="1.0"?>
+<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+         xmlns:dc="http://purl.org/dc/elements/1.1/"
+         xmlns:photoshop="http://ns.adobe.com/photoshop/1.0/">
+  <rdf:Description rdf:about=""
+                   dc:title="First Block Title"
+                   dc:creator="Alice">
+  </rdf:Description>
+  <rdf:Description rdf:about=""
+                   photoshop:DateCreated="2024-01-15"
+                   dc:title="Second Block Title">
+  </rdf:Description>
+  <rdf:Description rdf:about=""
+                   dc:subject="Landscape">
+  </rdf:Description>
+</rdf:RDF>"#;
+        
+        // Test that we can read from all blocks
+        let values = get_keys(xmp, &["dc:title", "dc:creator", "photoshop:DateCreated", "dc:subject"]);
+        
+        // dc:title appears in both blocks - last one should win
+        assert_eq!(values[0], Some("Second Block Title".to_string()), "Should get title from second block (last wins)");
+        assert_eq!(values[1], Some("Alice".to_string()), "Should get creator from first block");
+        assert_eq!(values[2], Some("2024-01-15".to_string()), "Should get date from second block");
+        assert_eq!(values[3], Some("Landscape".to_string()), "Should get subject from third block");
+        
+        // Test single-key access too
+        assert_eq!(get_key(xmp, "dc:title"), Some("Second Block Title".to_string()));
+        assert_eq!(get_key(xmp, "dc:creator"), Some("Alice".to_string()));
+        assert_eq!(get_key(xmp, "photoshop:DateCreated"), Some("2024-01-15".to_string()));
+    }
+    
+    #[test]
+    fn test_write_only_modifies_first_block() {
+        // XMP with multiple blocks
+        let xmp = r#"<rdf:RDF>
+  <rdf:Description dc:title="First" dc:creator="Alice" />
+  <rdf:Description photoshop:DateCreated="2024-01-15" />
+</rdf:RDF>"#;
+        
+        // Modify a key
+        let updated = apply_updates(xmp, &[("dc:title", Some("Modified"))]).unwrap();
+        
+        // First block should be modified
+        assert!(updated.contains("dc:title=\"Modified\""), "First block should be updated");
+        
+        // Second block should be unchanged
+        assert!(updated.contains("photoshop:DateCreated=\"2024-01-15\""), "Second block should be preserved");
+        
+        // Verify we can still read from both blocks
+        let values = get_keys(&updated, &["dc:title", "photoshop:DateCreated"]);
+        assert_eq!(values[0], Some("Modified".to_string()));
+        assert_eq!(values[1], Some("2024-01-15".to_string()));
     }
 }
 
