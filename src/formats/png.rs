@@ -4,7 +4,7 @@ use crate::{
     error::{Error, Result},
     segment::{LazyData, Location, Segment},
     structure::Structure,
-    Format, FormatHandler, Updates,
+    Container, ContainerHandler, Updates,
 };
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -54,8 +54,13 @@ impl PngHandler {
     }
 
     /// Formats this handler supports
-    pub fn supported_formats() -> &'static [Format] {
-        &[Format::Png]
+    pub fn container_type() -> Container {
+        Container::Png
+    }
+
+    /// Media types this handler supports
+    pub fn supported_media_types() -> &'static [crate::MediaType] {
+        &[crate::MediaType::Png]
     }
 
     /// File extensions this handler accepts
@@ -69,10 +74,10 @@ impl PngHandler {
     }
 
     /// Detect if this is a PNG file from header
-    pub fn detect(header: &[u8]) -> Option<Format> {
+    pub fn detect(header: &[u8]) -> Option<crate::Container> {
         // PNG signature: 89 50 4E 47 0D 0A 1A 0A
         if header.len() >= 8 && &header[0..8] == b"\x89PNG\r\n\x1a\n" {
-            Some(Format::Png)
+            Some(Container::Png)
         } else {
             None
         }
@@ -81,7 +86,7 @@ impl PngHandler {
     /// Extract XMP data from PNG file (simple iTXt chunk, no extended XMP)
     pub fn extract_xmp_impl<R: Read + Seek>(
         structure: &crate::structure::Structure,
-        reader: &mut R,
+        source: &mut R,
     ) -> Result<Option<Vec<u8>>> {
         let Some(index) = structure.xmp_index() else {
             return Ok(None);
@@ -89,10 +94,10 @@ impl PngHandler {
 
         if let crate::Segment::Xmp { offset, size, .. } = &structure.segments()[index] {
             // PNG stores XMP in a single iTXt chunk - no extended XMP like JPEG
-            reader.seek(SeekFrom::Start(*offset))?;
+            source.seek(SeekFrom::Start(*offset))?;
 
             let mut xmp_data = vec![0u8; *size as usize];
-            reader.read_exact(&mut xmp_data)?;
+            source.read_exact(&mut xmp_data)?;
 
             return Ok(Some(xmp_data));
         }
@@ -103,7 +108,7 @@ impl PngHandler {
     /// Extract JUMBF data from PNG file (direct data from caBX chunks, no headers to strip)
     pub fn extract_jumbf_impl<R: Read + Seek>(
         structure: &crate::structure::Structure,
-        reader: &mut R,
+        source: &mut R,
     ) -> Result<Option<Vec<u8>>> {
         if structure.jumbf_indices().is_empty() {
             return Ok(None);
@@ -114,10 +119,10 @@ impl PngHandler {
         for &index in structure.jumbf_indices() {
             if let crate::Segment::Jumbf { offset, size, .. } = &structure.segments()[index] {
                 // PNG stores JUMBF directly in caBX chunks - no format-specific headers to strip
-                reader.seek(SeekFrom::Start(*offset))?;
+                source.seek(SeekFrom::Start(*offset))?;
 
                 let mut buf = vec![0u8; *size as usize];
-                reader.read_exact(&mut buf)?;
+                source.read_exact(&mut buf)?;
                 result.extend_from_slice(&buf);
             }
         }
@@ -130,12 +135,12 @@ impl PngHandler {
     }
 
     /// Fast single-pass parser
-    fn parse_impl<R: Read + Seek>(&self, reader: &mut R) -> Result<Structure> {
-        let mut structure = Structure::new(Format::Png);
+    fn parse_impl<R: Read + Seek>(&self, source: &mut R) -> Result<Structure> {
+        let mut structure = Structure::new(Container::Png, crate::MediaType::Png);
 
         // Check PNG signature
         let mut sig = [0u8; 8];
-        reader.read_exact(&mut sig)?;
+        source.read_exact(&mut sig)?;
         if sig != PNG_SIGNATURE {
             return Err(Error::InvalidFormat("Not a PNG file".into()));
         }
@@ -147,7 +152,7 @@ impl PngHandler {
 
         loop {
             // Read chunk length
-            let chunk_len = match reader.read_u32::<BigEndian>() {
+            let chunk_len = match source.read_u32::<BigEndian>() {
                 Ok(len) => len as u64,
                 Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
                 Err(e) => return Err(e.into()),
@@ -155,7 +160,7 @@ impl PngHandler {
 
             // Read chunk type
             let mut chunk_type = [0u8; 4];
-            reader.read_exact(&mut chunk_type)?;
+            source.read_exact(&mut chunk_type)?;
 
             let chunk_start = offset;
             let data_offset = offset + 8; // After length (4) + type (4)
@@ -176,7 +181,7 @@ impl PngHandler {
                         size: 8 + chunk_len + 4, // length + type + data + CRC
                         label: chunk_label(&chunk_type),
                     });
-                    reader.seek(SeekFrom::Current((chunk_len + 4) as i64))?; // Skip data + CRC
+                    source.seek(SeekFrom::Current((chunk_len + 4) as i64))?; // Skip data + CRC
                 }
 
                 b"IDAT" => {
@@ -185,7 +190,7 @@ impl PngHandler {
                         offset: data_offset,
                         size: chunk_len,
                     });
-                    reader.seek(SeekFrom::Current((chunk_len + 4) as i64))?; // Skip data + CRC
+                    source.seek(SeekFrom::Current((chunk_len + 4) as i64))?; // Skip data + CRC
                 }
 
                 b"IEND" => {
@@ -195,7 +200,7 @@ impl PngHandler {
                         size: 8 + chunk_len + 4,
                         label: chunk_label(&chunk_type),
                     });
-                    reader.seek(SeekFrom::Current((chunk_len + 4) as i64))?;
+                    source.seek(SeekFrom::Current((chunk_len + 4) as i64))?;
                     found_iend = true;
                     structure.total_size = offset + 8 + chunk_len + 4;
                     break;
@@ -205,22 +210,22 @@ impl PngHandler {
                     // Check if this is XMP
                     let keyword_len = XMP_KEYWORD.len().min(chunk_len as usize);
                     let mut keyword_buf = vec![0u8; keyword_len];
-                    reader.read_exact(&mut keyword_buf)?;
+                    source.read_exact(&mut keyword_buf)?;
 
                     if keyword_buf == XMP_KEYWORD {
                         // This is XMP data
-                        // iTXt format: keyword\0 + compression_flag(1) + compression_method(1) + language_tag\0 + translated_keyword\0 + text
+                        // iTXt container: keyword\0 + compression_flag(1) + compression_method(1) + language_tag\0 + translated_keyword\0 + text
                         // For XMP: "XML:com.adobe.xmp\0" + 0x00 + 0x00 + "\0" + "\0" + XMP_data
                         // Skip: compression_flag(1) + compression_method(1) + language_tag\0 + translated_keyword\0
 
                         // Read compression flag and method
-                        let _compression_flag = reader.read_u8()?;
-                        let _compression_method = reader.read_u8()?;
+                        let _compression_flag = source.read_u8()?;
+                        let _compression_method = source.read_u8()?;
 
                         // Skip language tag (null-terminated)
                         let mut lang_consumed = 0;
                         loop {
-                            let byte = reader.read_u8()?;
+                            let byte = source.read_u8()?;
                             lang_consumed += 1;
                             if byte == 0 || lang_consumed > 100 {
                                 break;
@@ -230,7 +235,7 @@ impl PngHandler {
                         // Skip translated keyword (null-terminated)
                         let mut trans_consumed = 0;
                         loop {
-                            let byte = reader.read_u8()?;
+                            let byte = source.read_u8()?;
                             trans_consumed += 1;
                             if byte == 0 || trans_consumed > 100 {
                                 break;
@@ -256,7 +261,7 @@ impl PngHandler {
 
                         // Skip remaining XMP data + CRC
                         let remaining = xmp_size + 4; // XMP data + CRC
-                        reader.seek(SeekFrom::Current(remaining as i64))?;
+                        source.seek(SeekFrom::Current(remaining as i64))?;
                     } else {
                         // Regular iTXt chunk
                         structure.add_segment(Segment::Other {
@@ -266,7 +271,7 @@ impl PngHandler {
                         });
                         // Skip remaining data + CRC
                         let remaining = chunk_len - keyword_len as u64 + 4;
-                        reader.seek(SeekFrom::Current(remaining as i64))?;
+                        source.seek(SeekFrom::Current(remaining as i64))?;
                     }
                 }
 
@@ -281,7 +286,7 @@ impl PngHandler {
                         }],
                         data: LazyData::NotLoaded,
                     });
-                    reader.seek(SeekFrom::Current((chunk_len + 4) as i64))?; // Skip data + CRC
+                    source.seek(SeekFrom::Current((chunk_len + 4) as i64))?; // Skip data + CRC
                 }
 
                 b"eXIf" => {
@@ -293,7 +298,7 @@ impl PngHandler {
                         #[cfg(feature = "exif")]
                         thumbnail: None, // TODO: Parse EXIF to extract thumbnail
                     });
-                    reader.seek(SeekFrom::Current((chunk_len + 4) as i64))?; // Skip data + CRC
+                    source.seek(SeekFrom::Current((chunk_len + 4) as i64))?; // Skip data + CRC
                 }
 
                 _ => {
@@ -303,7 +308,7 @@ impl PngHandler {
                         size: 8 + chunk_len + 4,
                         label: chunk_label(&chunk_type),
                     });
-                    reader.seek(SeekFrom::Current((chunk_len + 4) as i64))?; // Skip data + CRC
+                    source.seek(SeekFrom::Current((chunk_len + 4) as i64))?; // Skip data + CRC
                 }
             }
 
@@ -399,9 +404,13 @@ impl Default for PngHandler {
     }
 }
 
-impl FormatHandler for PngHandler {
-    fn supported_formats() -> &'static [Format] {
-        &[Format::Png]
+impl ContainerHandler for PngHandler {
+    fn container_type() -> Container {
+        Container::Png
+    }
+
+    fn supported_media_types() -> &'static [crate::MediaType] {
+        &[crate::MediaType::Png]
     }
 
     fn extensions() -> &'static [&'static str] {
@@ -412,42 +421,42 @@ impl FormatHandler for PngHandler {
         &["image/png"]
     }
 
-    fn detect(header: &[u8]) -> Option<Format> {
+    fn detect(header: &[u8]) -> Option<crate::Container> {
         if header.len() >= 8 && &header[0..8] == b"\x89PNG\r\n\x1a\n" {
-            Some(Format::Png)
+            Some(Container::Png)
         } else {
             None
         }
     }
 
-    fn parse<R: Read + Seek>(&self, reader: &mut R) -> Result<Structure> {
-        self.parse_impl(reader)
+    fn parse<R: Read + Seek>(&self, source: &mut R) -> Result<Structure> {
+        self.parse_impl(source)
     }
 
     fn extract_xmp<R: Read + Seek>(
         &self,
         structure: &Structure,
-        reader: &mut R,
+        source: &mut R,
     ) -> Result<Option<Vec<u8>>> {
-        Self::extract_xmp_impl(structure, reader)
+        Self::extract_xmp_impl(structure, source)
     }
 
     fn extract_jumbf<R: Read + Seek>(
         &self,
         structure: &Structure,
-        reader: &mut R,
+        source: &mut R,
     ) -> Result<Option<Vec<u8>>> {
-        Self::extract_jumbf_impl(structure, reader)
+        Self::extract_jumbf_impl(structure, source)
     }
 
     fn write<R: Read + Seek, W: Write>(
         &self,
         structure: &Structure,
-        reader: &mut R,
+        source: &mut R,
         writer: &mut W,
         updates: &Updates,
     ) -> Result<()> {
-        reader.seek(SeekFrom::Start(0))?;
+        source.seek(SeekFrom::Start(0))?;
 
         // Write PNG signature
         writer.write_all(PNG_SIGNATURE)?;
@@ -479,10 +488,10 @@ impl FormatHandler for PngHandler {
                         XmpUpdate::Keep => {
                             // Copy existing XMP chunk
                             // We need to read the XMP data from the file
-                            reader.seek(SeekFrom::Start(*offset))?;
+                            source.seek(SeekFrom::Start(*offset))?;
 
                             let mut xmp_data = vec![0u8; *size as usize];
-                            reader.read_exact(&mut xmp_data)?;
+                            source.read_exact(&mut xmp_data)?;
 
                             Self::write_xmp_chunk(writer, &xmp_data)?;
                             xmp_written = true;
@@ -504,10 +513,10 @@ impl FormatHandler for PngHandler {
                     match &updates.jumbf {
                         JumbfUpdate::Keep => {
                             // Copy existing JUMBF chunk
-                            reader.seek(SeekFrom::Start(*offset))?;
+                            source.seek(SeekFrom::Start(*offset))?;
 
                             let mut jumbf_data = vec![0u8; *size as usize];
-                            reader.read_exact(&mut jumbf_data)?;
+                            source.read_exact(&mut jumbf_data)?;
 
                             Self::write_chunk(writer, C2PA, &jumbf_data)?;
                             jumbf_written = true;
@@ -528,12 +537,12 @@ impl FormatHandler for PngHandler {
                     // We need to reconstruct the chunk structure
                     let chunk_start = offset - 8; // Back to length field
 
-                    reader.seek(SeekFrom::Start(chunk_start))?;
+                    source.seek(SeekFrom::Start(chunk_start))?;
 
                     // Copy chunk: length(4) + type(4) + data(size) + crc(4)
                     let chunk_size = 8 + size + 4;
                     let mut buffer = vec![0u8; chunk_size as usize];
-                    reader.read_exact(&mut buffer)?;
+                    source.read_exact(&mut buffer)?;
                     writer.write_all(&buffer)?;
                 }
 
@@ -564,18 +573,18 @@ impl FormatHandler for PngHandler {
                     }
 
                     // Copy other chunks as-is
-                    reader.seek(SeekFrom::Start(*offset))?;
+                    source.seek(SeekFrom::Start(*offset))?;
 
                     let mut buffer = vec![0u8; *size as usize];
-                    reader.read_exact(&mut buffer)?;
+                    source.read_exact(&mut buffer)?;
                     writer.write_all(&buffer)?;
                 }
 
                 Segment::Exif { offset, size, .. } => {
                     // Write eXIf chunk with proper structure
-                    reader.seek(SeekFrom::Start(*offset))?;
+                    source.seek(SeekFrom::Start(*offset))?;
                     let mut exif_data = vec![0u8; *size as usize];
-                    reader.read_exact(&mut exif_data)?;
+                    source.read_exact(&mut exif_data)?;
 
                     // Write as eXIf chunk
                     Self::write_chunk(writer, EXIF, &exif_data)?;
@@ -593,7 +602,7 @@ impl FormatHandler for PngHandler {
     fn extract_embedded_thumbnail<R: Read + Seek>(
         &self,
         structure: &Structure,
-        _reader: &mut R,
+        _source: &mut R,
     ) -> Result<Option<crate::EmbeddedThumbnail>> {
         // PNG doesn't typically have embedded thumbnails, but check EXIF anyway
         for segment in structure.segments() {
@@ -667,20 +676,20 @@ mod tests {
         data.extend_from_slice(b"IEND");
         data.extend_from_slice(&0xAE426082_u32.to_be_bytes()); // CRC
 
-        let mut reader = Cursor::new(data);
+        let mut source = Cursor::new(data);
         let handler = PngHandler::new();
-        let structure = handler.parse(&mut reader).unwrap();
+        let structure = handler.parse(&mut source).unwrap();
 
-        assert_eq!(structure.format, Format::Png);
+        assert_eq!(structure.container, Container::Png);
         assert!(structure.segments.len() >= 2); // At least Header + IEND
     }
 
     #[test]
     fn test_png_invalid_signature() {
         let data = vec![0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
-        let mut reader = Cursor::new(data);
+        let mut source = Cursor::new(data);
         let handler = PngHandler::new();
-        let result = handler.parse(&mut reader);
+        let result = handler.parse(&mut source);
 
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), Error::InvalidFormat(_)));

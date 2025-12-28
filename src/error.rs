@@ -13,7 +13,7 @@ pub enum Error {
     Io(#[from] io::Error),
 
     /// Invalid file format
-    #[error("Invalid format: {0}")]
+    #[error("Invalid container: {0}")]
     InvalidFormat(String),
 
     /// Unsupported file format
@@ -29,4 +29,3 @@ pub enum Error {
     #[error("XML error: {0}")]
     Xml(#[from] quick_xml::Error),
 }
-

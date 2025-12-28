@@ -87,8 +87,8 @@ impl LazyData {
         Self::MemoryMapped { mmap, offset, size }
     }
 
-    /// Load data from reader at given location
-    pub fn load<R: Read>(&mut self, reader: &mut R, location: Location) -> Result<&[u8]> {
+    /// Load data from source at given location
+    pub fn load<R: Read>(&mut self, source: &mut R, location: Location) -> Result<&[u8]> {
         match self {
             Self::NotLoaded => {
                 // Validate segment size to prevent DOS attacks
@@ -104,7 +104,7 @@ impl LazyData {
                 }
 
                 let mut buffer = vec![0u8; location.size as usize];
-                reader.read_exact(&mut buffer)?;
+                source.read_exact(&mut buffer)?;
                 *self = Self::Loaded(buffer);
                 match self {
                     Self::Loaded(data) => Ok(data),
@@ -246,16 +246,16 @@ impl Segment {
 ///
 /// This allows hashing large segments without loading them entirely into memory.
 pub struct ChunkedSegmentReader<R: Read> {
-    reader: R,
+    source: R,
     remaining: u64,
     chunk_size: usize,
 }
 
 impl<R: Read> ChunkedSegmentReader<R> {
     /// Create a new chunked reader for a segment
-    pub fn new(reader: R, size: u64, chunk_size: usize) -> Self {
+    pub fn new(source: R, size: u64, chunk_size: usize) -> Self {
         Self {
-            reader,
+            source,
             remaining: size,
             chunk_size,
         }
@@ -269,7 +269,7 @@ impl<R: Read> ChunkedSegmentReader<R> {
 
         let to_read = (self.remaining as usize).min(self.chunk_size);
         let mut buffer = vec![0u8; to_read];
-        self.reader.read_exact(&mut buffer)?;
+        self.source.read_exact(&mut buffer)?;
         self.remaining -= to_read as u64;
 
         Ok(Some(buffer))
@@ -288,4 +288,3 @@ impl<R: Read> Iterator for ChunkedSegmentReader<R> {
         self.read_chunk().transpose()
     }
 }
-

@@ -5,7 +5,7 @@ mod fixture_tests {
     use asset_io::{test_utils::*, Asset, Updates, XmpUpdate};
 
     #[cfg(feature = "memory-mapped")]
-    use asset_io::FormatHandler;
+    use asset_io::ContainerHandler;
 
     #[test]
     fn test_embedded_fixture_access() {
@@ -249,7 +249,7 @@ mod fixture_tests {
 
 #[cfg(test)]
 mod thumbnail_tests {
-    use asset_io::{test_utils, FormatHandler, JpegHandler};
+    use asset_io::{test_utils, ContainerHandler, JpegHandler};
     use std::fs::File;
 
     #[test]
@@ -295,7 +295,7 @@ mod thumbnail_tests {
         match asset.embedded_thumbnail() {
             Ok(Some(thumb)) => {
                 println!("  ✓ Found embedded thumbnail:");
-                println!("    Format: {:?}", thumb.format);
+                println!("    Container: {:?}", thumb.container);
                 println!("    Offset: {} bytes", thumb.offset);
                 println!("    Size: {} bytes", thumb.size);
                 if let (Some(w), Some(h)) = (thumb.width, thumb.height) {
@@ -407,7 +407,9 @@ mod thumbnail_tests {
 
 #[cfg(all(test, feature = "png"))]
 mod png_tests {
-    use asset_io::{Asset, Format, FormatHandler, JumbfUpdate, PngHandler, Updates, XmpUpdate};
+    use asset_io::{
+        Asset, Container, ContainerHandler, JumbfUpdate, MediaType, PngHandler, Updates, XmpUpdate,
+    };
     use std::io::Cursor;
 
     /// Create a minimal valid PNG (1x1 pixel, RGB)
@@ -462,7 +464,7 @@ mod png_tests {
         let handler = PngHandler::new();
         let structure = handler.parse(&mut cursor).unwrap();
 
-        assert_eq!(structure.format, Format::Png);
+        assert_eq!(structure.container, Container::Png);
         assert!(!structure.segments.is_empty());
     }
 
@@ -513,7 +515,7 @@ mod png_tests {
 
         // Parse the output and verify XMP was added
         let output_cursor = Cursor::new(output);
-        let mut asset = Asset::from_reader_with_format(output_cursor, Format::Png).unwrap();
+        let mut asset = Asset::from_source_with_format(output_cursor, MediaType::Png).unwrap();
 
         let result_xmp = asset.xmp().unwrap();
         assert!(result_xmp.is_some());
@@ -542,7 +544,7 @@ mod png_tests {
 
         // Parse the output and verify JUMBF was added
         let output_cursor = Cursor::new(output);
-        let mut asset = Asset::from_reader_with_format(output_cursor, Format::Png).unwrap();
+        let mut asset = Asset::from_source_with_format(output_cursor, MediaType::Png).unwrap();
 
         let result_jumbf = asset.jumbf().unwrap();
         assert!(result_jumbf.is_some());
@@ -574,7 +576,7 @@ mod png_tests {
 
         // Verify both were added
         let output_cursor = Cursor::new(output);
-        let mut asset = Asset::from_reader_with_format(output_cursor, Format::Png).unwrap();
+        let mut asset = Asset::from_source_with_format(output_cursor, MediaType::Png).unwrap();
 
         assert_eq!(asset.xmp().unwrap().unwrap(), xmp_data);
         assert_eq!(asset.jumbf().unwrap().unwrap(), jumbf_data);
@@ -585,8 +587,8 @@ mod png_tests {
         let png_data = create_minimal_png();
         let cursor = Cursor::new(png_data);
 
-        let asset = Asset::from_reader_with_format(cursor, Format::Png).unwrap();
-        assert_eq!(asset.format(), Format::Png);
+        let asset = Asset::from_source_with_format(cursor, MediaType::Png).unwrap();
+        assert_eq!(asset.container(), Container::Png);
     }
 
     #[test]
@@ -633,7 +635,7 @@ mod png_tests {
 
         // Verify XMP was removed
         let output_cursor = Cursor::new(output);
-        let mut asset = Asset::from_reader_with_format(output_cursor, Format::Png).unwrap();
+        let mut asset = Asset::from_source_with_format(output_cursor, MediaType::Png).unwrap();
         assert!(asset.xmp().unwrap().is_none());
     }
 
@@ -645,7 +647,7 @@ mod png_tests {
         let handler = PngHandler::new();
         let structure = handler.parse(&mut file).unwrap();
 
-        assert_eq!(structure.format, Format::Png);
+        assert_eq!(structure.container, Container::Png);
         assert!(!structure.segments.is_empty());
         println!(
             "Parsed {} segments from GreenCat.png",
@@ -704,7 +706,7 @@ mod png_tests {
 
         // Parse the output and verify XMP was added
         let output_cursor = Cursor::new(output);
-        let mut asset = Asset::from_reader_with_format(output_cursor, Format::Png).unwrap();
+        let mut asset = Asset::from_source_with_format(output_cursor, MediaType::Png).unwrap();
 
         let result_xmp = asset.xmp().unwrap();
         assert!(result_xmp.is_some());
@@ -732,7 +734,7 @@ mod png_tests {
 
         // Parse the output and verify JUMBF was added
         let output_cursor = Cursor::new(output);
-        let mut asset = Asset::from_reader_with_format(output_cursor, Format::Png).unwrap();
+        let mut asset = Asset::from_source_with_format(output_cursor, MediaType::Png).unwrap();
 
         let result_jumbf = asset.jumbf().unwrap();
         assert!(result_jumbf.is_some());
@@ -763,7 +765,7 @@ mod png_tests {
 
         // Verify both were added
         let output_cursor = Cursor::new(output);
-        let mut asset = Asset::from_reader_with_format(output_cursor, Format::Png).unwrap();
+        let mut asset = Asset::from_source_with_format(output_cursor, MediaType::Png).unwrap();
 
         assert_eq!(asset.xmp().unwrap().unwrap(), xmp_data);
         assert_eq!(asset.jumbf().unwrap().unwrap(), jumbf_data);

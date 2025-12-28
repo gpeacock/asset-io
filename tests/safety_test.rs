@@ -6,10 +6,10 @@
 use asset_io::MAX_SEGMENT_SIZE;
 
 #[cfg(feature = "memory-mapped")]
-use asset_io::{ByteRange, Format};
+use asset_io::{ByteRange, Container};
 
 #[cfg(feature = "png")]
-use asset_io::FormatHandler;
+use asset_io::ContainerHandler;
 
 #[test]
 fn test_max_segment_size_constant() {
@@ -60,7 +60,7 @@ fn test_mmap_bounds_checking_with_overflow() {
     let file = File::open(temp_path).unwrap();
     let mmap = unsafe { memmap2::Mmap::map(&file).unwrap() };
 
-    let mut structure = Structure::new(Format::Jpeg);
+    let mut structure = Structure::new(Container::Jfif, asset_io::MediaType::Jpeg);
     structure = structure.with_mmap(mmap);
 
     // Test 1: Out of bounds access returns None

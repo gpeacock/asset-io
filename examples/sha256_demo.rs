@@ -145,7 +145,7 @@ fn hash_with_file_io(path: &str) -> asset_io::Result<(Vec<u8>, std::time::Durati
 
     // Read and hash each range
     for range in ranges {
-        asset.reader_mut().seek(SeekFrom::Start(range.offset))?;
+        asset.source_mut().seek(SeekFrom::Start(range.offset))?;
 
         // Buffer for reading (64KB chunks)
         let mut remaining = range.size;
@@ -153,7 +153,7 @@ fn hash_with_file_io(path: &str) -> asset_io::Result<(Vec<u8>, std::time::Durati
 
         while remaining > 0 {
             let to_read = remaining.min(buffer.len() as u64) as usize;
-            asset.reader_mut().read_exact(&mut buffer[..to_read])?;
+            asset.source_mut().read_exact(&mut buffer[..to_read])?;
             hasher.update(&buffer[..to_read]);
             remaining -= to_read as u64;
         }

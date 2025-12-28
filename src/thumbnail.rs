@@ -25,7 +25,7 @@
 //! pub struct ImageThumbnailGenerator;
 //!
 //! impl ThumbnailGenerator for ImageThumbnailGenerator {
-//!     fn generate(&self, data: &[u8], format: Option<Format>) -> Result<Vec<u8>> {
+//!     fn generate(&self, data: &[u8], container: Option<Format>) -> Result<Vec<u8>> {
 //!         let img = image::load_from_memory(data)?;
 //!         let thumb = img.thumbnail(256, 256);
 //!         // ... encode as JPEG
@@ -33,7 +33,7 @@
 //! }
 //! ```
 
-use crate::{error::Result, Format};
+use crate::{error::Result, Container};
 
 /// Options for thumbnail generation
 #[derive(Debug, Clone)]
@@ -93,7 +93,7 @@ pub struct EmbeddedThumbnail {
     pub size: u64,
 
     /// Format of the thumbnail
-    pub format: ThumbnailFormat,
+    pub container: ThumbnailFormat,
 
     /// Width in pixels (if known)
     pub width: Option<u32>,
@@ -107,14 +107,14 @@ impl EmbeddedThumbnail {
     pub fn new(
         offset: u64,
         size: u64,
-        format: ThumbnailFormat,
+        container: ThumbnailFormat,
         width: Option<u32>,
         height: Option<u32>,
     ) -> Self {
         Self {
             offset,
             size,
-            format,
+            container,
             width,
             height,
         }
@@ -123,7 +123,7 @@ impl EmbeddedThumbnail {
     /// Create a new embedded thumbnail with dimensions (for testing/legacy)
     pub fn with_dimensions(
         data: Vec<u8>,
-        format: ThumbnailFormat,
+        container: ThumbnailFormat,
         width: u32,
         height: u32,
     ) -> Self {
@@ -131,7 +131,7 @@ impl EmbeddedThumbnail {
         Self {
             offset: 0,
             size: data.len() as u64,
-            format,
+            container,
             width: Some(width),
             height: Some(height),
         }
@@ -160,7 +160,7 @@ impl EmbeddedThumbnail {
 /// pub struct FastThumbnailGenerator;
 ///
 /// impl ThumbnailGenerator for FastThumbnailGenerator {
-///     fn generate(&self, data: &[u8], format: Option<Format>) -> Result<Vec<u8>> {
+///     fn generate(&self, data: &[u8], container: Option<Format>) -> Result<Vec<u8>> {
 ///         // Use 'image' crate to decode and generate thumbnail
 ///         let img = image::load_from_memory(data)?;
 ///         let thumb = img.thumbnail(256, 256);
@@ -168,7 +168,7 @@ impl EmbeddedThumbnail {
 ///         // Encode as JPEG
 ///         let mut buf = Vec::new();
 ///         thumb.write_to(&mut std::io::Cursor::new(&mut buf),
-///                        image::ImageFormat::Jpeg)?;
+///                        image::ImageContainer::Jfif)?;
 ///         Ok(buf)
 ///     }
 /// }
@@ -179,10 +179,10 @@ pub trait ThumbnailGenerator {
     /// # Arguments
     ///
     /// * `data` - Raw compressed image data (JPEG, PNG, WebP, etc.)
-    /// * `format` - Optional format hint to help the decoder
+    /// * `container` - Optional container hint to help the decoder
     ///
     /// # Returns
     ///
     /// Thumbnail encoded as JPEG (or other format) as raw bytes
-    fn generate(&self, data: &[u8], format: Option<Format>) -> Result<Vec<u8>>;
+    fn generate(&self, data: &[u8], container: Option<Container>) -> Result<Vec<u8>>;
 }

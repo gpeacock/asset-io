@@ -56,7 +56,7 @@ fn main() {
 
     #[cfg(feature = "png")]
     {
-        use asset_io::{Asset, Format};
+        use asset_io::{Asset, MediaType};
 
         let png_data = create_png_with_exif();
         println!(
@@ -66,7 +66,7 @@ fn main() {
 
         let cursor = Cursor::new(png_data.clone());
         let mut asset =
-            Asset::from_reader_with_format(cursor, Format::Png).expect("Failed to parse PNG");
+            Asset::from_source_with_format(cursor, MediaType::Png).expect("Failed to parse PNG");
 
         println!("Parsed {} segments", asset.structure().segments().len());
 
@@ -110,7 +110,7 @@ fn main() {
 
         // Parse the written PNG
         let output_cursor = Cursor::new(output);
-        let output_asset = Asset::from_reader_with_format(output_cursor, Format::Png)
+        let output_asset = Asset::from_source_with_format(output_cursor, MediaType::Png)
             .expect("Failed to parse written PNG");
 
         let has_exif_output = output_asset

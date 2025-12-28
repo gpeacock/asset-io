@@ -1,4 +1,4 @@
-//! High-performance streaming JUMBF and XMP I/O for media files.
+//! High-performance, media type-agnostic streaming I/O for media asset metadata.
 //!
 //! This crate provides efficient, single-pass parsing and writing of media files
 //! with JUMBF (JPEG Universal Metadata Box Format) and XMP metadata.
@@ -8,18 +8,18 @@
 //! - **Streaming**: Process files without loading them entirely into memory
 //! - **Lazy loading**: Only read data when explicitly accessed
 //! - **Zero-copy**: Use memory-mapped files when beneficial
-//! - **Format agnostic**: Easy to add support for new formats
+//! - **Media type agnostic**: Unified API across JPEG, PNG, MP4, and more
 //!
-//! # Quick Start (Format-Agnostic API)
+//! # Quick Start (Media Type-Agnostic API)
 //!
 //! The simplest way to use this library is with the [`Asset`] API,
-//! which automatically detects the file format:
+//! which automatically detects the media type:
 //!
 //! ```no_run
 //! use asset_io::{Asset, Updates, XmpUpdate, JumbfUpdate};
 //!
 //! # fn main() -> asset_io::Result<()> {
-//! // Open any supported file - format is auto-detected
+//! // Open any supported file - media type is auto-detected
 //! let mut asset = Asset::open("image.jpg")?;
 //!
 //! // Read metadata
@@ -41,12 +41,12 @@
 //! # }
 //! ```
 //!
-//! # Format-Specific API
+//! # Handler-Specific API
 //!
-//! For more control, you can use format-specific handlers:
+//! For more control, you can use media type-specific handlers:
 //!
 //! ```no_run
-//! use asset_io::{FormatHandler, JpegHandler, Updates};
+//! use asset_io::{ContainerHandler, JpegHandler, Updates};
 //! use std::fs::File;
 //!
 //! # fn main() -> asset_io::Result<()> {
@@ -71,6 +71,7 @@
 mod asset;
 mod error;
 mod formats;
+mod media_type;
 mod segment;
 mod structure;
 pub mod thumbnail;
@@ -81,7 +82,8 @@ pub mod xmp;
 
 pub use asset::{Asset, AssetBuilder};
 pub use error::{Error, Result};
-pub use formats::FormatHandler;
+pub use formats::ContainerHandler;
+pub use media_type::MediaType;
 pub use segment::{
     ByteRange, ChunkedSegmentReader, LazyData, Location, Segment, SegmentMetadata,
     DEFAULT_CHUNK_SIZE, MAX_SEGMENT_SIZE,
@@ -89,7 +91,7 @@ pub use segment::{
 pub use structure::Structure;
 pub use thumbnail::{EmbeddedThumbnail, ThumbnailFormat, ThumbnailGenerator, ThumbnailOptions};
 
-// Format handlers are exported by the register_formats! macro below
+// Container and handlers are exported by the register_containers! macro below
 
 // Test utilities - only compiled for tests or when explicitly enabled
 #[cfg(any(test, feature = "test-utils"))]
@@ -162,10 +164,10 @@ impl Updates {
 }
 
 // Re-export generated items from formats module
-pub(crate) use formats::{detect_format, get_handler, Handler};
-pub use formats::{detect_from_extension, detect_from_mime, Format};
+pub(crate) use formats::{detect_container, get_handler, Handler};
+pub use formats::{detect_from_extension, detect_from_mime, Container};
 
-// Re-export format handlers at crate root
+// Re-export container handlers at crate root
 #[cfg(feature = "jpeg")]
 pub use formats::jpeg::JpegHandler;
 #[cfg(feature = "png")]

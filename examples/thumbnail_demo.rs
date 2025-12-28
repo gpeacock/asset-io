@@ -19,7 +19,8 @@ fn main() -> asset_io::Result<()> {
         // Open the asset
         let mut asset = Asset::open(&path)?;
 
-        println!("Format: {:?}", asset.structure().format);
+        println!("Container: {:?}", asset.structure().container);
+        println!("Media type: {:?}", asset.structure().media_type);
         println!("Total size: {} bytes\n", asset.structure().total_size);
 
         // ========================================================================
@@ -30,7 +31,7 @@ fn main() -> asset_io::Result<()> {
         match asset.embedded_thumbnail()? {
             Some(thumb) => {
                 println!("   ✓ Found embedded thumbnail!");
-                println!("     Format: {:?}", thumb.format);
+                println!("     Container: {:?}", thumb.container);
                 if let (Some(w), Some(h)) = (thumb.width, thumb.height) {
                     println!("     Size: {}x{}", w, h);
                 }

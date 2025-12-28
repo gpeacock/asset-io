@@ -4,7 +4,7 @@ use crate::{
     error::{Error, Result},
     segment::{LazyData, Location, Segment},
     structure::Structure,
-    Format, FormatHandler, Updates,
+    Container, ContainerHandler, Updates,
 };
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use std::io::{copy, Read, Seek, SeekFrom, Write};
@@ -67,8 +67,13 @@ impl JpegHandler {
     }
 
     /// Formats this handler supports
-    pub fn supported_formats() -> &'static [Format] {
-        &[Format::Jpeg]
+    pub fn container_type() -> Container {
+        Container::Jfif
+    }
+
+    /// Media types this handler supports
+    pub fn supported_media_types() -> &'static [crate::MediaType] {
+        &[crate::MediaType::Jpeg]
     }
 
     /// File extensions this handler accepts
@@ -82,10 +87,10 @@ impl JpegHandler {
     }
 
     /// Detect if this is a JPEG file from header
-    pub fn detect(header: &[u8]) -> Option<Format> {
+    pub fn detect(header: &[u8]) -> Option<crate::Container> {
         // JPEG magic bytes: FF D8
         if header.len() >= 2 && header[0] == 0xFF && header[1] == 0xD8 {
-            Some(Format::Jpeg)
+            Some(Container::Jfif)
         } else {
             None
         }
@@ -94,7 +99,7 @@ impl JpegHandler {
     /// Extract XMP data from JPEG file (handles extended XMP with multi-segment assembly)
     pub fn extract_xmp_impl<R: Read + Seek>(
         structure: &crate::structure::Structure,
-        reader: &mut R,
+        source: &mut R,
     ) -> Result<Option<Vec<u8>>> {
         let Some(index) = structure.xmp_index() else {
             return Ok(None);
@@ -109,7 +114,7 @@ impl JpegHandler {
                 if let Some((guid, chunk_offsets, total_size)) = meta.as_jpeg_extended_xmp() {
                     // JPEG Extended XMP - reassemble from parts
                     return Self::reassemble_extended_xmp(
-                        reader,
+                        source,
                         segments,
                         guid,
                         chunk_offsets,
@@ -121,18 +126,18 @@ impl JpegHandler {
             // Simple case: single segment or concatenated segments
             if segments.len() == 1 {
                 // Single XMP segment
-                reader.seek(SeekFrom::Start(segments[0].offset))?;
+                source.seek(SeekFrom::Start(segments[0].offset))?;
                 let mut xmp_data = vec![0u8; segments[0].size as usize];
-                reader.read_exact(&mut xmp_data)?;
+                source.read_exact(&mut xmp_data)?;
                 return Ok(Some(xmp_data));
             } else {
                 // Multiple segments - concatenate them
                 let total_size: u64 = segments.iter().map(|s| s.size).sum();
                 let mut xmp_data = Vec::with_capacity(total_size as usize);
                 for segment in segments {
-                    reader.seek(SeekFrom::Start(segment.offset))?;
+                    source.seek(SeekFrom::Start(segment.offset))?;
                     let mut chunk = vec![0u8; segment.size as usize];
-                    reader.read_exact(&mut chunk)?;
+                    source.read_exact(&mut chunk)?;
                     xmp_data.extend_from_slice(&chunk);
                 }
                 return Ok(Some(xmp_data));
@@ -144,7 +149,7 @@ impl JpegHandler {
 
     /// Reassemble JPEG Extended XMP from multiple parts using chunk offsets
     fn reassemble_extended_xmp<R: Read + Seek>(
-        reader: &mut R,
+        source: &mut R,
         segments: &[Location],
         _guid: &str,
         chunk_offsets: &[u32],
@@ -168,9 +173,9 @@ impl JpegHandler {
             // Malformed - should have main segment + extended segments
             // Fall back to reading just the first segment
             if !segments.is_empty() {
-                reader.seek(SeekFrom::Start(segments[0].offset))?;
+                source.seek(SeekFrom::Start(segments[0].offset))?;
                 let mut xmp_data = vec![0u8; segments[0].size as usize];
-                reader.read_exact(&mut xmp_data)?;
+                source.read_exact(&mut xmp_data)?;
                 return Ok(Some(xmp_data));
             }
             return Ok(None);
@@ -182,13 +187,13 @@ impl JpegHandler {
         // Read each extended chunk into the correct position
         // Note: segments[0] is main XMP, segments[1..] are extended parts
         for (segment, &chunk_offset) in segments[1..].iter().zip(chunk_offsets) {
-            reader.seek(SeekFrom::Start(segment.offset))?;
+            source.seek(SeekFrom::Start(segment.offset))?;
             let end_pos = (chunk_offset as usize + segment.size as usize).min(extended_xmp.len());
             if chunk_offset as usize >= extended_xmp.len() {
                 continue; // Skip malformed chunks
             }
             let chunk_data = &mut extended_xmp[chunk_offset as usize..end_pos];
-            reader.read_exact(chunk_data)?;
+            source.read_exact(chunk_data)?;
         }
 
         // According to XMP spec, extended XMP is the complete XMP
@@ -199,7 +204,7 @@ impl JpegHandler {
     /// Extract JUMBF data from JPEG file (handles JPEG XT headers and multi-segment assembly)
     pub fn extract_jumbf_impl<R: Read + Seek>(
         structure: &crate::structure::Structure,
-        reader: &mut R,
+        source: &mut R,
     ) -> Result<Option<Vec<u8>>> {
         if structure.jumbf_indices().is_empty() {
             return Ok(None);
@@ -219,7 +224,7 @@ impl JpegHandler {
                 if segments.len() > 1 {
                     // Multi-segment JUMBF: strip JPEG XT headers
                     for (i, loc) in segments.iter().enumerate() {
-                        reader.seek(SeekFrom::Start(loc.offset))?;
+                        source.seek(SeekFrom::Start(loc.offset))?;
 
                         // First segment: skip JPEG XT header (8 bytes)
                         // Continuation segments: skip JPEG XT header + repeated LBox/TBox (16 bytes total)
@@ -232,24 +237,24 @@ impl JpegHandler {
                         let data_size = loc.size.saturating_sub(skip_bytes as u64);
                         if data_size > 0 {
                             let mut skip_buf = vec![0u8; skip_bytes];
-                            reader.read_exact(&mut skip_buf)?; // Skip the header
+                            source.read_exact(&mut skip_buf)?; // Skip the header
 
                             let mut buf = vec![0u8; data_size as usize];
-                            reader.read_exact(&mut buf)?;
+                            source.read_exact(&mut buf)?;
                             result.extend_from_slice(&buf);
                         }
                     }
                 } else {
                     // Single segment: skip JPEG XT header
-                    reader.seek(SeekFrom::Start(*offset))?;
+                    source.seek(SeekFrom::Start(*offset))?;
 
                     let mut skip_buf = [0u8; JPEG_XT_HEADER_SIZE];
-                    reader.read_exact(&mut skip_buf)?;
+                    source.read_exact(&mut skip_buf)?;
 
                     let data_size = size.saturating_sub(JPEG_XT_HEADER_SIZE as u64);
                     if data_size > 0 {
                         let mut buf = vec![0u8; data_size as usize];
-                        reader.read_exact(&mut buf)?;
+                        source.read_exact(&mut buf)?;
                         result.extend_from_slice(&buf);
                     }
                 }
@@ -264,11 +269,11 @@ impl JpegHandler {
     }
 
     /// Fast single-pass parser
-    fn parse_impl<R: Read + Seek>(&self, reader: &mut R) -> Result<Structure> {
-        let mut structure = Structure::new(Format::Jpeg);
+    fn parse_impl<R: Read + Seek>(&self, source: &mut R) -> Result<Structure> {
+        let mut structure = Structure::new(Container::Jfif, crate::MediaType::Jpeg);
 
         // Check SOI marker
-        if reader.read_u8()? != 0xFF || reader.read_u8()? != SOI {
+        if source.read_u8()? != 0xFF || source.read_u8()? != SOI {
             return Err(Error::InvalidFormat("Not a JPEG file".into()));
         }
 
@@ -278,8 +283,8 @@ impl JpegHandler {
 
         loop {
             // Read marker
-            let marker_prefix = reader.read_u8()?;
-            let marker = reader.read_u8()?;
+            let marker_prefix = source.read_u8()?;
+            let marker = source.read_u8()?;
 
             if marker_prefix != 0xFF {
                 return Err(Error::InvalidSegment {
@@ -306,14 +311,14 @@ impl JpegHandler {
 
                 SOS => {
                     // Start of scan - image data follows
-                    let size = reader.read_u16::<BigEndian>()? as u64;
+                    let size = source.read_u16::<BigEndian>()? as u64;
                     let sos_start = offset; // Start of FF DA marker
 
                     // Skip SOS header
-                    reader.seek(SeekFrom::Current((size - 2) as i64))?;
+                    source.seek(SeekFrom::Current((size - 2) as i64))?;
 
                     // Find end of image data (scan for FFD9)
-                    let image_end = find_eoi(reader)?;
+                    let image_end = find_eoi(source)?;
 
                     // ImageData includes SOS marker + header + compressed data
                     // This makes writing easier - just copy the whole thing
@@ -334,7 +339,7 @@ impl JpegHandler {
                 }
 
                 APP1 => {
-                    let size = reader.read_u16::<BigEndian>()? as u64;
+                    let size = source.read_u16::<BigEndian>()? as u64;
                     let data_size = size - 2;
                     let segment_start = offset;
 
@@ -342,7 +347,7 @@ impl JpegHandler {
                     let sig_len = XMP_EXTENDED_SIGNATURE.len().max(XMP_SIGNATURE.len());
                     let bytes_to_read = sig_len.min(data_size as usize);
                     let mut sig_buf = vec![0u8; bytes_to_read];
-                    reader.read_exact(&mut sig_buf)?;
+                    source.read_exact(&mut sig_buf)?;
 
                     if sig_buf.len() >= XMP_SIGNATURE.len()
                         && &sig_buf[..XMP_SIGNATURE.len()] == XMP_SIGNATURE
@@ -361,7 +366,7 @@ impl JpegHandler {
                             metadata: None,
                         });
                         let remaining = (data_size as usize) - sig_buf.len();
-                        reader.seek(SeekFrom::Current(remaining as i64))?;
+                        source.seek(SeekFrom::Current(remaining as i64))?;
                     } else if sig_buf.len() >= XMP_EXTENDED_SIGNATURE.len()
                         && &sig_buf[..XMP_EXTENDED_SIGNATURE.len()] == XMP_EXTENDED_SIGNATURE
                     {
@@ -372,7 +377,7 @@ impl JpegHandler {
                         if data_size < XMP_EXTENDED_SIGNATURE.len() as u64 + HEADER_SIZE {
                             // Malformed extended XMP - skip it
                             let remaining = (data_size as usize) - sig_buf.len();
-                            reader.seek(SeekFrom::Current(remaining as i64))?;
+                            source.seek(SeekFrom::Current(remaining as i64))?;
                             structure.add_segment(Segment::Other {
                                 offset: segment_start,
                                 size: size + 2,
@@ -381,14 +386,14 @@ impl JpegHandler {
                         } else {
                             // Read GUID (32 bytes as ASCII hex string)
                             let mut guid_bytes = [0u8; 32];
-                            reader.read_exact(&mut guid_bytes)?;
+                            source.read_exact(&mut guid_bytes)?;
                             let guid = String::from_utf8_lossy(&guid_bytes).to_string();
 
                             // Read full length (4 bytes, big-endian)
-                            let total_size = reader.read_u32::<BigEndian>()?;
+                            let total_size = source.read_u32::<BigEndian>()?;
 
                             // Read chunk offset (4 bytes, big-endian)
-                            let chunk_offset = reader.read_u32::<BigEndian>()?;
+                            let chunk_offset = source.read_u32::<BigEndian>()?;
 
                             // Data starts after all headers
                             let chunk_data_offset =
@@ -449,7 +454,7 @@ impl JpegHandler {
 
                             // Skip to next marker
                             let remaining = chunk_data_size;
-                            reader.seek(SeekFrom::Current(remaining as i64))?;
+                            source.seek(SeekFrom::Current(remaining as i64))?;
                         }
                     } else {
                         // Check for EXIF segment
@@ -464,7 +469,7 @@ impl JpegHandler {
                                 // Note: We already read sig_buf, so only read the remaining EXIF data
                                 let remaining_to_read = (data_size as usize) - sig_buf.len();
                                 let mut remaining_data = vec![0u8; remaining_to_read];
-                                reader.read_exact(&mut remaining_data)?;
+                                source.read_exact(&mut remaining_data)?;
 
                                 // Reconstruct full EXIF data (TIFF part only, without "Exif\0\0")
                                 let exif_tiff_start = EXIF_SIGNATURE.len();
@@ -510,12 +515,12 @@ impl JpegHandler {
 
                                 // Skip remaining EXIF data
                                 let remaining = (data_size as usize) - sig_buf.len();
-                                reader.seek(SeekFrom::Current(remaining as i64))?;
+                                source.seek(SeekFrom::Current(remaining as i64))?;
                             }
                         } else {
                             // Other APP1 segment
                             let remaining = (data_size as usize) - sig_buf.len();
-                            reader.seek(SeekFrom::Current(remaining as i64))?;
+                            source.seek(SeekFrom::Current(remaining as i64))?;
                             structure.add_segment(Segment::Other {
                                 offset: segment_start,
                                 size: size + 2,
@@ -529,7 +534,7 @@ impl JpegHandler {
                         {
                             // Other APP1 segment (probably EXIF)
                             let remaining = (data_size as usize) - sig_buf.len();
-                            reader.seek(SeekFrom::Current(remaining as i64))?;
+                            source.seek(SeekFrom::Current(remaining as i64))?;
                             structure.add_segment(Segment::Other {
                                 offset: segment_start,
                                 size: size + 2,
@@ -542,7 +547,7 @@ impl JpegHandler {
                 }
 
                 APP11 => {
-                    let size = reader.read_u16::<BigEndian>()? as u64;
+                    let size = source.read_u16::<BigEndian>()? as u64;
                     let data_size = size - 2;
                     let data_start = offset + 4;
                     let segment_start = offset;
@@ -552,7 +557,7 @@ impl JpegHandler {
                     // JUMBF superbox: LBox(4) + TBox(4 "jumb")
                     let mut header = [0u8; 32];
                     let bytes_to_read = header.len().min(data_size as usize);
-                    reader.read_exact(&mut header[..bytes_to_read])?;
+                    source.read_exact(&mut header[..bytes_to_read])?;
 
                     // Check if this is JPEG XT with JUMBF
                     let is_jpeg_xt = bytes_to_read >= 8 && &header[0..2] == b"JP";
@@ -603,11 +608,11 @@ impl JpegHandler {
 
                         // Skip remaining JUMBF data
                         let remaining = data_size - bytes_to_read as u64;
-                        reader.seek(SeekFrom::Current(remaining as i64))?;
+                        source.seek(SeekFrom::Current(remaining as i64))?;
                     } else {
                         // Other APP11 segment - skip remaining data
                         let remaining = data_size - bytes_to_read as u64;
-                        reader.seek(SeekFrom::Current(remaining as i64))?;
+                        source.seek(SeekFrom::Current(remaining as i64))?;
                         structure.add_segment(Segment::Other {
                             offset: segment_start,
                             size: size + 2,
@@ -630,14 +635,14 @@ impl JpegHandler {
 
                 _ => {
                     // Standard marker with length
-                    let size = reader.read_u16::<BigEndian>()? as u64;
+                    let size = source.read_u16::<BigEndian>()? as u64;
                     structure.add_segment(Segment::Other {
                         offset,
                         size: size + 2,
                         label: marker_label(marker),
                     });
                     offset += 2 + size;
-                    reader.seek(SeekFrom::Start(offset))?;
+                    source.seek(SeekFrom::Start(offset))?;
                 }
             }
         }
@@ -652,9 +657,13 @@ impl Default for JpegHandler {
     }
 }
 
-impl FormatHandler for JpegHandler {
-    fn supported_formats() -> &'static [Format] {
-        &[Format::Jpeg]
+impl ContainerHandler for JpegHandler {
+    fn container_type() -> Container {
+        Container::Jfif
+    }
+
+    fn supported_media_types() -> &'static [crate::MediaType] {
+        &[crate::MediaType::Jpeg]
     }
 
     fn extensions() -> &'static [&'static str] {
@@ -665,42 +674,42 @@ impl FormatHandler for JpegHandler {
         &["image/jpeg", "image/jpg"]
     }
 
-    fn detect(header: &[u8]) -> Option<Format> {
+    fn detect(header: &[u8]) -> Option<crate::Container> {
         if header.len() >= 2 && header[0] == 0xFF && header[1] == 0xD8 {
-            Some(Format::Jpeg)
+            Some(Container::Jfif)
         } else {
             None
         }
     }
 
-    fn parse<R: Read + Seek>(&self, reader: &mut R) -> Result<Structure> {
-        self.parse_impl(reader)
+    fn parse<R: Read + Seek>(&self, source: &mut R) -> Result<Structure> {
+        self.parse_impl(source)
     }
 
     fn extract_xmp<R: Read + Seek>(
         &self,
         structure: &Structure,
-        reader: &mut R,
+        source: &mut R,
     ) -> Result<Option<Vec<u8>>> {
-        Self::extract_xmp_impl(structure, reader)
+        Self::extract_xmp_impl(structure, source)
     }
 
     fn extract_jumbf<R: Read + Seek>(
         &self,
         structure: &Structure,
-        reader: &mut R,
+        source: &mut R,
     ) -> Result<Option<Vec<u8>>> {
-        Self::extract_jumbf_impl(structure, reader)
+        Self::extract_jumbf_impl(structure, source)
     }
 
     fn write<R: Read + Seek, W: Write>(
         &self,
         structure: &Structure,
-        reader: &mut R,
+        source: &mut R,
         writer: &mut W,
         updates: &Updates,
     ) -> Result<()> {
-        reader.seek(SeekFrom::Start(0))?;
+        source.seek(SeekFrom::Start(0))?;
         let mut current_read_pos = 0u64;
 
         // Write SOI
@@ -760,11 +769,11 @@ impl FormatHandler for JpegHandler {
                                         writer.write_all(XMP_SIGNATURE)?;
 
                                         if current_read_pos != segments[0].offset {
-                                            reader.seek(SeekFrom::Start(segments[0].offset))?;
+                                            source.seek(SeekFrom::Start(segments[0].offset))?;
                                             current_read_pos = segments[0].offset;
                                         }
 
-                                        let mut limited = reader.take(segments[0].size);
+                                        let mut limited = source.take(segments[0].size);
                                         copy(&mut limited, writer)?;
                                         current_read_pos += segments[0].size;
                                     }
@@ -807,11 +816,11 @@ impl FormatHandler for JpegHandler {
 
                                         // Copy the data
                                         if current_read_pos != segment.offset {
-                                            reader.seek(SeekFrom::Start(segment.offset))?;
+                                            source.seek(SeekFrom::Start(segment.offset))?;
                                             current_read_pos = segment.offset;
                                         }
 
-                                        let mut limited = reader.take(segment.size);
+                                        let mut limited = source.take(segment.size);
                                         copy(&mut limited, writer)?;
                                         current_read_pos += segment.size;
                                     }
@@ -831,11 +840,11 @@ impl FormatHandler for JpegHandler {
                                 writer.write_all(XMP_SIGNATURE)?;
 
                                 if current_read_pos != segment.offset {
-                                    reader.seek(SeekFrom::Start(segment.offset))?;
+                                    source.seek(SeekFrom::Start(segment.offset))?;
                                     current_read_pos = segment.offset;
                                 }
 
-                                let mut limited = reader.take(segment.size);
+                                let mut limited = source.take(segment.size);
                                 copy(&mut limited, writer)?;
                                 current_read_pos += segment.size;
                             }
@@ -870,11 +879,11 @@ impl FormatHandler for JpegHandler {
 
                                 // Optimized seek
                                 if current_read_pos != loc.offset {
-                                    reader.seek(SeekFrom::Start(loc.offset))?;
+                                    source.seek(SeekFrom::Start(loc.offset))?;
                                     current_read_pos = loc.offset;
                                 }
 
-                                let mut limited = reader.take(loc.size);
+                                let mut limited = source.take(loc.size);
                                 copy(&mut limited, writer)?;
                                 current_read_pos += loc.size;
                             }
@@ -894,7 +903,7 @@ impl FormatHandler for JpegHandler {
                     }
 
                     // Copy the Other segment
-                    copy_other_segment(segment, reader, writer, &mut current_read_pos)?;
+                    copy_other_segment(segment, source, writer, &mut current_read_pos)?;
                 }
 
                 Segment::Other { label, .. } if *label == "APP11" && !jumbf_written => {
@@ -908,7 +917,7 @@ impl FormatHandler for JpegHandler {
                     }
 
                     // Copy the Other segment
-                    copy_other_segment(segment, reader, writer, &mut current_read_pos)?;
+                    copy_other_segment(segment, source, writer, &mut current_read_pos)?;
                 }
 
                 Segment::ImageData { .. } => {
@@ -932,16 +941,16 @@ impl FormatHandler for JpegHandler {
                     }
 
                     // Copy image data
-                    copy_other_segment(segment, reader, writer, &mut current_read_pos)?;
+                    copy_other_segment(segment, source, writer, &mut current_read_pos)?;
                 }
 
                 Segment::Exif { .. } => {
                     // Copy EXIF segment as-is (thumbnails are embedded in it)
-                    copy_other_segment(segment, reader, writer, &mut current_read_pos)?;
+                    copy_other_segment(segment, source, writer, &mut current_read_pos)?;
                 }
 
                 Segment::Other { .. } => {
-                    copy_other_segment(segment, reader, writer, &mut current_read_pos)?;
+                    copy_other_segment(segment, source, writer, &mut current_read_pos)?;
                 }
             }
         }
@@ -953,7 +962,7 @@ impl FormatHandler for JpegHandler {
     fn extract_embedded_thumbnail<R: Read + Seek>(
         &self,
         structure: &Structure,
-        _reader: &mut R,
+        _source: &mut R,
     ) -> Result<Option<crate::EmbeddedThumbnail>> {
         // Check if any EXIF segment has an embedded thumbnail
         for segment in structure.segments() {
@@ -969,15 +978,15 @@ impl FormatHandler for JpegHandler {
 
 /// Find End of Image marker (FFD9)
 /// Properly handles byte stuffing in JPEG compressed data
-fn find_eoi<R: Read + Seek>(reader: &mut R) -> Result<u64> {
+fn find_eoi<R: Read + Seek>(source: &mut R) -> Result<u64> {
     const BUFFER_SIZE: usize = 8192;
     let mut buffer = vec![0u8; BUFFER_SIZE];
     let mut prev_was_ff = false;
-    let start_pos = reader.stream_position()?;
+    let start_pos = source.stream_position()?;
     let mut total_read = 0u64;
 
     loop {
-        let n = reader.read(&mut buffer)?;
+        let n = source.read(&mut buffer)?;
         if n == 0 {
             return Err(Error::InvalidFormat("EOI marker not found".into()));
         }
@@ -1092,7 +1101,7 @@ fn write_xmp_segment<W: Write>(writer: &mut W, xmp: &[u8]) -> Result<()> {
 /// Helper to copy a segment (ImageData or Other)
 fn copy_other_segment<R: Read + Seek, W: Write>(
     segment: &Segment,
-    reader: &mut R,
+    source: &mut R,
     writer: &mut W,
     current_read_pos: &mut u64,
 ) -> Result<()> {
@@ -1104,11 +1113,11 @@ fn copy_other_segment<R: Read + Seek, W: Write>(
 
     // Optimized seek
     if *current_read_pos != offset {
-        reader.seek(SeekFrom::Start(offset))?;
+        source.seek(SeekFrom::Start(offset))?;
         *current_read_pos = offset;
     }
 
-    let mut limited = reader.take(size);
+    let mut limited = source.take(size);
     copy(&mut limited, writer)?;
     *current_read_pos += size;
 
@@ -1153,14 +1162,13 @@ mod tests {
     fn test_jpeg_parse_minimal() {
         // Minimal JPEG: SOI + EOI
         let data = vec![0xFF, 0xD8, 0xFF, 0xD9];
-        let mut reader = Cursor::new(data);
+        let mut source = Cursor::new(data);
 
         let handler = JpegHandler::new();
-        let structure = handler.parse(&mut reader).unwrap();
+        let structure = handler.parse(&mut source).unwrap();
 
-        assert_eq!(structure.format, Format::Jpeg);
+        assert_eq!(structure.container, Container::Jfif);
         assert_eq!(structure.total_size, 4);
         assert_eq!(structure.segments.len(), 2); // Header + EOI
     }
 }
-

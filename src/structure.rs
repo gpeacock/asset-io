@@ -3,7 +3,7 @@
 use crate::{
     error::Result,
     segment::{ByteRange, ChunkedSegmentReader, Location, Segment},
-    Format,
+    Container, MediaType,
 };
 use std::io::{Read, Seek, SeekFrom, Take};
 
@@ -17,8 +17,11 @@ pub struct Structure {
     /// All segments in the asset
     pub segments: Vec<Segment>,
 
-    /// Asset format
-    pub format: Format,
+    /// Container format - how the file is structured
+    pub container: Container,
+
+    /// Media type - what the content represents
+    pub media_type: MediaType,
 
     /// Total asset size
     pub total_size: u64,
@@ -35,11 +38,12 @@ pub struct Structure {
 }
 
 impl Structure {
-    /// Create a new structure for the given format
-    pub fn new(format: Format) -> Self {
+    /// Create a new structure for the given container and media type
+    pub fn new(container: Container, media_type: MediaType) -> Self {
         Self {
             segments: Vec::new(),
-            format,
+            container,
+            media_type,
             total_size: 0,
             xmp_index: None,
             jumbf_indices: Vec::new(),
@@ -119,7 +123,7 @@ impl Structure {
     #[cfg(feature = "hashing")]
     pub fn calculate_hash<R: Read + Seek, H: std::io::Write>(
         &self,
-        reader: &mut R,
+        source: &mut R,
         segment_indices: &[usize],
         hasher: &mut H,
     ) -> Result<()> {
@@ -127,7 +131,7 @@ impl Structure {
             let segment = &self.segments[index];
             let location = segment.location();
 
-            reader.seek(SeekFrom::Start(location.offset))?;
+            source.seek(SeekFrom::Start(location.offset))?;
 
             // Stream through segment in chunks
             let mut remaining = location.size;
@@ -135,7 +139,7 @@ impl Structure {
 
             while remaining > 0 {
                 let to_read = remaining.min(buffer.len() as u64) as usize;
-                reader.read_exact(&mut buffer[..to_read])?;
+                source.read_exact(&mut buffer[..to_read])?;
                 hasher.write_all(&buffer[..to_read])?;
                 remaining -= to_read as u64;
             }
@@ -151,25 +155,25 @@ impl Structure {
     /// Read a specific byte range from the file
     ///
     /// This is useful for data hash models that need to hash arbitrary ranges.
-    pub fn read_range<R: Read + Seek>(&self, reader: &mut R, range: ByteRange) -> Result<Vec<u8>> {
-        reader.seek(SeekFrom::Start(range.offset))?;
+    pub fn read_range<R: Read + Seek>(&self, source: &mut R, range: ByteRange) -> Result<Vec<u8>> {
+        source.seek(SeekFrom::Start(range.offset))?;
         let mut buffer = vec![0u8; range.size as usize];
-        reader.read_exact(&mut buffer)?;
+        source.read_exact(&mut buffer)?;
         Ok(buffer)
     }
 
-    /// Create a chunked reader for a byte range
+    /// Create a chunked stream for a byte range
     ///
     /// This allows streaming through a range without loading it all into memory.
     /// Useful for hashing large ranges efficiently.
     pub fn read_range_chunked<'a, R: Read + Seek>(
         &self,
-        reader: &'a mut R,
+        source: &'a mut R,
         range: ByteRange,
         chunk_size: usize,
     ) -> Result<ChunkedSegmentReader<Take<&'a mut R>>> {
-        reader.seek(SeekFrom::Start(range.offset))?;
-        let taken = reader.take(range.size);
+        source.seek(SeekFrom::Start(range.offset))?;
+        let taken = source.take(range.size);
         Ok(ChunkedSegmentReader::new(taken, range.size, chunk_size))
     }
 
@@ -247,19 +251,19 @@ impl Structure {
             .collect()
     }
 
-    /// Create a chunked reader for a specific segment
+    /// Create a chunked stream for a specific segment
     ///
     /// This allows streaming through segment data without loading it all into memory.
     pub fn read_segment_chunked<'a, R: Read + Seek>(
         &self,
-        reader: &'a mut R,
+        source: &'a mut R,
         segment_index: usize,
         chunk_size: usize,
     ) -> Result<ChunkedSegmentReader<Take<&'a mut R>>> {
         let segment = &self.segments[segment_index];
         let loc = segment.location();
-        reader.seek(SeekFrom::Start(loc.offset))?;
-        let taken = reader.take(loc.size);
+        source.seek(SeekFrom::Start(loc.offset))?;
+        let taken = source.take(loc.size);
         Ok(ChunkedSegmentReader::new(taken, loc.size, chunk_size))
     }
 
@@ -296,4 +300,3 @@ impl Structure {
         })
     }
 }
-

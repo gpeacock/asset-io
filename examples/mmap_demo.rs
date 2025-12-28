@@ -116,9 +116,9 @@ fn demo_performance_comparison(path: &str) -> asset_io::Result<()> {
 
     let mut total = 0u64;
     for loc in segment_locs {
-        asset.reader_mut().seek(SeekFrom::Start(loc.offset))?;
+        asset.source_mut().seek(SeekFrom::Start(loc.offset))?;
         let mut buf = vec![0u8; loc.size as usize];
-        asset.reader_mut().read_exact(&mut buf)?;
+        asset.source_mut().read_exact(&mut buf)?;
         total += loc.size;
     }
     let seek_duration = start.elapsed();
@@ -178,9 +178,9 @@ fn demo_zero_copy_hashing(path: &str) -> asset_io::Result<()> {
 
     let mut hasher1 = SimpleHasher::new();
     for range in ranges {
-        asset.reader_mut().seek(SeekFrom::Start(range.offset))?;
+        asset.source_mut().seek(SeekFrom::Start(range.offset))?;
         let mut buf = vec![0u8; range.size as usize];
-        asset.reader_mut().read_exact(&mut buf)?;
+        asset.source_mut().read_exact(&mut buf)?;
         hasher1.update(&buf);
     }
     let hash1 = hasher1.finalize();

@@ -4,37 +4,40 @@ version = "0.1.0"
 edition = "2021"
 authors = ["Gavin Peacock <gpeacock@adobe.com>"]
 license = "MIT OR Apache-2.0"
-description = "High-performance streaming I/O for media asset metadata (JUMBF, XMP, C2PA, thumbnails)"
+description = "High-performance, media type-agnostic streaming I/O for media asset metadata (JUMBF, XMP, C2PA, thumbnails)"
 repository = "https://github.com/contentauth/asset-io"
 keywords = ["asset", "c2pa", "xmp", "jumbf", "metadata"]
 categories = ["multimedia", "parsing"]
 
 [dependencies]
 # Core I/O
-byteorder = "1.5"
 thiserror = "1.0"
-md5 = "0.7"
 
-# Optional features
+# Optional dependencies - tied to specific features
+byteorder = { version = "1.5", optional = true }
+md5 = { version = "0.7", optional = true }
 quick-xml = { version = "0.38", optional = true, default-features = false }
 memmap2 = { version = "0.9", optional = true }
 fs2 = { version = "0.4", optional = true }
-sha2 = { version = "0.10", optional = true }
 
 [dev-dependencies]
+c2pa = "0.73"
 criterion = "0.5"
 tempfile = "3.8"
-sha2 = "0.10"  # For examples
+sha2 = "0.10"  # For examples only
 
 [features]
 default = ["jpeg", "test-utils"]
-jpeg = []
-png = []
-exif = []  # EXIF parsing and embedded thumbnail extraction
-xmp = ["quick-xml"]  # XMP parsing and editing utilities
+jpeg = ["byteorder","md5"]
+png = ["byteorder"]
+exif = []
+xmp = ["quick-xml", "md5"]
 memory-mapped = ["memmap2", "fs2"]
-hashing = ["sha2"]
+hashing = []  # Remove sha2 from here
 all-formats = ["jpeg", "png"]
+
+# TEMPORARY: C2PA testing feature (delete after validation)
+c2pa-test = []  # Enables C2PA integration tests in examples
 
 # Note: At least one format feature (jpeg, png) must be enabled for the library to compile.
 
@@ -44,6 +47,9 @@ all-formats = ["jpeg", "png"]
 embed-fixtures = []
 test-utils = []
 
+[[example]]
+name = "c2pa"
+required-features = ["xmp"]
 # Example-specific features
 [[example]]
 name = "png_demo"
@@ -63,6 +69,15 @@ required-features = ["hashing"]
 [[example]]
 name = "sha256_demo"
 required-features = ["hashing"]
+
+# TEMPORARY: C2PA integration example (DELETE after testing)
+# To remove this example:
+#   1. Delete examples/c2pa_integration.rs
+#   2. Delete this [[example]] section
+#   3. Optionally delete c2pa from [dev-dependencies]
+[[example]]
+name = "c2pa_integration"
+required-features = ["xmp"]
 
 [profile.release]
 opt-level = 3
