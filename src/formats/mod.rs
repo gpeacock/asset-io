@@ -1,39 +1,39 @@
-//! Container-specific handlers
+//! Container-specific I/O implementations
 //!
-//! Each container format (JFIF, PNG, BMFF, etc.) has a handler that knows how to
+//! Each container format (JPEG, PNG, BMFF, etc.) has an I/O implementation that knows how to
 //! parse and write that specific file structure.
 
 use crate::{error::Result, structure::Structure, MediaType, Updates};
 use std::io::{Read, Seek, Write};
 
-/// Trait for container-specific file handlers
+/// Trait for container-specific I/O operations
 ///
-/// Each handler manages one container format (e.g., BMFF, JFIF, PNG) and can
+/// Each implementation handles one container format (e.g., JPEG, PNG, BMFF) and can
 /// support multiple media types within that container.
-pub trait ContainerHandler: Send + Sync {
-    /// Container type this handler manages
+pub trait ContainerIO: Send + Sync {
+    /// Container type this I/O implementation manages
     ///
     /// Note: Container is defined in the register_containers! macro
     fn container_type() -> crate::Container
     where
         Self: Sized;
 
-    /// Media types this handler can read/write
+    /// Media types this I/O implementation can read/write
     fn supported_media_types() -> &'static [MediaType]
     where
         Self: Sized;
 
-    /// File extensions this handler accepts (e.g., ["jpg", "jpeg"])
+    /// File extensions this I/O implementation accepts (e.g., ["jpg", "jpeg"])
     fn extensions() -> &'static [&'static str]
     where
         Self: Sized;
 
-    /// MIME types this handler accepts
+    /// MIME types this I/O implementation accepts
     fn mime_types() -> &'static [&'static str]
     where
         Self: Sized;
 
-    /// Try to detect if this handler can parse the given header
+    /// Try to detect if this I/O implementation can parse the given header
     /// Returns Some(Container) if confident, None if unsure
     fn detect(header: &[u8]) -> Option<crate::Container>
     where
@@ -95,12 +95,12 @@ pub trait ContainerHandler: Send + Sync {
     ) -> Result<Option<crate::EmbeddedThumbnail>>;
 }
 
-// Container handler modules - pub(crate) so register_containers! macro can access them
+// Container I/O modules - pub(crate) so register_containers! macro can access them
 #[cfg(feature = "jpeg")]
-pub(crate) mod jpeg;
+pub(crate) mod jpeg_io;
 
 #[cfg(feature = "png")]
-pub(crate) mod png;
+pub(crate) mod png_io;
 
 // ============================================================================
 // Container Registration Macro
@@ -119,7 +119,7 @@ pub(crate) mod png;
 macro_rules! register_containers {
     ($(
         $(#[$meta:meta])*
-        $variant:ident => $module:ident :: $handler:ident
+        $variant:ident => $module:ident :: $io:ident
     ),* $(,)?) => {
         /// Container format - defines how a file is structured on disk
         ///
@@ -138,11 +138,11 @@ macro_rules! register_containers {
         pub(crate) enum Handler {
             $(
                 $(#[$meta])*
-                $variant($module::$handler),
+                $variant($module::$io),
             )*
         }
 
-        // Generate Handler implementation - delegates to specific handlers
+        // Generate Handler implementation - delegates to specific I/O implementations
         impl Handler {
             #[allow(unreachable_patterns)]
             pub(crate) fn parse<R: std::io::Read + std::io::Seek>(&self, source: &mut R) -> $crate::Result<$crate::Structure> {
@@ -231,7 +231,7 @@ macro_rules! register_containers {
 
             $(
                 $(#[$meta])*
-                if let Some(container) = $module::$handler::detect(header) {
+                if let Some(container) = $module::$io::detect(header) {
                     return Ok(container);
                 }
             )*
@@ -244,7 +244,7 @@ macro_rules! register_containers {
             match container {
                 $(
                     $(#[$meta])*
-                    Container::$variant => Ok(Handler::$variant($module::$handler::new())),
+                    Container::$variant => Ok(Handler::$variant($module::$io::new())),
                 )*
             }
         }
@@ -254,8 +254,8 @@ macro_rules! register_containers {
             let ext_lower = ext.to_lowercase();
             $(
                 $(#[$meta])*
-                if $module::$handler::extensions().contains(&ext_lower.as_str()) {
-                    return Some($module::$handler::container_type());
+                if $module::$io::extensions().contains(&ext_lower.as_str()) {
+                    return Some($module::$io::container_type());
                 }
             )*
             None
@@ -265,8 +265,8 @@ macro_rules! register_containers {
         pub fn detect_from_mime(mime: &str) -> Option<Container> {
             $(
                 $(#[$meta])*
-                if $module::$handler::mime_types().iter().any(|m| m.eq_ignore_ascii_case(mime)) {
-                    return Some($module::$handler::container_type());
+                if $module::$io::mime_types().iter().any(|m| m.eq_ignore_ascii_case(mime)) {
+                    return Some($module::$io::container_type());
                 }
             )*
             None
@@ -295,7 +295,7 @@ macro_rules! register_containers {
                 match self {
                     $(
                         $(#[$meta])*
-                        Container::$variant => $module::$handler::supported_media_types(),
+                        Container::$variant => $module::$io::supported_media_types(),
                     )*
                 }
             }
@@ -307,7 +307,7 @@ macro_rules! register_containers {
                 match self {
                     $(
                         $(#[$meta])*
-                        Container::$variant => $module::$handler::mime_types(),
+                        Container::$variant => $module::$io::mime_types(),
                     )*
                 }
             }
@@ -319,7 +319,7 @@ macro_rules! register_containers {
                 match self {
                     $(
                         $(#[$meta])*
-                        Container::$variant => $module::$handler::extensions(),
+                        Container::$variant => $module::$io::extensions(),
                     )*
                 }
             }
@@ -339,8 +339,8 @@ macro_rules! register_containers {
 // ============================================================================
 register_containers! {
     #[cfg(feature = "jpeg")]
-    Jfif => jpeg::JpegHandler,
+    Jpeg => jpeg_io::JpegIO,
 
     #[cfg(feature = "png")]
-    Png => png::PngHandler,
+    Png => png_io::PngIO,
 }

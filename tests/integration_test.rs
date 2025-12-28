@@ -5,7 +5,7 @@ mod fixture_tests {
     use asset_io::{test_utils::*, Asset, Updates, XmpUpdate};
 
     #[cfg(feature = "memory-mapped")]
-    use asset_io::ContainerHandler;
+    use asset_io::ContainerIO;
 
     #[test]
     fn test_embedded_fixture_access() {
@@ -177,7 +177,7 @@ mod fixture_tests {
         println!("Memory-mapped {} ({} bytes)", path.display(), file_size);
 
         // Parse the file structure
-        let handler = asset_io::JpegHandler::new();
+        let handler = asset_io::JpegIO::new();
         let mut file_for_parse = File::open(&path).expect("Failed to open file");
         let mut structure = handler.parse(&mut file_for_parse).expect("Failed to parse");
 
@@ -249,7 +249,7 @@ mod fixture_tests {
 
 #[cfg(test)]
 mod thumbnail_tests {
-    use asset_io::{test_utils, ContainerHandler, JpegHandler};
+    use asset_io::{test_utils, ContainerIO, JpegIO};
     use std::fs::File;
 
     #[test]
@@ -259,7 +259,7 @@ mod thumbnail_tests {
         let path = test_utils::fixture_path(test_utils::P1000708);
         let mut file = File::open(&path).expect("Failed to open file");
 
-        let handler = JpegHandler::new();
+        let handler = JpegIO::new();
         let structure = handler.parse(&mut file).expect("Failed to parse");
 
         // Should find image data
@@ -325,7 +325,7 @@ mod thumbnail_tests {
         let path = test_utils::fixture_path(test_utils::P1000708);
         let mut file = File::open(&path).expect("Failed to open file");
 
-        let handler = JpegHandler::new();
+        let handler = JpegIO::new();
         let structure = handler.parse(&mut file).expect("Failed to parse");
 
         // Get image data range
@@ -408,7 +408,7 @@ mod thumbnail_tests {
 #[cfg(all(test, feature = "png"))]
 mod png_tests {
     use asset_io::{
-        Asset, Container, ContainerHandler, JumbfUpdate, MediaType, PngHandler, Updates, XmpUpdate,
+        Asset, Container, ContainerIO, JumbfUpdate, MediaType, PngIO, Updates, XmpUpdate,
     };
     use std::io::Cursor;
 
@@ -461,7 +461,7 @@ mod png_tests {
         let png_data = create_minimal_png();
         let mut cursor = Cursor::new(png_data);
 
-        let handler = PngHandler::new();
+        let handler = PngIO::new();
         let structure = handler.parse(&mut cursor).unwrap();
 
         assert_eq!(structure.container, Container::Png);
@@ -473,7 +473,7 @@ mod png_tests {
         let png_data = create_minimal_png();
         let mut input = Cursor::new(png_data.clone());
 
-        let handler = PngHandler::new();
+        let handler = PngIO::new();
         let structure = handler.parse(&mut input).unwrap();
 
         // Write with no changes
@@ -498,7 +498,7 @@ mod png_tests {
         let png_data = create_minimal_png();
         let mut input = Cursor::new(png_data);
 
-        let handler = PngHandler::new();
+        let handler = PngIO::new();
         let structure = handler.parse(&mut input).unwrap();
 
         // Add XMP metadata
@@ -527,7 +527,7 @@ mod png_tests {
         let png_data = create_minimal_png();
         let mut input = Cursor::new(png_data);
 
-        let handler = PngHandler::new();
+        let handler = PngIO::new();
         let structure = handler.parse(&mut input).unwrap();
 
         // Add JUMBF metadata
@@ -556,7 +556,7 @@ mod png_tests {
         let png_data = create_minimal_png();
         let mut input = Cursor::new(png_data);
 
-        let handler = PngHandler::new();
+        let handler = PngIO::new();
         let structure = handler.parse(&mut input).unwrap();
 
         // Add both XMP and JUMBF
@@ -597,7 +597,7 @@ mod png_tests {
         let base_png = create_minimal_png();
         let mut input = Cursor::new(base_png.clone());
 
-        let handler = PngHandler::new();
+        let handler = PngIO::new();
         let structure = handler.parse(&mut input).unwrap();
 
         // Add XMP first
@@ -644,7 +644,7 @@ mod png_tests {
         use std::fs::File;
 
         let mut file = File::open("tests/fixtures/GreenCat.png").unwrap();
-        let handler = PngHandler::new();
+        let handler = PngIO::new();
         let structure = handler.parse(&mut file).unwrap();
 
         assert_eq!(structure.container, Container::Png);
@@ -660,7 +660,7 @@ mod png_tests {
         use std::fs::File;
 
         let mut input = File::open("tests/fixtures/GreenCat.png").unwrap();
-        let handler = PngHandler::new();
+        let handler = PngIO::new();
         let structure = handler.parse(&mut input).unwrap();
 
         // Write with no changes
@@ -690,7 +690,7 @@ mod png_tests {
         use std::fs::File;
 
         let mut input = File::open("tests/fixtures/GreenCat.png").unwrap();
-        let handler = PngHandler::new();
+        let handler = PngIO::new();
         let structure = handler.parse(&mut input).unwrap();
 
         // Add XMP metadata
@@ -718,7 +718,7 @@ mod png_tests {
         use std::fs::File;
 
         let mut input = File::open("tests/fixtures/GreenCat.png").unwrap();
-        let handler = PngHandler::new();
+        let handler = PngIO::new();
         let structure = handler.parse(&mut input).unwrap();
 
         // Add JUMBF metadata
@@ -746,7 +746,7 @@ mod png_tests {
         use std::fs::File;
 
         let mut input = File::open("tests/fixtures/GreenCat.png").unwrap();
-        let handler = PngHandler::new();
+        let handler = PngIO::new();
         let structure = handler.parse(&mut input).unwrap();
 
         // Add both XMP and JUMBF

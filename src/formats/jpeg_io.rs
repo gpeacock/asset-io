@@ -1,10 +1,10 @@
-//! JPEG format handler
+//! JPEG container I/O implementation
 
 use crate::{
     error::{Error, Result},
     segment::{LazyData, Location, Segment},
     structure::Structure,
-    Container, ContainerHandler, Updates,
+    Container, ContainerIO, Updates,
 };
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use std::io::{copy, Read, Seek, SeekFrom, Write};
@@ -57,18 +57,18 @@ fn marker_label(marker: u8) -> &'static str {
     }
 }
 
-/// JPEG format handler
-pub struct JpegHandler;
+/// JPEG container I/O implementation
+pub struct JpegIO;
 
-impl JpegHandler {
-    /// Create a new JPEG handler
+impl JpegIO {
+    /// Create a new JPEG I/O implementation
     pub fn new() -> Self {
         Self
     }
 
     /// Formats this handler supports
     pub fn container_type() -> Container {
-        Container::Jfif
+        Container::Jpeg
     }
 
     /// Media types this handler supports
@@ -90,7 +90,7 @@ impl JpegHandler {
     pub fn detect(header: &[u8]) -> Option<crate::Container> {
         // JPEG magic bytes: FF D8
         if header.len() >= 2 && header[0] == 0xFF && header[1] == 0xD8 {
-            Some(Container::Jfif)
+            Some(Container::Jpeg)
         } else {
             None
         }
@@ -270,7 +270,7 @@ impl JpegHandler {
 
     /// Fast single-pass parser
     fn parse_impl<R: Read + Seek>(&self, source: &mut R) -> Result<Structure> {
-        let mut structure = Structure::new(Container::Jfif, crate::MediaType::Jpeg);
+        let mut structure = Structure::new(Container::Jpeg, crate::MediaType::Jpeg);
 
         // Check SOI marker
         if source.read_u8()? != 0xFF || source.read_u8()? != SOI {
@@ -651,15 +651,15 @@ impl JpegHandler {
     }
 }
 
-impl Default for JpegHandler {
+impl Default for JpegIO {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl ContainerHandler for JpegHandler {
+impl ContainerIO for JpegIO {
     fn container_type() -> Container {
-        Container::Jfif
+        Container::Jpeg
     }
 
     fn supported_media_types() -> &'static [crate::MediaType] {
@@ -676,7 +676,7 @@ impl ContainerHandler for JpegHandler {
 
     fn detect(header: &[u8]) -> Option<crate::Container> {
         if header.len() >= 2 && header[0] == 0xFF && header[1] == 0xD8 {
-            Some(Container::Jfif)
+            Some(Container::Jpeg)
         } else {
             None
         }
@@ -1164,10 +1164,10 @@ mod tests {
         let data = vec![0xFF, 0xD8, 0xFF, 0xD9];
         let mut source = Cursor::new(data);
 
-        let handler = JpegHandler::new();
+        let handler = JpegIO::new();
         let structure = handler.parse(&mut source).unwrap();
 
-        assert_eq!(structure.container, Container::Jfif);
+        assert_eq!(structure.container, Container::Jpeg);
         assert_eq!(structure.total_size, 4);
         assert_eq!(structure.segments.len(), 2); // Header + EOI
     }

@@ -8,8 +8,8 @@ fn main() -> asset_io::Result<()> {
         // Demo with known formats
         #[cfg(feature = "jpeg")]
         {
-            let jpeg = Container::Jfif;
-            println!("JFIF (JPEG) container:");
+            let jpeg = Container::Jpeg;
+            println!("JPEG container:");
             println!("  Primary MIME: {}", jpeg.to_mime());
             println!("  All MIME types: {:?}", jpeg.mime_types());
             println!("  Primary extension: {}", jpeg.to_extension());

@@ -57,15 +57,15 @@ fn main() -> asset_io::Result<()> {
 For more control over the parsing and writing process:
 
 ```rust
-use asset_io::{JpegHandler, ContainerHandler, Updates};
+use asset_io::{JpegIO, ContainerIO, Updates};
 use std::fs::File;
 
 fn main() -> asset_io::Result<()> {
     let mut file = File::open("image.jpg")?;
-    let handler = JpegHandler::new();
+    let io = JpegIO::new();
     
     // Single-pass parse
-    let mut structure = handler.parse(&mut file)?;
+    let mut structure = io.parse(&mut file)?;
     
     // Lazy load metadata
     if let Some(xmp) = structure.xmp(&mut file)? {
@@ -75,7 +75,7 @@ fn main() -> asset_io::Result<()> {
     // Write with updates
     let updates = Updates::default();
     let mut output = File::create("output.jpg")?;
-    handler.write(&structure, &mut file, &mut output, &updates)?;
+    io.write(&structure, &mut file, &mut output, &updates)?;
     
     Ok(())
 }

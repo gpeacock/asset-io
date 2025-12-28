@@ -1,10 +1,10 @@
-//! PNG format handler
+//! PNG container I/O implementation
 
 use crate::{
     error::{Error, Result},
     segment::{LazyData, Location, Segment},
     structure::Structure,
-    Container, ContainerHandler, Updates,
+    Container, ContainerIO, Updates,
 };
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -44,11 +44,11 @@ fn chunk_label(chunk_type: &[u8; 4]) -> &'static str {
     }
 }
 
-/// PNG format handler
-pub struct PngHandler;
+/// PNG container I/O implementation
+pub struct PngIO;
 
-impl PngHandler {
-    /// Create a new PNG handler
+impl PngIO {
+    /// Create a new PNG I/O implementation
     pub fn new() -> Self {
         Self
     }
@@ -398,13 +398,13 @@ impl PngHandler {
     }
 }
 
-impl Default for PngHandler {
+impl Default for PngIO {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl ContainerHandler for PngHandler {
+impl ContainerIO for PngIO {
     fn container_type() -> Container {
         Container::Png
     }
@@ -634,14 +634,14 @@ mod tests {
             0x00, // Interlace: none
         ];
 
-        let crc = PngHandler::calculate_crc(chunk_type, data);
+        let crc = PngIO::calculate_crc(chunk_type, data);
         // Just verify it produces a consistent value
-        assert_eq!(crc, PngHandler::calculate_crc(chunk_type, data));
+        assert_eq!(crc, PngIO::calculate_crc(chunk_type, data));
 
         // And that different data produces different CRC
         let mut different_data = data.to_vec();
         different_data[0] = 0xFF;
-        let different_crc = PngHandler::calculate_crc(chunk_type, &different_data);
+        let different_crc = PngIO::calculate_crc(chunk_type, &different_data);
         assert_ne!(crc, different_crc);
     }
 
@@ -677,7 +677,7 @@ mod tests {
         data.extend_from_slice(&0xAE426082_u32.to_be_bytes()); // CRC
 
         let mut source = Cursor::new(data);
-        let handler = PngHandler::new();
+        let handler = PngIO::new();
         let structure = handler.parse(&mut source).unwrap();
 
         assert_eq!(structure.container, Container::Png);
@@ -688,7 +688,7 @@ mod tests {
     fn test_png_invalid_signature() {
         let data = vec![0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
         let mut source = Cursor::new(data);
-        let handler = PngHandler::new();
+        let handler = PngIO::new();
         let result = handler.parse(&mut source);
 
         assert!(result.is_err());

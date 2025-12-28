@@ -9,7 +9,7 @@ use asset_io::MAX_SEGMENT_SIZE;
 use asset_io::{ByteRange, Container};
 
 #[cfg(feature = "png")]
-use asset_io::ContainerHandler;
+use asset_io::ContainerIO;
 
 #[test]
 fn test_max_segment_size_constant() {
@@ -60,7 +60,7 @@ fn test_mmap_bounds_checking_with_overflow() {
     let file = File::open(temp_path).unwrap();
     let mmap = unsafe { memmap2::Mmap::map(&file).unwrap() };
 
-    let mut structure = Structure::new(Container::Jfif, asset_io::MediaType::Jpeg);
+    let mut structure = Structure::new(Container::Jpeg, asset_io::MediaType::Jpeg);
     structure = structure.with_mmap(mmap);
 
     // Test 1: Out of bounds access returns None
@@ -96,7 +96,7 @@ fn test_mmap_bounds_checking_with_overflow() {
 #[test]
 #[cfg(feature = "png")]
 fn test_png_chunk_length_validation() {
-    use asset_io::PngHandler;
+    use asset_io::PngIO;
     use std::io::Cursor;
 
     // PNG with chunk claiming huge size (2GB)
@@ -110,7 +110,7 @@ fn test_png_chunk_length_validation() {
     data.extend_from_slice(&[0; 4]); // CRC
 
     let mut cursor = Cursor::new(data);
-    let handler = PngHandler::new();
+    let handler = PngIO::new();
 
     // Should reject gracefully (the parser checks chunk length > 0x7FFFFFFF)
     let result = handler.parse(&mut cursor);

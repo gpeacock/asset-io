@@ -160,7 +160,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[cfg(feature = "c2pa-test")]
-fn test_c2pa_builder(image_path: &str) -> Result<(), Box<dyn std::error::Error>> {
+fn test_c2pa_builder(_image_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     println!("\n  Testing c2pa::Builder...");
 
     // TODO: Use c2pa::Builder to:
@@ -173,7 +173,7 @@ fn test_c2pa_builder(image_path: &str) -> Result<(), Box<dyn std::error::Error>>
 }
 
 #[cfg(feature = "c2pa-test")]
-fn test_c2pa_reader(image_path: &str) -> Result<(), Box<dyn std::error::Error>> {
+fn test_c2pa_reader(_image_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     println!("\n  Testing c2pa::Reader...");
 
     // TODO: Use c2pa::Reader to:

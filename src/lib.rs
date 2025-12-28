@@ -46,13 +46,13 @@
 //! For more control, you can use media type-specific handlers:
 //!
 //! ```no_run
-//! use asset_io::{ContainerHandler, JpegHandler, Updates};
+//! use asset_io::{ContainerIO, JpegIO, Updates};
 //! use std::fs::File;
 //!
 //! # fn main() -> asset_io::Result<()> {
 //! // Parse file structure in single pass
 //! let mut file = File::open("image.jpg")?;
-//! let handler = JpegHandler::new();
+//! let handler = JpegIO::new();
 //! let structure = handler.parse(&mut file)?;
 //!
 //! // Access XMP data (loaded lazily via handler)
@@ -82,7 +82,7 @@ pub mod xmp;
 
 pub use asset::{Asset, AssetBuilder};
 pub use error::{Error, Result};
-pub use formats::ContainerHandler;
+pub use formats::ContainerIO;
 pub use media_type::MediaType;
 pub use segment::{
     ByteRange, ChunkedSegmentReader, LazyData, Location, Segment, SegmentMetadata,
@@ -169,6 +169,6 @@ pub use formats::{detect_from_extension, detect_from_mime, Container};
 
 // Re-export container handlers at crate root
 #[cfg(feature = "jpeg")]
-pub use formats::jpeg::JpegHandler;
+pub use formats::jpeg_io::JpegIO;
 #[cfg(feature = "png")]
-pub use formats::png::PngHandler;
+pub use formats::png_io::PngIO;
