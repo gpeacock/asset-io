@@ -1,4 +1,4 @@
-use asset_io::{Asset, JumbfUpdate, Updates, XmpUpdate};
+use asset_io::{Asset, Updates};
 use std::fs;
 
 /// Quick reference showing all supported metadata operations
@@ -19,23 +19,11 @@ fn main() -> asset_io::Result<()> {
 
     // 2. Remove only XMP
     let mut asset = Asset::open(input)?;
-    asset.write_to(
-        "output.jpg",
-        &Updates {
-            xmp: XmpUpdate::Remove,
-            ..Default::default()
-        },
-    )?;
+    asset.write_to("output.jpg", &Updates::new().remove_xmp())?;
 
     // 3. Remove only JUMBF
     let mut asset = Asset::open(input)?;
-    asset.write_to(
-        "output.jpg",
-        &Updates {
-            jumbf: JumbfUpdate::Remove,
-            ..Default::default()
-        },
-    )?;
+    asset.write_to("output.jpg", &Updates::new().remove_jumbf())?;
 
     // 4. Remove both (convenience method)
     let mut asset = Asset::open(input)?;
@@ -48,34 +36,20 @@ fn main() -> asset_io::Result<()> {
     // 5. Replace XMP, keep JUMBF
     let new_xmp = b"<rdf:RDF>...</rdf:RDF>".to_vec();
     let mut asset = Asset::open(input)?;
-    asset.write_to(
-        "output.jpg",
-        &Updates {
-            xmp: XmpUpdate::Set(new_xmp.clone()),
-            ..Default::default()
-        },
-    )?;
+    asset.write_to("output.jpg", &Updates::new().set_xmp(new_xmp.clone()))?;
 
     // 6. Replace JUMBF, keep XMP
     let new_jumbf = fs::read("new_c2pa.jumbf")?;
     let mut asset = Asset::open(input)?;
-    asset.write_to(
-        "output.jpg",
-        &Updates {
-            jumbf: JumbfUpdate::Set(new_jumbf.clone()),
-            ..Default::default()
-        },
-    )?;
+    asset.write_to("output.jpg", &Updates::new().set_jumbf(new_jumbf.clone()))?;
 
     // 7. Replace both
     let mut asset = Asset::open(input)?;
     asset.write_to(
         "output.jpg",
-        &Updates {
-            xmp: XmpUpdate::Set(new_xmp.clone()),
-            jumbf: JumbfUpdate::Set(new_jumbf.clone()),
-            ..Default::default()
-        },
+        &Updates::new()
+            .set_xmp(new_xmp.clone())
+            .set_jumbf(new_jumbf.clone()),
     )?;
 
     // ============================================
@@ -98,22 +72,14 @@ fn main() -> asset_io::Result<()> {
     let mut asset = Asset::open(input)?;
     asset.write_to(
         "output.jpg",
-        &Updates {
-            xmp: XmpUpdate::Set(new_xmp.clone()),
-            jumbf: JumbfUpdate::Remove,
-            ..Default::default()
-        },
+        &Updates::new().set_xmp(new_xmp.clone()).remove_jumbf(),
     )?;
 
     // 11. Remove XMP and replace JUMBF
     let mut asset = Asset::open(input)?;
     asset.write_to(
         "output.jpg",
-        &Updates {
-            xmp: XmpUpdate::Remove,
-            jumbf: JumbfUpdate::Set(new_jumbf.clone()),
-            ..Default::default()
-        },
+        &Updates::new().remove_xmp().set_jumbf(new_jumbf.clone()),
     )?;
 
     // ============================================
@@ -124,13 +90,7 @@ fn main() -> asset_io::Result<()> {
     let mut source = Asset::open("source.jpg")?;
     if let Some(jumbf_data) = source.jumbf()? {
         let mut target = Asset::open("target.jpg")?;
-        target.write_to(
-            "output.jpg",
-            &Updates {
-                jumbf: JumbfUpdate::Set(jumbf_data),
-                ..Default::default()
-            },
-        )?;
+        target.write_to("output.jpg", &Updates::new().set_jumbf(jumbf_data))?;
     }
 
     // ============================================

@@ -1,4 +1,4 @@
-use asset_io::{Asset, JumbfUpdate, Updates, XmpUpdate};
+use asset_io::{Asset, Updates};
 use std::fs;
 
 // Always use test_utils now
@@ -157,10 +157,7 @@ fn test_fixture(path: &str) -> asset_io::Result<FixtureInfo> {
     let mut asset = Asset::open(path)?;
     asset.write_to(
         xmp_mod_path,
-        &Updates {
-            xmp: XmpUpdate::Set(new_xmp.clone()),
-            ..Default::default()
-        },
+        &Updates::new().set_xmp(new_xmp.clone()),
     )?;
 
     let mut verify = Asset::open(xmp_mod_path)?;
@@ -183,10 +180,7 @@ fn test_fixture(path: &str) -> asset_io::Result<FixtureInfo> {
     let mut asset = Asset::open(path)?;
     asset.write_to(
         jumbf_rm_path,
-        &Updates {
-            jumbf: JumbfUpdate::Remove,
-            ..Default::default()
-        },
+        &Updates::new().remove_jumbf(),
     )?;
 
     let mut verify = Asset::open(jumbf_rm_path)?;

@@ -8,7 +8,7 @@
 //!
 //! Usage: cargo run --example png_demo --features png
 
-use asset_io::{Asset, JumbfUpdate, Updates, XmpUpdate};
+use asset_io::{Asset, Updates};
 
 fn main() -> asset_io::Result<()> {
     println!("=== PNG Format Demo ===\n");
@@ -50,10 +50,7 @@ fn main() -> asset_io::Result<()> {
 
     asset.write_to(
         "/tmp/png_with_xmp.png",
-        &Updates {
-            xmp: XmpUpdate::Set(new_xmp),
-            ..Default::default()
-        },
+        &Updates::new().set_xmp(new_xmp),
     )?;
 
     println!("   ✓ Wrote PNG with XMP to /tmp/png_with_xmp.png");
@@ -76,11 +73,9 @@ fn main() -> asset_io::Result<()> {
 
     output_asset.write_to(
         "/tmp/png_with_c2pa.png",
-        &Updates {
-            xmp: XmpUpdate::Keep, // Keep the XMP we just added
-            jumbf: JumbfUpdate::Set(jumbf_data),
-            ..Default::default()
-        },
+        &Updates::new()
+            .keep_xmp()  // Keep the XMP we just added
+            .set_jumbf(jumbf_data),
     )?;
 
     println!("   ✓ Wrote PNG with XMP + JUMBF to /tmp/png_with_c2pa.png");

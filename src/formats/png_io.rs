@@ -482,10 +482,10 @@ impl ContainerIO for PngIO {
                 }
 
                 Segment::Xmp { offset, size, .. } => {
-                    use crate::XmpUpdate;
+                    use crate::MetadataUpdate;
 
                     match &updates.xmp {
-                        XmpUpdate::Keep => {
+                        MetadataUpdate::Keep => {
                             // Copy existing XMP chunk
                             // We need to read the XMP data from the file
                             source.seek(SeekFrom::Start(*offset))?;
@@ -496,22 +496,22 @@ impl ContainerIO for PngIO {
                             Self::write_xmp_chunk(writer, &xmp_data)?;
                             xmp_written = true;
                         }
-                        XmpUpdate::Set(new_xmp) if !xmp_written => {
+                        MetadataUpdate::Set(new_xmp) if !xmp_written => {
                             // Write new XMP
                             Self::write_xmp_chunk(writer, new_xmp)?;
                             xmp_written = true;
                         }
-                        XmpUpdate::Remove | XmpUpdate::Set(_) => {
+                        MetadataUpdate::Remove | MetadataUpdate::Set(_) => {
                             // Skip this chunk
                         }
                     }
                 }
 
                 Segment::Jumbf { offset, size, .. } => {
-                    use crate::JumbfUpdate;
+                    use crate::MetadataUpdate;
 
                     match &updates.jumbf {
-                        JumbfUpdate::Keep => {
+                        MetadataUpdate::Keep => {
                             // Copy existing JUMBF chunk
                             source.seek(SeekFrom::Start(*offset))?;
 
@@ -521,12 +521,12 @@ impl ContainerIO for PngIO {
                             Self::write_chunk(writer, C2PA, &jumbf_data)?;
                             jumbf_written = true;
                         }
-                        JumbfUpdate::Set(new_jumbf) if !jumbf_written => {
+                        MetadataUpdate::Set(new_jumbf) if !jumbf_written => {
                             // Write new JUMBF
                             Self::write_chunk(writer, C2PA, new_jumbf)?;
                             jumbf_written = true;
                         }
-                        JumbfUpdate::Remove | JumbfUpdate::Set(_) => {
+                        MetadataUpdate::Remove | MetadataUpdate::Set(_) => {
                             // Skip this chunk
                         }
                     }
@@ -555,17 +555,17 @@ impl ContainerIO for PngIO {
                     // Check if this is IEND - we need to write new metadata before it
                     if *label == "IEND" {
                         // This is IEND - write any pending metadata first
-                        use crate::{JumbfUpdate, XmpUpdate};
+                        use crate::MetadataUpdate;
 
                         if !xmp_written {
-                            if let XmpUpdate::Set(new_xmp) = &updates.xmp {
+                            if let MetadataUpdate::Set(new_xmp) = &updates.xmp {
                                 Self::write_xmp_chunk(writer, new_xmp)?;
                                 xmp_written = true;
                             }
                         }
 
                         if !jumbf_written {
-                            if let JumbfUpdate::Set(new_jumbf) = &updates.jumbf {
+                            if let MetadataUpdate::Set(new_jumbf) = &updates.jumbf {
                                 Self::write_chunk(writer, C2PA, new_jumbf)?;
                                 jumbf_written = true;
                             }

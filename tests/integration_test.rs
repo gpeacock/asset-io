@@ -2,7 +2,7 @@
 
 #[cfg(test)]
 mod fixture_tests {
-    use asset_io::{test_utils::*, Asset, Updates, XmpUpdate};
+    use asset_io::{test_utils::*, Asset, Updates};
 
     #[cfg(feature = "memory-mapped")]
     use asset_io::ContainerIO;
@@ -69,10 +69,7 @@ mod fixture_tests {
         asset
             .write_to(
                 output_path,
-                &Updates {
-                    xmp: XmpUpdate::Set(new_xmp.clone()),
-                    ..Default::default()
-                },
+                &Updates::new().set_xmp(new_xmp.clone()),
             )
             .expect("Failed to write asset");
 
@@ -408,7 +405,7 @@ mod thumbnail_tests {
 #[cfg(all(test, feature = "png"))]
 mod png_tests {
     use asset_io::{
-        Asset, Container, ContainerIO, JumbfUpdate, MediaType, PngIO, Updates, XmpUpdate,
+        Asset, Container, ContainerIO, MediaType, PngIO, Updates,
     };
     use std::io::Cursor;
 
@@ -505,10 +502,7 @@ mod png_tests {
         let xmp_data = b"<rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\"><test>PNG XMP</test></rdf:RDF>".to_vec();
         input.set_position(0);
         let mut output = Vec::new();
-        let updates = Updates {
-            xmp: XmpUpdate::Set(xmp_data.clone()),
-            ..Default::default()
-        };
+        let updates = Updates::new().set_xmp(xmp_data.clone());
         handler
             .write(&structure, &mut input, &mut output, &updates)
             .unwrap();
@@ -534,10 +528,7 @@ mod png_tests {
         let jumbf_data = b"Test JUMBF data for PNG".to_vec();
         input.set_position(0);
         let mut output = Vec::new();
-        let updates = Updates {
-            jumbf: JumbfUpdate::Set(jumbf_data.clone()),
-            ..Default::default()
-        };
+        let updates = Updates::new().set_jumbf(jumbf_data.clone());
         handler
             .write(&structure, &mut input, &mut output, &updates)
             .unwrap();
@@ -565,11 +556,9 @@ mod png_tests {
 
         input.set_position(0);
         let mut output = Vec::new();
-        let updates = Updates {
-            xmp: XmpUpdate::Set(xmp_data.clone()),
-            jumbf: JumbfUpdate::Set(jumbf_data.clone()),
-            ..Default::default()
-        };
+        let updates = Updates::new()
+            .set_xmp(xmp_data.clone())
+            .set_jumbf(jumbf_data.clone());
         handler
             .write(&structure, &mut input, &mut output, &updates)
             .unwrap();
@@ -609,10 +598,7 @@ mod png_tests {
                 &structure,
                 &mut input,
                 &mut with_xmp,
-                &Updates {
-                    xmp: XmpUpdate::Set(xmp_data),
-                    ..Default::default()
-                },
+                &Updates::new().set_xmp(xmp_data),
             )
             .unwrap();
 
@@ -626,10 +612,7 @@ mod png_tests {
                 &structure2,
                 &mut input2,
                 &mut output,
-                &Updates {
-                    xmp: XmpUpdate::Remove,
-                    ..Default::default()
-                },
+                &Updates::new().remove_xmp(),
             )
             .unwrap();
 
@@ -696,10 +679,7 @@ mod png_tests {
         // Add XMP metadata
         let xmp_data = b"<rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\"><test>PNG XMP</test></rdf:RDF>".to_vec();
         let mut output = Vec::new();
-        let updates = Updates {
-            xmp: XmpUpdate::Set(xmp_data.clone()),
-            ..Default::default()
-        };
+        let updates = Updates::new().set_xmp(xmp_data.clone());
         handler
             .write(&structure, &mut input, &mut output, &updates)
             .unwrap();
@@ -724,10 +704,7 @@ mod png_tests {
         // Add JUMBF metadata
         let jumbf_data = b"Test JUMBF data for PNG".to_vec();
         let mut output = Vec::new();
-        let updates = Updates {
-            jumbf: JumbfUpdate::Set(jumbf_data.clone()),
-            ..Default::default()
-        };
+        let updates = Updates::new().set_jumbf(jumbf_data.clone());
         handler
             .write(&structure, &mut input, &mut output, &updates)
             .unwrap();
@@ -754,11 +731,9 @@ mod png_tests {
         let jumbf_data = b"JUMBF Data".to_vec();
 
         let mut output = Vec::new();
-        let updates = Updates {
-            xmp: XmpUpdate::Set(xmp_data.clone()),
-            jumbf: JumbfUpdate::Set(jumbf_data.clone()),
-            ..Default::default()
-        };
+        let updates = Updates::new()
+            .set_xmp(xmp_data.clone())
+            .set_jumbf(jumbf_data.clone());
         handler
             .write(&structure, &mut input, &mut output, &updates)
             .unwrap();

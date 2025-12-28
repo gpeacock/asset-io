@@ -18,7 +18,7 @@ use crate::Handler;
 /// # Example
 ///
 /// ```no_run
-/// use asset_io::{Asset, Updates, XmpUpdate};
+/// use asset_io::{Asset, Updates};
 ///
 /// # fn main() -> asset_io::Result<()> {
 /// // Open any supported media file - media type is auto-detected
@@ -30,10 +30,7 @@ use crate::Handler;
 /// }
 ///
 /// // Modify and write
-/// let updates = Updates {
-///     xmp: XmpUpdate::Set(b"<new>metadata</new>".to_vec()),
-///     ..Default::default()
-/// };
+/// let updates = Updates::new().set_xmp(b"<new>metadata</new>".to_vec());
 /// asset.write_to("output.jpg", &updates)?;
 /// # Ok(())
 /// # }

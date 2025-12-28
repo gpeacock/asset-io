@@ -1,8 +1,8 @@
-use asset_io::Asset;
-use c2pa::Reader;
+use asset_io::{Asset, Updates};
+use c2pa::{assertions::DataHash, Builder, BuilderIntent, DigitalSourceType, Reader, settings::Settings};
 use std::env;
 
-fn main() -> asset_io::Result<()> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();
 
     if args.len() < 2 {
@@ -45,6 +45,8 @@ fn main() -> asset_io::Result<()> {
     match asset.jumbf()? {
         Some(jumbf) => {
             println!("\n✓ Found JUMBF data ({} bytes)", jumbf.len());
+            let settings = std::fs::read_to_string("tests/fixtures/test_settings.json")?;
+            Settings::from_string(&settings, "json")?;
             // Now format.to_string() works!
             let reader = Reader::from_manifest_data_and_stream(
                 &jumbf,
@@ -52,6 +54,16 @@ fn main() -> asset_io::Result<()> {
                 asset.source_mut(),
             );
             println!("  Reader: {:?}", reader);
+            let mut builder = Builder::new();
+            builder.set_intent(BuilderIntent::Create(DigitalSourceType::Empty));
+            let data_hash = DataHash::new("test", "es256");
+            builder.add_assertion(DataHash::LABEL, &data_hash)?;
+            let signer = Settings::signer()?;
+            let new_jumbf_data = builder.sign_data_hashed_embeddable(&signer, &data_hash, &asset.media_type().to_string())?;
+            let updates = Updates::new()
+                .set_jumbf(new_jumbf_data)
+                .keep_xmp();
+            asset.write_to("output.jpg", &updates)?;
         }
         None => println!("\n✗ No JUMBF data found"),
     }

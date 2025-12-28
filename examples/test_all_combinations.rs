@@ -1,6 +1,6 @@
 //! Comprehensive test of all XMP and JUMBF modification combinations
 
-use asset_io::{Asset, JumbfUpdate, Updates, XmpUpdate};
+use asset_io::{Asset, Updates};
 use std::fs;
 
 fn main() -> asset_io::Result<()> {
@@ -19,10 +19,7 @@ fn main() -> asset_io::Result<()> {
     test_modification(
         input,
         "/tmp/test_remove_xmp.jpg",
-        Updates {
-            xmp: XmpUpdate::Remove,
-            ..Default::default()
-        },
+        Updates::new().remove_xmp(),
     )?;
 
     // Test 3: Keep XMP, remove JUMBF
@@ -30,10 +27,7 @@ fn main() -> asset_io::Result<()> {
     test_modification(
         input,
         "/tmp/test_remove_jumbf.jpg",
-        Updates {
-            jumbf: JumbfUpdate::Remove,
-            ..Default::default()
-        },
+        Updates::new().remove_jumbf(),
     )?;
 
     // Test 4: Remove both
@@ -45,10 +39,7 @@ fn main() -> asset_io::Result<()> {
     test_modification(
         input,
         "/tmp/test_replace_xmp.jpg",
-        Updates {
-            xmp: XmpUpdate::Set(test_xmp.clone()),
-            ..Default::default()
-        },
+        Updates::new().set_xmp(test_xmp.clone()),
     )?;
 
     // Test 6: Keep XMP, remove JUMBF (simpler than replace)
@@ -56,10 +47,7 @@ fn main() -> asset_io::Result<()> {
     test_modification(
         input,
         "/tmp/test_keep_xmp_remove_jumbf.jpg",
-        Updates {
-            jumbf: JumbfUpdate::Remove,
-            ..Default::default()
-        },
+        Updates::new().remove_jumbf(),
     )?;
 
     // Test 7: Replace XMP, remove JUMBF
@@ -67,11 +55,9 @@ fn main() -> asset_io::Result<()> {
     test_modification(
         input,
         "/tmp/test_replace_xmp_remove_jumbf.jpg",
-        Updates {
-            xmp: XmpUpdate::Set(test_xmp.clone()),
-            jumbf: JumbfUpdate::Remove,
-            ..Default::default()
-        },
+        Updates::new()
+            .set_xmp(test_xmp.clone())
+            .remove_jumbf(),
     )?;
 
     // Test 8: Add XMP to file without XMP
@@ -79,10 +65,7 @@ fn main() -> asset_io::Result<()> {
     test_modification(
         "/Users/gpeacock/Desktop/CC-MCP demo/IMG_0550.jpg",
         "/tmp/test_add_xmp.jpg",
-        Updates {
-            xmp: XmpUpdate::Set(test_xmp.clone()),
-            ..Default::default()
-        },
+        Updates::new().set_xmp(test_xmp.clone()),
     )?;
 
     // Test 9: Add XMP to file without XMP (alternate path)
@@ -107,10 +90,7 @@ fn main() -> asset_io::Result<()> {
         test_modification(
             "/Users/gpeacock/Desktop/CC-MCP demo/IMG_0550.jpg",
             "/tmp/test_transfer_jumbf.jpg",
-            Updates {
-                jumbf: JumbfUpdate::Set(jumbf_data),
-                ..Default::default()
-            },
+            Updates::new().set_jumbf(jumbf_data),
         )?;
     }
 

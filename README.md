@@ -25,7 +25,7 @@ asset-io = "0.1"
 The simplest way to use this library - automatically detects media types:
 
 ```rust
-use asset_io::{Asset, Updates, XmpUpdate, JumbfUpdate};
+use asset_io::{Asset, Updates};
 
 fn main() -> asset_io::Result<()> {
     // Open any supported file - media type is auto-detected
@@ -41,11 +41,9 @@ fn main() -> asset_io::Result<()> {
     }
     
     // Modify and write - supports ANY combination of add/remove/replace
-    let updates = Updates {
-        xmp: XmpUpdate::Set(b"<new>metadata</new>".to_vec()),
-        jumbf: JumbfUpdate::Remove,
-        ..Default::default()
-    };
+    let updates = Updates::new()
+        .set_xmp(b"<new>metadata</new>".to_vec())
+        .remove_jumbf();
     asset.write_to("output.jpg", &updates)?;
     
     Ok(())

@@ -3,7 +3,7 @@
 //! This example shows how to work with media files without knowing
 //! their format upfront. The library automatically detects the format.
 
-use asset_io::{Asset, JumbfUpdate, Updates, XmpUpdate};
+use asset_io::{Asset, Updates};
 use std::env;
 
 fn main() -> asset_io::Result<()> {
@@ -62,11 +62,9 @@ fn main() -> asset_io::Result<()> {
              </rdf:RDF>"
         );
 
-        let updates = Updates {
-            xmp: XmpUpdate::Set(new_xmp.into_bytes()),
-            jumbf: JumbfUpdate::Keep,
-            ..Default::default()
-        };
+        let updates = Updates::new()
+            .set_xmp(new_xmp.into_bytes())
+            .keep_jumbf();
 
         asset.write_to(output_path, &updates)?;
         println!("✓ File written successfully!");

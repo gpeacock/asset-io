@@ -740,11 +740,11 @@ impl ContainerIO for JpegIO {
                     segments, metadata, ..
                 } => {
                     match &updates.xmp {
-                        crate::XmpUpdate::Remove => {
+                        crate::MetadataUpdate::Remove => {
                             // Skip existing XMP - effectively removing it
                             xmp_written = true;
                         }
-                        crate::XmpUpdate::Set(new_xmp) => {
+                        crate::MetadataUpdate::Set(new_xmp) => {
                             // Replace with new XMP
                             if !xmp_written {
                                 write_xmp_segment(writer, new_xmp)?;
@@ -752,7 +752,7 @@ impl ContainerIO for JpegIO {
                             }
                             // Skip existing XMP
                         }
-                        crate::XmpUpdate::Keep => {
+                        crate::MetadataUpdate::Keep => {
                             // Check if this is JPEG Extended XMP
                             if let Some(meta) = metadata {
                                 if let Some((guid, chunk_offsets, total_size)) =
@@ -856,11 +856,11 @@ impl ContainerIO for JpegIO {
 
                 Segment::Jumbf { segments, .. } => {
                     match &updates.jumbf {
-                        crate::JumbfUpdate::Remove => {
+                        crate::MetadataUpdate::Remove => {
                             // Skip existing JUMBF - effectively removing it
                             jumbf_written = true;
                         }
-                        crate::JumbfUpdate::Set(new_jumbf) => {
+                        crate::MetadataUpdate::Set(new_jumbf) => {
                             // Replace with new JUMBF
                             if !jumbf_written {
                                 write_jumbf_segments(writer, new_jumbf)?;
@@ -868,7 +868,7 @@ impl ContainerIO for JpegIO {
                             }
                             // Skip existing JUMBF
                         }
-                        crate::JumbfUpdate::Keep => {
+                        crate::MetadataUpdate::Keep => {
                             // Copy existing JUMBF segments
                             for loc in segments.iter() {
                                 writer.write_u8(0xFF)?;
@@ -894,7 +894,7 @@ impl ContainerIO for JpegIO {
 
                 Segment::Other { label, .. } if *label == "APP1" && !xmp_written => {
                     // First APP1 segment - good place to insert XMP if we're adding it
-                    if let crate::XmpUpdate::Set(new_xmp) = &updates.xmp {
+                    if let crate::MetadataUpdate::Set(new_xmp) = &updates.xmp {
                         if !has_xmp {
                             // Insert new XMP before this segment
                             write_xmp_segment(writer, new_xmp)?;
@@ -908,7 +908,7 @@ impl ContainerIO for JpegIO {
 
                 Segment::Other { label, .. } if *label == "APP11" && !jumbf_written => {
                     // First APP11 segment - good place to insert JUMBF if we're adding it
-                    if let crate::JumbfUpdate::Set(new_jumbf) = &updates.jumbf {
+                    if let crate::MetadataUpdate::Set(new_jumbf) = &updates.jumbf {
                         if !has_jumbf {
                             // Insert new JUMBF before this segment
                             write_jumbf_segments(writer, new_jumbf)?;
@@ -923,7 +923,7 @@ impl ContainerIO for JpegIO {
                 Segment::ImageData { .. } => {
                     // Before writing image data, insert any pending new metadata
                     if !xmp_written {
-                        if let crate::XmpUpdate::Set(new_xmp) = &updates.xmp {
+                        if let crate::MetadataUpdate::Set(new_xmp) = &updates.xmp {
                             if !has_xmp {
                                 write_xmp_segment(writer, new_xmp)?;
                                 xmp_written = true;
@@ -932,7 +932,7 @@ impl ContainerIO for JpegIO {
                     }
 
                     if !jumbf_written {
-                        if let crate::JumbfUpdate::Set(new_jumbf) = &updates.jumbf {
+                        if let crate::MetadataUpdate::Set(new_jumbf) = &updates.jumbf {
                             if !has_jumbf {
                                 write_jumbf_segments(writer, new_jumbf)?;
                                 jumbf_written = true;

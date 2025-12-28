@@ -1,5 +1,5 @@
 use asset_io::test_utils::{fixture_path, FIREFLY_TRAIN};
-use asset_io::{Asset, Updates, XmpUpdate};
+use asset_io::{Asset, Updates};
 
 fn main() -> asset_io::Result<()> {
     println!("=== Testing XMP Extended Support ===\n");
@@ -18,10 +18,7 @@ fn main() -> asset_io::Result<()> {
     let mut asset = Asset::open(input_str)?;
     asset.write_to(
         output,
-        &Updates {
-            xmp: XmpUpdate::Set(large_xmp.clone()),
-            ..Default::default()
-        },
+        &Updates::new().set_xmp(large_xmp.clone()),
     )?;
     println!("  ✓ Written to: {}", output);
 
@@ -60,10 +57,7 @@ fn main() -> asset_io::Result<()> {
     let mut asset = Asset::open(input_str)?;
     asset.write_to(
         "/tmp/test_xmp_medium.jpg",
-        &Updates {
-            xmp: XmpUpdate::Set(medium_xmp.clone()),
-            ..Default::default()
-        },
+        &Updates::new().set_xmp(medium_xmp.clone()),
     )?;
 
     let mut verify = Asset::open("/tmp/test_xmp_medium.jpg")?;
@@ -80,10 +74,7 @@ fn main() -> asset_io::Result<()> {
     let mut asset = Asset::open(input_str)?;
     asset.write_to(
         "/tmp/test_xmp_over.jpg",
-        &Updates {
-            xmp: XmpUpdate::Set(over_xmp.clone()),
-            ..Default::default()
-        },
+        &Updates::new().set_xmp(over_xmp.clone()),
     )?;
 
     let mut verify = Asset::open("/tmp/test_xmp_over.jpg")?;
