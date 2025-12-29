@@ -3,17 +3,34 @@
 use crate::error::Result;
 use std::io::Read;
 
-/// Location of data in a file
+/// A byte range in a file (offset and size)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Location {
+pub struct ByteRange {
     /// Offset from start of file
     pub offset: u64,
     /// Size in bytes
     pub size: u64,
 }
 
-/// A byte range in a file (alias for Location for clarity in hashing contexts)
-pub type ByteRange = Location;
+impl ByteRange {
+    /// Create a new byte range
+    pub fn new(offset: u64, size: u64) -> Self {
+        Self { offset, size }
+    }
+
+    /// Get the end offset of this range
+    pub fn end_offset(&self) -> u64 {
+        self.offset + self.size
+    }
+
+    /// Check if this range is immediately followed by another (contiguous)
+    pub fn is_contiguous_with(&self, other: &ByteRange) -> bool {
+        self.end_offset() == other.offset
+    }
+}
+
+/// Alias for ByteRange for backward compatibility
+pub type Location = ByteRange;
 
 /// Chunk size for streaming large segments (64KB)
 pub const DEFAULT_CHUNK_SIZE: usize = 65536;
@@ -46,6 +63,10 @@ pub enum SegmentMetadata {
         /// Total size of the complete extended XMP when reassembled
         total_size: u32,
     },
+
+    /// Embedded thumbnail (from EXIF or other metadata)
+    #[cfg(feature = "exif")]
+    Thumbnail(crate::thumbnail::EmbeddedThumbnail),
 }
 
 impl SegmentMetadata {
@@ -57,6 +78,17 @@ impl SegmentMetadata {
                 chunk_offsets,
                 total_size,
             } => Some((guid.as_str(), chunk_offsets.as_slice(), *total_size)),
+            #[cfg(feature = "exif")]
+            _ => None,
+        }
+    }
+
+    /// Get embedded thumbnail if this is that variant
+    #[cfg(feature = "exif")]
+    pub fn as_thumbnail(&self) -> Option<&crate::thumbnail::EmbeddedThumbnail> {
+        match self {
+            Self::Thumbnail(thumb) => Some(thumb),
+            _ => None,
         }
     }
 }
@@ -88,7 +120,7 @@ impl LazyData {
     }
 
     /// Load data from source at given location
-    pub fn load<R: Read>(&mut self, source: &mut R, location: Location) -> Result<&[u8]> {
+    pub fn load<R: Read>(&mut self, source: &mut R, location: ByteRange) -> Result<&[u8]> {
         match self {
             Self::NotLoaded => {
                 // Validate segment size to prevent DOS attacks
@@ -153,92 +185,201 @@ impl LazyData {
 }
 
 /// A segment of a file
+///
+/// This represents a logical piece of the file (XMP, JUMBF, image data, etc.)
+/// which may span one or more byte ranges in the file.
+///
+/// # Examples
+///
+/// ```
+/// use asset_io::segment::{Segment, ByteRange, LazyData};
+///
+/// // Single range segment (most common)
+/// let header = Segment::new(0, 100, "header");
+///
+/// // Multi-range segment (e.g., JPEG Extended XMP)
+/// let xmp = Segment::with_ranges(
+///     vec![
+///         ByteRange::new(1000, 500),
+///         ByteRange::new(2000, 500),
+///         ByteRange::new(3000, 500),
+///     ],
+///     "xmp"
+/// );
+/// ```
 #[derive(Debug)]
-pub enum Segment {
-    /// File header/metadata
-    Header { offset: u64, size: u64 },
-
-    /// XMP metadata
-    Xmp {
-        offset: u64,
-        size: u64,
-        /// Multiple segments (e.g., JPEG Extended XMP spans multiple APP1)
-        segments: Vec<Location>,
-        /// Lazy-loaded data
-        data: LazyData,
-        /// Optional format-specific metadata for multi-segment reassembly
-        metadata: Option<SegmentMetadata>,
-    },
-
-    /// JUMBF/C2PA data
-    Jumbf {
-        offset: u64,
-        size: u64,
-        /// Multiple segments (e.g., JPEG where JUMBF spans multiple APP11)
-        segments: Vec<Location>,
-        /// Lazy-loaded data
-        data: LazyData,
-    },
-
-    /// Image data (can be hashed without loading)
-    ImageData { offset: u64, size: u64 },
-
-    /// EXIF metadata
+pub struct Segment {
+    /// One or more byte ranges that make up this segment
     ///
-    /// Supported formats:
-    /// - JPEG: APP1 marker with "Exif\0\0" header (offset points after header)
-    /// - PNG: eXIf chunk with raw TIFF data (offset points to TIFF data)
-    /// - TIFF: Native format (EXIF is the file itself)
-    /// - HEIF/WebP: Can contain EXIF metadata
-    ///
-    /// Note: The segment itself is always available. The `thumbnail` field is only
-    /// populated when the `exif` feature is enabled and EXIF is parsed.
-    Exif {
-        offset: u64,
-        size: u64,
-        /// Embedded thumbnail location (if present in IFD1)
-        /// Only populated when `exif` feature is enabled
-        #[cfg(feature = "exif")]
-        thumbnail: Option<crate::thumbnail::EmbeddedThumbnail>,
-    },
+    /// Most segments have a single range, but some (like JPEG Extended XMP
+    /// or multi-part JUMBF) span multiple non-contiguous ranges.
+    pub ranges: Vec<ByteRange>,
 
-    /// Other format-specific segments
-    Other {
-        offset: u64,
-        size: u64,
-        /// Human-readable label for this segment type (e.g., "APP1", "IHDR", "COM")
-        /// Provided by format handlers
-        label: &'static str,
-    },
+    /// Human-readable label identifying the segment type
+    ///
+    /// Standard labels: "header", "xmp", "jumbf", "image_data", "exif"
+    /// Format-specific labels: "app1", "ihdr", "ftyp", "moov/trak[0]", etc.
+    ///
+    /// For hierarchical formats (BMFF, TIFF), use `/` for hierarchy and `[]` for indices.
+    pub label: String,
+
+    /// Lazy-loaded data for this segment
+    ///
+    /// Data is only loaded when accessed. For multi-range segments, this contains
+    /// the assembled/merged data.
+    pub data: LazyData,
+
+    /// Optional format-specific metadata
+    ///
+    /// Used for things like JPEG Extended XMP reassembly info, embedded thumbnails, etc.
+    pub metadata: Option<SegmentMetadata>,
 }
 
 impl Segment {
-    /// Get the location of this segment
-    pub fn location(&self) -> Location {
-        match self {
-            Self::Header { offset, size }
-            | Self::Xmp { offset, size, .. }
-            | Self::Jumbf { offset, size, .. }
-            | Self::ImageData { offset, size, .. }
-            | Self::Exif { offset, size, .. }
-            | Self::Other { offset, size, .. } => Location {
-                offset: *offset,
-                size: *size,
-            },
+    /// Create a new segment with a single range
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use asset_io::segment::Segment;
+    ///
+    /// let header = Segment::new(0, 100, "header");
+    /// let xmp = Segment::new(1000, 500, "xmp");
+    /// ```
+    pub fn new(offset: u64, size: u64, label: impl Into<String>) -> Self {
+        Self {
+            ranges: vec![ByteRange::new(offset, size)],
+            label: label.into(),
+            data: LazyData::NotLoaded,
+            metadata: None,
         }
     }
 
-    /// Get a human-readable path/identifier for this segment
-    /// Used for box-based hashing and segment identification
-    pub fn path(&self) -> &str {
-        match self {
-            Self::Header { .. } => "header",
-            Self::Xmp { .. } => "xmp",
-            Self::Jumbf { .. } => "jumbf",
-            Self::ImageData { .. } => "image_data",
-            Self::Exif { .. } => "exif",
-            Self::Other { label, .. } => label,
+    /// Create a new segment with multiple ranges
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use asset_io::segment::{Segment, ByteRange};
+    ///
+    /// let striped_image = Segment::with_ranges(
+    ///     vec![
+    ///         ByteRange::new(1000, 4096),
+    ///         ByteRange::new(5000, 4096),
+    ///         ByteRange::new(9000, 4096),
+    ///     ],
+    ///     "image_data"
+    /// );
+    /// ```
+    pub fn with_ranges(ranges: Vec<ByteRange>, label: impl Into<String>) -> Self {
+        Self {
+            ranges,
+            label: label.into(),
+            data: LazyData::NotLoaded,
+            metadata: None,
         }
+    }
+
+    /// Add data to this segment
+    pub fn with_data(mut self, data: LazyData) -> Self {
+        self.data = data;
+        self
+    }
+
+    /// Add metadata to this segment
+    pub fn with_metadata(mut self, metadata: SegmentMetadata) -> Self {
+        self.metadata = Some(metadata);
+        self
+    }
+
+    /// Get the primary location (first range) of this segment
+    ///
+    /// For single-range segments (most common), this is the full location.
+    /// For multi-range segments, this is the location of the first range.
+    pub fn primary_location(&self) -> ByteRange {
+        self.ranges[0]
+    }
+
+    /// Get the location of this segment (alias for primary_location for backward compatibility)
+    pub fn location(&self) -> ByteRange {
+        self.primary_location()
+    }
+
+    /// Get the total size across all ranges
+    pub fn total_size(&self) -> u64 {
+        self.ranges.iter().map(|r| r.size).sum()
+    }
+
+    /// Get the span (from start of first range to end of last range)
+    ///
+    /// Note: For non-contiguous multi-range segments, this includes gaps!
+    pub fn span(&self) -> ByteRange {
+        let first = self.ranges.first().expect("Segment must have at least one range");
+        let last = self.ranges.last().expect("Segment must have at least one range");
+        ByteRange {
+            offset: first.offset,
+            size: last.end_offset() - first.offset,
+        }
+    }
+
+    /// Check if all ranges are contiguous
+    pub fn is_contiguous(&self) -> bool {
+        if self.ranges.len() <= 1 {
+            return true;
+        }
+
+        self.ranges.windows(2).all(|w| w[0].is_contiguous_with(&w[1]))
+    }
+
+    /// Get the path/identifier for this segment
+    pub fn path(&self) -> &str {
+        &self.label
+    }
+
+    /// Check if this is a specific type of segment
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use asset_io::segment::Segment;
+    ///
+    /// let xmp = Segment::new(1000, 500, "xmp");
+    /// assert!(xmp.is_type("xmp"));
+    ///
+    /// let moov = Segment::new(2000, 1000, "moov/trak[0]/mdia");
+    /// assert!(moov.is_type("moov"));
+    /// assert!(moov.is_type("trak"));
+    /// ```
+    pub fn is_type(&self, segment_type: &str) -> bool {
+        self.label.contains(segment_type)
+    }
+
+    // Convenience methods for common segment types
+
+    /// Check if this is an XMP segment
+    pub fn is_xmp(&self) -> bool {
+        self.label == "xmp"
+    }
+
+    /// Check if this is a JUMBF segment
+    pub fn is_jumbf(&self) -> bool {
+        self.label == "jumbf"
+    }
+
+    /// Check if this is image data
+    pub fn is_image_data(&self) -> bool {
+        self.label == "image_data"
+    }
+
+    /// Check if this is EXIF metadata
+    pub fn is_exif(&self) -> bool {
+        self.label == "exif"
+    }
+
+    /// Get embedded thumbnail if this segment has one
+    #[cfg(feature = "exif")]
+    pub fn thumbnail(&self) -> Option<&crate::thumbnail::EmbeddedThumbnail> {
+        self.metadata.as_ref().and_then(|m| m.as_thumbnail())
     }
 }
 
