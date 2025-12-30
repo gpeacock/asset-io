@@ -1,9 +1,14 @@
 //! C2PA data hash example using asset-io
 //!
 //! This example demonstrates how to create a C2PA manifest using data hashing
-//! with the asset-io VirtualAsset workflow to minimize file I/O.
+//! with the asset-io intermediate parsing workflow to get accurate structure offsets.
+//!
+//! **IMPORTANT**: Currently only works reliably with JPEG files. PNG support has
+//! known issues with chunk boundary tracking during writes that need to be fixed.
 //!
 //! Based on the c2pa-rs data_hash.rs example, adapted for asset-io integration.
+//!
+//! Run: `cargo run --example c2pa --features xmp tests/fixtures/FireflyTrain.jpg`
 
 use asset_io::{Asset, Updates};
 use c2pa::{
