@@ -960,6 +960,243 @@ impl ContainerIO for JpegIO {
         Ok(())
     }
 
+    fn calculate_updated_structure(
+        &self,
+        source_structure: &Structure,
+        updates: &Updates,
+    ) -> Result<Structure> {
+        use crate::MetadataUpdate;
+
+        let mut dest_structure = Structure::new(Container::Jpeg, source_structure.media_type);
+        let mut current_offset = 2u64; // Start after SOI marker
+
+        let mut xmp_written = false;
+        let mut jumbf_written = false;
+
+        // Track if file has existing XMP/JUMBF
+        let has_xmp = source_structure.segments.iter().any(|s| s.is_xmp());
+        let has_jumbf = source_structure.segments.iter().any(|s| s.is_jumbf());
+
+        for segment in &source_structure.segments {
+            match segment {
+                segment if segment.is_type(SegmentKind::Header) => {
+                    // SOI already accounted for in current_offset
+                    continue;
+                }
+
+                segment if segment.is_xmp() => {
+                    match &updates.xmp {
+                        MetadataUpdate::Keep => {
+                            // Keep existing XMP - add segment at current offset
+                            let location = segment.location();
+                            dest_structure.add_segment(Segment::new(
+                                current_offset,
+                                location.size,
+                                SegmentKind::Xmp,
+                                segment.path.clone(),
+                            ));
+                            current_offset += location.size;
+                            xmp_written = true;
+                        }
+                        MetadataUpdate::Set(new_xmp) if !xmp_written => {
+                            // Write new XMP - calculate APP1 segment size
+                            let xmp_size = new_xmp.len() as u64;
+                            let segment_size = 2 + 2 + XMP_SIGNATURE.len() as u64 + xmp_size; // FF E1 + length + signature + data
+                            dest_structure.add_segment(Segment::new(
+                                current_offset + 4 + XMP_SIGNATURE.len() as u64,
+                                xmp_size,
+                                SegmentKind::Xmp,
+                                Some("APP1/XMP".to_string()),
+                            ));
+                            current_offset += segment_size;
+                            xmp_written = true;
+                        }
+                        MetadataUpdate::Remove | MetadataUpdate::Set(_) => {
+                            // Skip this segment
+                        }
+                    }
+                }
+
+                segment if segment.is_jumbf() => {
+                    match &updates.jumbf {
+                        MetadataUpdate::Keep => {
+                            // Keep existing JUMBF - calculate all APP11 segments
+                            let location = segment.location();
+                            let jumbf_data_size = location.size;
+                            
+                            // Calculate how many APP11 segments needed
+                            let mut remaining = jumbf_data_size;
+                            let mut ranges = Vec::new();
+                            
+                            const JPEG_XT_FIRST_OVERHEAD: usize = 8;
+                            const JPEG_XT_CONT_OVERHEAD: usize = 16;
+                            const MAX_DATA: usize = MAX_MARKER_SIZE - JPEG_XT_CONT_OVERHEAD;
+                            
+                            let mut seg_num = 0;
+                            while remaining > 0 {
+                                let data_in_segment = remaining.min(MAX_DATA as u64);
+                                let overhead = if seg_num == 0 {
+                                    JPEG_XT_FIRST_OVERHEAD
+                                } else {
+                                    JPEG_XT_CONT_OVERHEAD
+                                };
+                                let segment_size = 2 + 2 + overhead as u64 + data_in_segment; // FF EB + length + overhead + data
+                                
+                                ranges.push(ByteRange::new(
+                                    current_offset + 4 + overhead as u64,
+                                    data_in_segment,
+                                ));
+                                current_offset += segment_size;
+                                remaining -= data_in_segment;
+                                seg_num += 1;
+                            }
+                            
+                            dest_structure.add_segment_with_ranges(
+                                SegmentKind::Jumbf,
+                                ranges,
+                                segment.path.clone(),
+                            );
+                            jumbf_written = true;
+                        }
+                        MetadataUpdate::Set(new_jumbf) if !jumbf_written => {
+                            // Write new JUMBF - calculate all APP11 segments
+                            let jumbf_size = new_jumbf.len() as u64;
+                            let mut remaining = jumbf_size;
+                            let mut ranges = Vec::new();
+                            
+                            const JPEG_XT_FIRST_OVERHEAD: usize = 8;
+                            const JPEG_XT_CONT_OVERHEAD: usize = 16;
+                            const MAX_DATA: usize = MAX_MARKER_SIZE - JPEG_XT_CONT_OVERHEAD;
+                            
+                            let mut seg_num = 0;
+                            while remaining > 0 {
+                                let data_in_segment = remaining.min(MAX_DATA as u64);
+                                let overhead = if seg_num == 0 {
+                                    JPEG_XT_FIRST_OVERHEAD
+                                } else {
+                                    JPEG_XT_CONT_OVERHEAD
+                                };
+                                let segment_size = 2 + 2 + overhead as u64 + data_in_segment;
+                                
+                                ranges.push(ByteRange::new(
+                                    current_offset + 4 + overhead as u64,
+                                    data_in_segment,
+                                ));
+                                current_offset += segment_size;
+                                remaining -= data_in_segment;
+                                seg_num += 1;
+                            }
+                            
+                            dest_structure.add_segment_with_ranges(
+                                SegmentKind::Jumbf,
+                                ranges,
+                                Some("APP11/C2PA".to_string()),
+                            );
+                            jumbf_written = true;
+                        }
+                        MetadataUpdate::Remove | MetadataUpdate::Set(_) => {
+                            // Skip this segment
+                        }
+                    }
+                }
+
+                segment if segment.is_type(SegmentKind::ImageData) => {
+                    // SOS marker + image data
+                    let location = segment.location();
+                    let segment_size = location.size;
+                    dest_structure.add_segment(Segment::new(
+                        current_offset,
+                        segment_size,
+                        SegmentKind::ImageData,
+                        segment.path.clone(),
+                    ));
+                    current_offset += segment_size;
+                }
+
+                segment if segment.is_type(SegmentKind::Other) && segment.path.as_deref() == Some("EOI") => {
+                    // Check if we need to add XMP/JUMBF before EOI
+                    if !xmp_written && !has_xmp {
+                        if let MetadataUpdate::Set(new_xmp) = &updates.xmp {
+                            let xmp_size = new_xmp.len() as u64;
+                            let segment_size = 2 + 2 + XMP_SIGNATURE.len() as u64 + xmp_size;
+                            dest_structure.add_segment(Segment::new(
+                                current_offset + 4 + XMP_SIGNATURE.len() as u64,
+                                xmp_size,
+                                SegmentKind::Xmp,
+                                Some("APP1/XMP".to_string()),
+                            ));
+                            current_offset += segment_size;
+                            xmp_written = true;
+                        }
+                    }
+
+                    if !jumbf_written && !has_jumbf {
+                        if let MetadataUpdate::Set(new_jumbf) = &updates.jumbf {
+                            // Calculate APP11 segments for new JUMBF
+                            let jumbf_size = new_jumbf.len() as u64;
+                            let mut remaining = jumbf_size;
+                            let mut ranges = Vec::new();
+                            
+                            const JPEG_XT_FIRST_OVERHEAD: usize = 8;
+                            const JPEG_XT_CONT_OVERHEAD: usize = 16;
+                            const MAX_DATA: usize = MAX_MARKER_SIZE - JPEG_XT_CONT_OVERHEAD;
+                            
+                            let mut seg_num = 0;
+                            while remaining > 0 {
+                                let data_in_segment = remaining.min(MAX_DATA as u64);
+                                let overhead = if seg_num == 0 {
+                                    JPEG_XT_FIRST_OVERHEAD
+                                } else {
+                                    JPEG_XT_CONT_OVERHEAD
+                                };
+                                let segment_size = 2 + 2 + overhead as u64 + data_in_segment;
+                                
+                                ranges.push(ByteRange::new(
+                                    current_offset + 4 + overhead as u64,
+                                    data_in_segment,
+                                ));
+                                current_offset += segment_size;
+                                remaining -= data_in_segment;
+                                seg_num += 1;
+                            }
+                            
+                            dest_structure.add_segment_with_ranges(
+                                SegmentKind::Jumbf,
+                                ranges,
+                                Some("APP11/C2PA".to_string()),
+                            );
+                            jumbf_written = true;
+                        }
+                    }
+
+                    // EOI marker
+                    dest_structure.add_segment(Segment::new(
+                        current_offset,
+                        2,
+                        SegmentKind::Other,
+                        Some("EOI".to_string()),
+                    ));
+                    current_offset += 2;
+                }
+
+                _ => {
+                    // Copy other segments as-is
+                    let location = segment.location();
+                    dest_structure.add_segment(Segment::new(
+                        current_offset,
+                        location.size,
+                        segment.kind,
+                        segment.path.clone(),
+                    ));
+                    current_offset += location.size;
+                }
+            }
+        }
+
+        dest_structure.total_size = current_offset;
+        Ok(dest_structure)
+    }
+
     #[cfg(feature = "exif")]
     fn extract_embedded_thumbnail<R: Read + Seek>(
         &self,

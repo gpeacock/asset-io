@@ -58,6 +58,21 @@ pub trait ContainerIO: Send + Sync {
         updates: &Updates,
     ) -> Result<()>;
 
+    /// Calculate the structure that would result from applying updates
+    ///
+    /// This computes the destination file's structure (segment locations, offsets)
+    /// WITHOUT actually writing the file. This enables:
+    /// - Pre-calculating offsets for C2PA data hashing
+    /// - Validating updates before writing
+    /// - VirtualAsset workflow (hash before writing)
+    ///
+    /// The returned Structure should match what `write()` would produce.
+    fn calculate_updated_structure(
+        &self,
+        source_structure: &Structure,
+        updates: &Updates,
+    ) -> Result<Structure>;
+
     /// Extract XMP data from file (container-specific)
     ///
     /// This handles container-specific details like JPEG's extended XMP
@@ -166,6 +181,20 @@ macro_rules! register_containers {
                     $(
                         $(#[$meta])*
                         Handler::$variant(h) => h.write(structure, source, writer, updates),
+                    )*
+                }
+            }
+
+            #[allow(unreachable_patterns)]
+            pub(crate) fn calculate_updated_structure(
+                &self,
+                source_structure: &$crate::Structure,
+                updates: &$crate::Updates,
+            ) -> $crate::Result<$crate::Structure> {
+                match self {
+                    $(
+                        $(#[$meta])*
+                        Handler::$variant(h) => h.calculate_updated_structure(source_structure, updates),
                     )*
                 }
             }

@@ -392,11 +392,12 @@ impl<R: Read + Seek> Asset<R> {
     /// # }
     /// ```
     pub fn with_updates(self, updates: Updates) -> Result<VirtualAsset<R>> {
-        // TODO: Calculate destination structure from source + updates
-        // For now, virtual asset will use source structure (placeholder)
+        // Calculate the destination structure that would result from applying updates
+        let dest_structure = self.handler.calculate_updated_structure(&self.structure, &updates)?;
 
         Ok(VirtualAsset {
             source_asset: self,
+            dest_structure,
             updates,
         })
     }
@@ -461,14 +462,14 @@ impl Default for AssetBuilder {
 /// ```
 pub struct VirtualAsset<R: Read + Seek> {
     source_asset: Asset<R>,
+    dest_structure: Structure,
     updates: Updates,
 }
 
 impl<R: Read + Seek> VirtualAsset<R> {
-    /// Get the structure (currently returns source structure as placeholder)
-    /// TODO: Return calculated destination structure
+    /// Get the destination structure (what the file will look like after updates)
     pub fn structure(&self) -> &Structure {
-        &self.source_asset.structure
+        &self.dest_structure
     }
 
     /// Get immutable reference to the source asset

@@ -2,7 +2,7 @@
 
 use crate::{
     error::Result,
-    segment::{ByteRange, ChunkedSegmentReader, Location, Segment},
+    segment::{ByteRange, ChunkedSegmentReader, Location, Segment, SegmentKind},
     Container, MediaType,
 };
 use std::io::{Read, Seek, SeekFrom, Take};
@@ -85,6 +85,25 @@ impl Structure {
     /// Add a segment and update indices
     pub fn add_segment(&mut self, segment: Segment) {
         let index = self.segments.len();
+
+        if segment.is_xmp() {
+            self.xmp_index = Some(index);
+        } else if segment.is_jumbf() {
+            self.jumbf_indices.push(index);
+        }
+
+        self.segments.push(segment);
+    }
+
+    /// Add a segment with multiple byte ranges (for multi-part segments like JPEG JUMBF)
+    pub fn add_segment_with_ranges(
+        &mut self,
+        kind: SegmentKind,
+        ranges: Vec<ByteRange>,
+        path: Option<String>,
+    ) {
+        let index = self.segments.len();
+        let segment = Segment::with_ranges(ranges, kind, path);
 
         if segment.is_xmp() {
             self.xmp_index = Some(index);

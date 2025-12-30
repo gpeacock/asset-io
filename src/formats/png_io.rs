@@ -598,6 +598,175 @@ impl ContainerIO for PngIO {
         Ok(())
     }
 
+    fn calculate_updated_structure(
+        &self,
+        source_structure: &Structure,
+        updates: &Updates,
+    ) -> Result<Structure> {
+        use crate::MetadataUpdate;
+
+        let mut dest_structure = Structure::new(Container::Png, source_structure.media_type);
+        let mut current_offset = PNG_SIGNATURE.len() as u64;
+
+        let mut xmp_written = false;
+        let mut jumbf_written = false;
+
+        // Track if file has existing metadata
+        let has_xmp = source_structure.segments.iter().any(|s| s.is_xmp());
+        let has_jumbf = source_structure.segments.iter().any(|s| s.is_jumbf());
+
+        for segment in &source_structure.segments {
+            match segment {
+                segment if segment.is_type(SegmentKind::Header) => {
+                    // PNG signature already accounted for
+                    continue;
+                }
+
+                segment if segment.is_xmp() => {
+                    match &updates.xmp {
+                        MetadataUpdate::Keep => {
+                            // Keep existing XMP chunk
+                            let location = segment.location();
+                            let chunk_size = 8 + location.size + 4; // length + type + data + CRC
+                            dest_structure.add_segment(Segment::new(
+                                current_offset + 8, // Skip length + type
+                                location.size,
+                                SegmentKind::Xmp,
+                                segment.path.clone(),
+                            ));
+                            current_offset += chunk_size;
+                            xmp_written = true;
+                        }
+                        MetadataUpdate::Set(new_xmp) if !xmp_written => {
+                            // New XMP chunk
+                            let xmp_size = new_xmp.len() as u64;
+                            let chunk_size = 8 + xmp_size + 4;
+                            dest_structure.add_segment(Segment::new(
+                                current_offset + 8,
+                                xmp_size,
+                                SegmentKind::Xmp,
+                                Some("iTXt".to_string()),
+                            ));
+                            current_offset += chunk_size;
+                            xmp_written = true;
+                        }
+                        MetadataUpdate::Remove | MetadataUpdate::Set(_) => {
+                            // Skip this chunk
+                        }
+                    }
+                }
+
+                segment if segment.is_jumbf() => {
+                    match &updates.jumbf {
+                        MetadataUpdate::Keep => {
+                            // Keep existing JUMBF chunk
+                            let location = segment.location();
+                            let chunk_size = 8 + location.size + 4;
+                            dest_structure.add_segment(Segment::new(
+                                current_offset + 8,
+                                location.size,
+                                SegmentKind::Jumbf,
+                                segment.path.clone(),
+                            ));
+                            current_offset += chunk_size;
+                            jumbf_written = true;
+                        }
+                        MetadataUpdate::Set(new_jumbf) if !jumbf_written => {
+                            // New JUMBF chunk
+                            let jumbf_size = new_jumbf.len() as u64;
+                            let chunk_size = 8 + jumbf_size + 4;
+                            dest_structure.add_segment(Segment::new(
+                                current_offset + 8,
+                                jumbf_size,
+                                SegmentKind::Jumbf,
+                                Some("caBX".to_string()),
+                            ));
+                            current_offset += chunk_size;
+                            jumbf_written = true;
+                        }
+                        MetadataUpdate::Remove | MetadataUpdate::Set(_) => {
+                            // Skip this chunk
+                        }
+                    }
+                }
+
+                segment if segment.is_type(SegmentKind::ImageData) => {
+                    // IDAT chunk
+                    let location = segment.location();
+                    let chunk_size = 8 + location.size + 4;
+                    dest_structure.add_segment(Segment::new(
+                        current_offset + 8,
+                        location.size,
+                        SegmentKind::ImageData,
+                        segment.path.clone(),
+                    ));
+                    current_offset += chunk_size;
+                }
+
+                segment if segment.is_type(SegmentKind::Exif) => {
+                    // EXIF chunk - always copy
+                    let location = segment.location();
+                    let chunk_size = 8 + location.size + 4;
+                    dest_structure.add_segment(Segment::new(
+                        current_offset + 8,
+                        location.size,
+                        SegmentKind::Exif,
+                        segment.path.clone(),
+                    ));
+                    current_offset += chunk_size;
+                }
+
+                segment => {
+                    // Check if this is IEND - write new metadata before it
+                    if segment.path.as_deref() == Some("IEND") {
+                        if !xmp_written && !has_xmp {
+                            if let MetadataUpdate::Set(new_xmp) = &updates.xmp {
+                                let xmp_size = new_xmp.len() as u64;
+                                let chunk_size = 8 + xmp_size + 4;
+                                dest_structure.add_segment(Segment::new(
+                                    current_offset + 8,
+                                    xmp_size,
+                                    SegmentKind::Xmp,
+                                    Some("iTXt".to_string()),
+                                ));
+                                current_offset += chunk_size;
+                                xmp_written = true;
+                            }
+                        }
+
+                        if !jumbf_written && !has_jumbf {
+                            if let MetadataUpdate::Set(new_jumbf) = &updates.jumbf {
+                                let jumbf_size = new_jumbf.len() as u64;
+                                let chunk_size = 8 + jumbf_size + 4;
+                                dest_structure.add_segment(Segment::new(
+                                    current_offset + 8,
+                                    jumbf_size,
+                                    SegmentKind::Jumbf,
+                                    Some("caBX".to_string()),
+                                ));
+                                current_offset += chunk_size;
+                                jumbf_written = true;
+                            }
+                        }
+                    }
+
+                    // Copy other chunks as-is
+                    let location = segment.location();
+                    dest_structure.add_segment(Segment::new(
+                        current_offset,
+                        location.size,
+                        segment.kind,
+                        segment.path.clone(),
+                    ));
+                    current_offset += location.size;
+                }
+            }
+        }
+
+        dest_structure.total_size = current_offset;
+        Ok(dest_structure)
+    }
+
     #[cfg(feature = "exif")]
     fn extract_embedded_thumbnail<R: Read + Seek>(
         &self,

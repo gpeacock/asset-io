@@ -33,6 +33,7 @@ use c2pa::{
     Builder, ClaimGeneratorInfo, HashRange, Reader,
 };
 use std::fs::File;
+use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom, Write};
 
 /// Generate a DataHash for an asset by hashing it while excluding the C2PA manifest.
@@ -195,6 +196,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Calculate total exclusion size from actual structure
     let manifest_offset = manifest_segment.ranges[0].offset;
     let total_size: u64 = manifest_segment.ranges.iter().map(|r| r.size).sum();
+    
+    // Clone the ranges for later use
+    let manifest_ranges = manifest_segment.ranges.clone();
 
     println!(
         "  Total exclusion: {} bytes starting at offset {}",
@@ -211,7 +215,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // === Step 7: Sign and create final manifest ===
     println!("\n=== Step 7: Sign and Create Final Manifest ===");
-    let final_manifest = builder.sign_data_hashed_embeddable(&signer, &dh, "application/c2pa")?;
+    let mut final_manifest = builder.sign_data_hashed_embeddable(&signer, &dh, "application/c2pa")?;
 
     println!(
         "✓ Created final signed manifest ({} bytes)",
@@ -227,24 +231,54 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .into());
     }
+    
+    // Pad final manifest to match placeholder size (required for in-place overwrite)
+    if final_manifest.len() < placeholder_manifest.len() {
+        let padding_needed = placeholder_manifest.len() - final_manifest.len();
+        println!("  Padding manifest with {} zero bytes to match placeholder size", padding_needed);
+        final_manifest.resize(placeholder_manifest.len(), 0);
+    }
+    
     println!(
-        "  Space check: {} / {} bytes used",
-        final_manifest.len(),
-        placeholder_manifest.len()
+        "  Final size: {} bytes (matches placeholder)",
+        final_manifest.len()
     );
 
-    // === Step 8: Overwrite manifest in output ===
-    println!("\n=== Step 8: Overwrite Manifest in Output ===");
+    // === Step 8: Overwrite JUST the manifest bytes ===
+    println!("\n=== Step 8: Overwrite Manifest Bytes (In-Place) ===");
 
-    // For now, we rewrite the whole file with the final manifest
-    // TODO: Future optimization - seek and overwrite just the manifest bytes
-    let mut final_asset = Asset::open(source_path)?;
-    let final_updates = Updates::new().set_jumbf(final_manifest.clone());
-    final_asset.write_to(&output_path, &final_updates)?;
+    // Open file for read+write to overwrite just the manifest
+    let mut output_file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&output_path)?;
 
-    let output_size = std::fs::metadata(&output_path)?.len();
-    println!("✓ Rewrote output with final manifest");
-    println!("  Output file: {} ({} bytes)", output_path, output_size);
+    // For JPEG: the manifest segment ranges point to the JUMBF data within APP11 segments
+    // We need to write the final manifest data across these ranges
+    let mut bytes_written = 0usize;
+    for (i, range) in manifest_ranges.iter().enumerate() {
+        // Seek to this range's offset in the file
+        output_file.seek(SeekFrom::Start(range.offset))?;
+        
+        // Calculate how much data to write in this range
+        let remaining = final_manifest.len() - bytes_written;
+        let to_write = remaining.min(range.size as usize);
+        
+        // Write this chunk of the manifest
+        output_file.write_all(&final_manifest[bytes_written..bytes_written + to_write])?;
+        
+        println!("  Wrote range {}: {} bytes at offset {}", i, to_write, range.offset);
+        bytes_written += to_write;
+        
+        if bytes_written >= final_manifest.len() {
+            break;
+        }
+    }
+    
+    output_file.flush()?;
+
+    println!("✓ Overwrote {} bytes of manifest data (without rewriting entire file)", bytes_written);
+
 
     // === Step 9: Verify the output ===
     println!("\n=== Step 9: Verify Output ===");
