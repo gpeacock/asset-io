@@ -2,7 +2,7 @@
 
 use crate::{
     error::{Error, Result},
-    segment::{LazyData, Location, Segment},
+    segment::{ByteRange, Segment, SegmentKind},
     structure::Structure,
     Container, ContainerIO, Updates,
 };
@@ -14,7 +14,6 @@ const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
 
 // Metadata chunk types
 const ITXT: &[u8] = b"iTXt";
-const EXIF: &[u8] = b"eXIf";
 
 // JUMBF/C2PA chunk types (following c2pa-rs convention)
 const C2PA: &[u8] = b"caBX";
@@ -92,11 +91,13 @@ impl PngIO {
             return Ok(None);
         };
 
-        if let crate::Segment::Xmp { offset, size, .. } = &structure.segments()[index] {
+        let segment = &structure.segments()[index];
+        if segment.is_xmp() {
             // PNG stores XMP in a single iTXt chunk - no extended XMP like JPEG
-            source.seek(SeekFrom::Start(*offset))?;
+            let location = segment.location();
+            source.seek(SeekFrom::Start(location.offset))?;
 
-            let mut xmp_data = vec![0u8; *size as usize];
+            let mut xmp_data = vec![0u8; location.size as usize];
             source.read_exact(&mut xmp_data)?;
 
             return Ok(Some(xmp_data));
@@ -116,12 +117,16 @@ impl PngIO {
 
         let mut result = Vec::new();
 
+        // For now, extract all JUMBF segments and concatenate them
+        // TODO: Filter by C2PA-specific JUMBF if needed
         for &index in structure.jumbf_indices() {
-            if let crate::Segment::Jumbf { offset, size, .. } = &structure.segments()[index] {
+            let segment = &structure.segments()[index];
+            if segment.is_jumbf() {
                 // PNG stores JUMBF directly in caBX chunks - no format-specific headers to strip
-                source.seek(SeekFrom::Start(*offset))?;
+                let location = segment.location();
+                source.seek(SeekFrom::Start(location.offset))?;
 
-                let mut buf = vec![0u8; *size as usize];
+                let mut buf = vec![0u8; location.size as usize];
                 source.read_exact(&mut buf)?;
                 result.extend_from_slice(&buf);
             }
@@ -145,7 +150,7 @@ impl PngIO {
             return Err(Error::InvalidFormat("Not a PNG file".into()));
         }
 
-        structure.add_segment(Segment::Header { offset: 0, size: 8 });
+        structure.add_segment(Segment::new(0, 8, SegmentKind::Header, None));
 
         let mut offset = 8u64;
         let mut found_iend = false;
@@ -176,30 +181,34 @@ impl PngIO {
             match &chunk_type {
                 b"IHDR" => {
                     // Header chunk - must be first after signature
-                    structure.add_segment(Segment::Other {
-                        offset: chunk_start,
-                        size: 8 + chunk_len + 4, // length + type + data + CRC
-                        label: chunk_label(&chunk_type),
-                    });
+                    structure.add_segment(Segment::new(
+                        chunk_start,
+                        8 + chunk_len + 4, // length + type + data + CRC
+                        SegmentKind::Other,
+                        Some(chunk_label(&chunk_type).to_string()),
+                    ));
                     source.seek(SeekFrom::Current((chunk_len + 4) as i64))?; // Skip data + CRC
                 }
 
                 b"IDAT" => {
                     // Image data
-                    structure.add_segment(Segment::ImageData {
-                        offset: data_offset,
-                        size: chunk_len,
-                    });
+                    structure.add_segment(Segment::new(
+                        data_offset,
+                        chunk_len,
+                        SegmentKind::ImageData,
+                        Some("idat".to_string()),
+                    ));
                     source.seek(SeekFrom::Current((chunk_len + 4) as i64))?; // Skip data + CRC
                 }
 
                 b"IEND" => {
                     // End chunk
-                    structure.add_segment(Segment::Other {
-                        offset: chunk_start,
-                        size: 8 + chunk_len + 4,
-                        label: chunk_label(&chunk_type),
-                    });
+                    structure.add_segment(Segment::new(
+                        chunk_start,
+                        8 + chunk_len + 4,
+                        SegmentKind::Other,
+                        Some(chunk_label(&chunk_type).to_string()),
+                    ));
                     source.seek(SeekFrom::Current((chunk_len + 4) as i64))?;
                     found_iend = true;
                     structure.total_size = offset + 8 + chunk_len + 4;
@@ -248,27 +257,23 @@ impl PngIO {
                             keyword_len as u64 + 2 + lang_consumed + trans_consumed,
                         );
 
-                        structure.add_segment(Segment::Xmp {
-                            offset: xmp_offset,
-                            size: xmp_size,
-                            segments: vec![Location {
-                                offset: xmp_offset,
-                                size: xmp_size,
-                            }],
-                            data: LazyData::NotLoaded,
-                            metadata: None,
-                        });
+                        structure.add_segment(Segment::with_ranges(
+                            vec![ByteRange::new(xmp_offset, xmp_size)],
+                            SegmentKind::Xmp,
+                            Some("iTXt[xmp]".to_string()),
+                        ));
 
                         // Skip remaining XMP data + CRC
                         let remaining = xmp_size + 4; // XMP data + CRC
                         source.seek(SeekFrom::Current(remaining as i64))?;
                     } else {
                         // Regular iTXt chunk
-                        structure.add_segment(Segment::Other {
-                            offset: chunk_start,
-                            size: 8 + chunk_len + 4,
-                            label: chunk_label(&chunk_type),
-                        });
+                        structure.add_segment(Segment::new(
+                            chunk_start,
+                            8 + chunk_len + 4,
+                            SegmentKind::Other,
+                            Some(chunk_label(&chunk_type).to_string()),
+                        ));
                         // Skip remaining data + CRC
                         let remaining = chunk_len - keyword_len as u64 + 4;
                         source.seek(SeekFrom::Current(remaining as i64))?;
@@ -277,37 +282,34 @@ impl PngIO {
 
                 b"caBX" => {
                     // C2PA/JUMBF chunk
-                    structure.add_segment(Segment::Jumbf {
-                        offset: data_offset,
-                        size: chunk_len,
-                        segments: vec![crate::segment::Location {
-                            offset: data_offset,
-                            size: chunk_len,
-                        }],
-                        data: LazyData::NotLoaded,
-                    });
+                    structure.add_segment(Segment::with_ranges(
+                        vec![ByteRange::new(data_offset, chunk_len)],
+                        SegmentKind::Jumbf,
+                        Some("caBX".to_string()),
+                    ));
                     source.seek(SeekFrom::Current((chunk_len + 4) as i64))?; // Skip data + CRC
                 }
 
                 b"eXIf" => {
                     // EXIF chunk (PNG extension, added in PNG 1.5.0 specification)
                     // Contains raw EXIF data in TIFF format (without the "Exif\0\0" header used in JPEG)
-                    structure.add_segment(Segment::Exif {
-                        offset: data_offset,
-                        size: chunk_len,
-                        #[cfg(feature = "exif")]
-                        thumbnail: None, // TODO: Parse EXIF to extract thumbnail
-                    });
+                    structure.add_segment(Segment::new(
+                        data_offset,
+                        chunk_len,
+                        SegmentKind::Exif,
+                        Some("eXIf".to_string()),
+                    )); // TODO: Parse EXIF to extract thumbnail metadata
                     source.seek(SeekFrom::Current((chunk_len + 4) as i64))?; // Skip data + CRC
                 }
 
                 _ => {
                     // Other chunk types
-                    structure.add_segment(Segment::Other {
-                        offset: chunk_start,
-                        size: 8 + chunk_len + 4,
-                        label: chunk_label(&chunk_type),
-                    });
+                    structure.add_segment(Segment::new(
+                        chunk_start,
+                        8 + chunk_len + 4,
+                        SegmentKind::Other,
+                        Some(chunk_label(&chunk_type).to_string()),
+                    ));
                     source.seek(SeekFrom::Current((chunk_len + 4) as i64))?; // Skip data + CRC
                 }
             }
@@ -468,29 +470,30 @@ impl ContainerIO for PngIO {
         let _has_xmp = structure
             .segments
             .iter()
-            .any(|s| matches!(s, Segment::Xmp { .. }));
+            .any(|s| s.is_xmp());
         let _has_jumbf = structure
             .segments
             .iter()
-            .any(|s| matches!(s, Segment::Jumbf { .. }));
+            .any(|s| s.is_jumbf());
 
         for segment in &structure.segments {
             match segment {
-                Segment::Header { .. } => {
+                segment if segment.is_type(SegmentKind::Header) => {
                     // Already wrote signature, skip
                     continue;
                 }
 
-                Segment::Xmp { offset, size, .. } => {
+                segment if segment.is_xmp() => {
                     use crate::MetadataUpdate;
 
                     match &updates.xmp {
                         MetadataUpdate::Keep => {
                             // Copy existing XMP chunk
                             // We need to read the XMP data from the file
-                            source.seek(SeekFrom::Start(*offset))?;
+                            let location = segment.location();
+                            source.seek(SeekFrom::Start(location.offset))?;
 
-                            let mut xmp_data = vec![0u8; *size as usize];
+                            let mut xmp_data = vec![0u8; location.size as usize];
                             source.read_exact(&mut xmp_data)?;
 
                             Self::write_xmp_chunk(writer, &xmp_data)?;
@@ -507,15 +510,16 @@ impl ContainerIO for PngIO {
                     }
                 }
 
-                Segment::Jumbf { offset, size, .. } => {
+                segment if segment.is_jumbf() => {
                     use crate::MetadataUpdate;
 
                     match &updates.jumbf {
                         MetadataUpdate::Keep => {
                             // Copy existing JUMBF chunk
-                            source.seek(SeekFrom::Start(*offset))?;
+                            let location = segment.location();
+                            source.seek(SeekFrom::Start(location.offset))?;
 
-                            let mut jumbf_data = vec![0u8; *size as usize];
+                            let mut jumbf_data = vec![0u8; location.size as usize];
                             source.read_exact(&mut jumbf_data)?;
 
                             Self::write_chunk(writer, C2PA, &jumbf_data)?;
@@ -532,28 +536,24 @@ impl ContainerIO for PngIO {
                     }
                 }
 
-                Segment::ImageData { offset, size, .. } => {
+                segment if segment.is_type(SegmentKind::ImageData) => {
                     // Copy IDAT chunk with header and CRC
                     // We need to reconstruct the chunk structure
-                    let chunk_start = offset - 8; // Back to length field
+                    let location = segment.location();
+                    let chunk_start = location.offset - 8; // Back to length field
 
                     source.seek(SeekFrom::Start(chunk_start))?;
 
                     // Copy chunk: length(4) + type(4) + data(size) + crc(4)
-                    let chunk_size = 8 + size + 4;
+                    let chunk_size = 8 + location.size + 4;
                     let mut buffer = vec![0u8; chunk_size as usize];
                     source.read_exact(&mut buffer)?;
                     writer.write_all(&buffer)?;
                 }
 
-                Segment::Other {
-                    offset,
-                    size,
-                    label,
-                    ..
-                } => {
+                segment => {
                     // Check if this is IEND - we need to write new metadata before it
-                    if *label == "IEND" {
+                    if segment.path.as_deref() == Some("IEND") {
                         // This is IEND - write any pending metadata first
                         use crate::MetadataUpdate;
 
@@ -573,21 +573,12 @@ impl ContainerIO for PngIO {
                     }
 
                     // Copy other chunks as-is
-                    source.seek(SeekFrom::Start(*offset))?;
+                    let location = segment.location();
+                    source.seek(SeekFrom::Start(location.offset))?;
 
-                    let mut buffer = vec![0u8; *size as usize];
+                    let mut buffer = vec![0u8; location.size as usize];
                     source.read_exact(&mut buffer)?;
                     writer.write_all(&buffer)?;
-                }
-
-                Segment::Exif { offset, size, .. } => {
-                    // Write eXIf chunk with proper structure
-                    source.seek(SeekFrom::Start(*offset))?;
-                    let mut exif_data = vec![0u8; *size as usize];
-                    source.read_exact(&mut exif_data)?;
-
-                    // Write as eXIf chunk
-                    Self::write_chunk(writer, EXIF, &exif_data)?;
                 }
             }
         }
@@ -606,8 +597,10 @@ impl ContainerIO for PngIO {
     ) -> Result<Option<crate::EmbeddedThumbnail>> {
         // PNG doesn't typically have embedded thumbnails, but check EXIF anyway
         for segment in structure.segments() {
-            if let Segment::Exif { thumbnail, .. } = segment {
-                return Ok(thumbnail.clone());
+            if segment.is_type(SegmentKind::Exif) {
+                if let Some(thumb) = segment.thumbnail() {
+                    return Ok(Some(thumb.clone()));
+                }
             }
         }
         Ok(None)

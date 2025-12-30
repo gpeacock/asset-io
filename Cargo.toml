@@ -25,6 +25,7 @@ c2pa = "0.73"
 criterion = "0.5"
 tempfile = "3.8"
 sha2 = "0.10"  # For examples only
+hex = "0.4"  # For examples only
 
 [features]
 default = ["jpeg", "test-utils"]
@@ -50,34 +51,14 @@ test-utils = []
 [[example]]
 name = "c2pa"
 required-features = ["xmp"]
-# Example-specific features
-[[example]]
-name = "png_demo"
-required-features = ["png"]
 
 [[example]]
-name = "thumbnail_demo"
-
-[[example]]
-name = "mmap_demo"
-required-features = ["memory-mapped"]
-
-[[example]]
-name = "hash_demo"
-required-features = ["hashing"]
-
-[[example]]
-name = "sha256_demo"
-required-features = ["hashing"]
-
-# TEMPORARY: C2PA integration example (DELETE after testing)
-# To remove this example:
-#   1. Delete examples/c2pa_integration.rs
-#   2. Delete this [[example]] section
-#   3. Optionally delete c2pa from [dev-dependencies]
-[[example]]
-name = "c2pa_integration"
+name = "inspect"
 required-features = ["xmp"]
+
+[[example]]
+name = "test_mmap"
+required-features = ["memory-mapped"]
 
 [profile.release]
 opt-level = 3

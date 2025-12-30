@@ -2,7 +2,7 @@
 
 use crate::{
     error::{Error, Result},
-    segment::{LazyData, Location, Segment},
+    segment::{ByteRange, Segment, SegmentKind},
     structure::Structure,
     Container, ContainerIO, Updates,
 };
@@ -105,52 +105,51 @@ impl JpegIO {
             return Ok(None);
         };
 
-        if let crate::Segment::Xmp {
-            segments, metadata, ..
-        } = &structure.segments()[index]
-        {
-            // Check if this has extended XMP metadata
-            if let Some(meta) = metadata {
-                if let Some((guid, chunk_offsets, total_size)) = meta.as_jpeg_extended_xmp() {
-                    // JPEG Extended XMP - reassemble from parts
-                    return Self::reassemble_extended_xmp(
-                        source,
-                        segments,
-                        guid,
-                        chunk_offsets,
-                        total_size,
-                    );
-                }
-            }
+        let segment = &structure.segments()[index];
+        if !segment.is_xmp() {
+            return Ok(None);
+        }
 
-            // Simple case: single segment or concatenated segments
-            if segments.len() == 1 {
-                // Single XMP segment
-                source.seek(SeekFrom::Start(segments[0].offset))?;
-                let mut xmp_data = vec![0u8; segments[0].size as usize];
-                source.read_exact(&mut xmp_data)?;
-                return Ok(Some(xmp_data));
-            } else {
-                // Multiple segments - concatenate them
-                let total_size: u64 = segments.iter().map(|s| s.size).sum();
-                let mut xmp_data = Vec::with_capacity(total_size as usize);
-                for segment in segments {
-                    source.seek(SeekFrom::Start(segment.offset))?;
-                    let mut chunk = vec![0u8; segment.size as usize];
-                    source.read_exact(&mut chunk)?;
-                    xmp_data.extend_from_slice(&chunk);
-                }
-                return Ok(Some(xmp_data));
+        // Check if this has extended XMP metadata
+        if let Some(meta) = &segment.metadata {
+            if let Some((guid, chunk_offsets, total_size)) = meta.as_jpeg_extended_xmp() {
+                // JPEG Extended XMP - reassemble from parts
+                return Self::reassemble_extended_xmp(
+                    source,
+                    &segment.ranges,
+                    guid,
+                    chunk_offsets,
+                    total_size,
+                );
             }
         }
 
-        Ok(None)
+        // Simple case: single range or concatenated ranges
+        if segment.ranges.len() == 1 {
+            // Single XMP range
+            let range = segment.ranges[0];
+            source.seek(SeekFrom::Start(range.offset))?;
+            let mut xmp_data = vec![0u8; range.size as usize];
+            source.read_exact(&mut xmp_data)?;
+            return Ok(Some(xmp_data));
+        } else {
+            // Multiple ranges - concatenate them
+            let total_size: u64 = segment.ranges.iter().map(|r| r.size).sum();
+            let mut xmp_data = Vec::with_capacity(total_size as usize);
+            for range in &segment.ranges {
+                source.seek(SeekFrom::Start(range.offset))?;
+                let mut chunk = vec![0u8; range.size as usize];
+                source.read_exact(&mut chunk)?;
+                xmp_data.extend_from_slice(&chunk);
+            }
+            return Ok(Some(xmp_data));
+        }
     }
 
     /// Reassemble JPEG Extended XMP from multiple parts using chunk offsets
     fn reassemble_extended_xmp<R: Read + Seek>(
         source: &mut R,
-        segments: &[Location],
+        ranges: &[ByteRange],
         _guid: &str,
         chunk_offsets: &[u32],
         total_size: u32,
@@ -168,13 +167,13 @@ impl JpegIO {
             });
         }
 
-        // Skip first segment (it's the main XMP with pointer)
-        if segments.len() < 2 || chunk_offsets.len() != segments.len() - 1 {
-            // Malformed - should have main segment + extended segments
-            // Fall back to reading just the first segment
-            if !segments.is_empty() {
-                source.seek(SeekFrom::Start(segments[0].offset))?;
-                let mut xmp_data = vec![0u8; segments[0].size as usize];
+        // Skip first range (it's the main XMP with pointer)
+        if ranges.len() < 2 || chunk_offsets.len() != ranges.len() - 1 {
+            // Malformed - should have main range + extended ranges
+            // Fall back to reading just the first range
+            if !ranges.is_empty() {
+                source.seek(SeekFrom::Start(ranges[0].offset))?;
+                let mut xmp_data = vec![0u8; ranges[0].size as usize];
                 source.read_exact(&mut xmp_data)?;
                 return Ok(Some(xmp_data));
             }
@@ -185,10 +184,10 @@ impl JpegIO {
         let mut extended_xmp = vec![0u8; total_size as usize];
 
         // Read each extended chunk into the correct position
-        // Note: segments[0] is main XMP, segments[1..] are extended parts
-        for (segment, &chunk_offset) in segments[1..].iter().zip(chunk_offsets) {
-            source.seek(SeekFrom::Start(segment.offset))?;
-            let end_pos = (chunk_offset as usize + segment.size as usize).min(extended_xmp.len());
+        // Note: ranges[0] is main XMP, ranges[1..] are extended parts
+        for (range, &chunk_offset) in ranges[1..].iter().zip(chunk_offsets) {
+            source.seek(SeekFrom::Start(range.offset))?;
+            let end_pos = (chunk_offset as usize + range.size as usize).min(extended_xmp.len());
             if chunk_offset as usize >= extended_xmp.len() {
                 continue; // Skip malformed chunks
             }
@@ -213,52 +212,53 @@ impl JpegIO {
         let mut result = Vec::new();
         const JPEG_XT_HEADER_SIZE: usize = 8;
 
+        // For now, extract all JUMBF segments and concatenate them
+        // TODO: Filter by C2PA-specific JUMBF if needed
         for &index in structure.jumbf_indices() {
-            if let crate::Segment::Jumbf {
-                offset,
-                size,
-                segments,
-                ..
-            } = &structure.segments()[index]
-            {
-                if segments.len() > 1 {
-                    // Multi-segment JUMBF: strip JPEG XT headers
-                    for (i, loc) in segments.iter().enumerate() {
-                        source.seek(SeekFrom::Start(loc.offset))?;
+            let segment = &structure.segments()[index];
+            if !segment.is_jumbf() {
+                continue;
+            }
 
-                        // First segment: skip JPEG XT header (8 bytes)
-                        // Continuation segments: skip JPEG XT header + repeated LBox/TBox (16 bytes total)
-                        let skip_bytes = if i == 0 {
-                            JPEG_XT_HEADER_SIZE
-                        } else {
-                            JPEG_XT_HEADER_SIZE + 8 // Skip JPEG XT header + repeated LBox/TBox
-                        };
+            if segment.ranges.len() > 1 {
+                // Multi-range JUMBF: strip JPEG XT headers
+                for (i, range) in segment.ranges.iter().enumerate() {
+                    source.seek(SeekFrom::Start(range.offset))?;
 
-                        let data_size = loc.size.saturating_sub(skip_bytes as u64);
-                        if data_size > 0 {
-                            let mut skip_buf = vec![0u8; skip_bytes];
-                            source.read_exact(&mut skip_buf)?; // Skip the header
+                    // First range: skip JPEG XT header (8 bytes)
+                    // Continuation ranges: skip JPEG XT header + repeated LBox/TBox (16 bytes total)
+                    let skip_bytes = if i == 0 {
+                        JPEG_XT_HEADER_SIZE
+                    } else {
+                        JPEG_XT_HEADER_SIZE + 8 // Skip JPEG XT header + repeated LBox/TBox
+                    };
 
-                            let mut buf = vec![0u8; data_size as usize];
-                            source.read_exact(&mut buf)?;
-                            result.extend_from_slice(&buf);
-                        }
-                    }
-                } else {
-                    // Single segment: skip JPEG XT header
-                    source.seek(SeekFrom::Start(*offset))?;
+                let data_size = range.size.saturating_sub(skip_bytes as u64);
+                if data_size > 0 {
+                    let mut skip_buf = vec![0u8; skip_bytes];
+                    source.read_exact(&mut skip_buf)?; // Skip the header
 
-                    let mut skip_buf = [0u8; JPEG_XT_HEADER_SIZE];
-                    source.read_exact(&mut skip_buf)?;
-
-                    let data_size = size.saturating_sub(JPEG_XT_HEADER_SIZE as u64);
-                    if data_size > 0 {
-                        let mut buf = vec![0u8; data_size as usize];
-                        source.read_exact(&mut buf)?;
-                        result.extend_from_slice(&buf);
-                    }
+                    let mut buf = vec![0u8; data_size as usize];
+                    source.read_exact(&mut buf)?;
+                    result.extend_from_slice(&buf);
                 }
             }
+        } else {
+            // Single range: skip JPEG XT header
+            let offset = segment.ranges[0].offset;
+            let size = segment.ranges[0].size;
+            source.seek(SeekFrom::Start(offset))?;
+
+            let mut skip_buf = [0u8; JPEG_XT_HEADER_SIZE];
+            source.read_exact(&mut skip_buf)?;
+
+            let data_size = size.saturating_sub(JPEG_XT_HEADER_SIZE as u64);
+            if data_size > 0 {
+                let mut buf = vec![0u8; data_size as usize];
+                source.read_exact(&mut buf)?;
+                result.extend_from_slice(&buf);
+            }
+        }
         }
 
         Ok(if result.is_empty() {
@@ -277,7 +277,7 @@ impl JpegIO {
             return Err(Error::InvalidFormat("Not a JPEG file".into()));
         }
 
-        structure.add_segment(Segment::Header { offset: 0, size: 2 });
+        structure.add_segment(Segment::new(0, 2, SegmentKind::Header, None));
 
         let mut offset = 2u64;
 
@@ -300,11 +300,12 @@ impl JpegIO {
 
             match marker {
                 EOI => {
-                    structure.add_segment(Segment::Other {
+                    structure.add_segment(Segment::new(
                         offset,
-                        size: 2,
-                        label: marker_label(EOI),
-                    });
+                        2,
+                        SegmentKind::Other,
+                        Some(marker_label(EOI).to_string()),
+                    ));
                     structure.total_size = offset + 2;
                     break;
                 }
@@ -322,17 +323,20 @@ impl JpegIO {
 
                     // ImageData includes SOS marker + header + compressed data
                     // This makes writing easier - just copy the whole thing
-                    structure.add_segment(Segment::ImageData {
-                        offset: sos_start,
-                        size: image_end - sos_start,
-                    });
+                    structure.add_segment(Segment::new(
+                        sos_start,
+                        image_end - sos_start,
+                        SegmentKind::ImageData,
+                        Some("sos".to_string()),
+                    ));
 
                     // Add EOI segment
-                    structure.add_segment(Segment::Other {
-                        offset: image_end,
-                        size: 2,
-                        label: marker_label(EOI),
-                    });
+                    structure.add_segment(Segment::new(
+                        image_end,
+                        2,
+                        SegmentKind::Other,
+                        Some(marker_label(EOI).to_string()),
+                    ));
 
                     structure.total_size = image_end + 2;
                     break;
@@ -355,16 +359,11 @@ impl JpegIO {
                         // Standard XMP segment
                         let xmp_offset = offset + 4 + XMP_SIGNATURE.len() as u64;
                         let xmp_size = data_size - XMP_SIGNATURE.len() as u64;
-                        structure.add_segment(Segment::Xmp {
-                            offset: xmp_offset,
-                            size: xmp_size,
-                            segments: vec![Location {
-                                offset: xmp_offset,
-                                size: xmp_size,
-                            }],
-                            data: LazyData::NotLoaded,
-                            metadata: None,
-                        });
+                        structure.add_segment(Segment::with_ranges(
+                            vec![ByteRange::new(xmp_offset, xmp_size)],
+                            SegmentKind::Xmp,
+                            Some("app1".to_string()),
+                        ));
                         let remaining = (data_size as usize) - sig_buf.len();
                         source.seek(SeekFrom::Current(remaining as i64))?;
                     } else if sig_buf.len() >= XMP_EXTENDED_SIGNATURE.len()
@@ -378,11 +377,12 @@ impl JpegIO {
                             // Malformed extended XMP - skip it
                             let remaining = (data_size as usize) - sig_buf.len();
                             source.seek(SeekFrom::Current(remaining as i64))?;
-                            structure.add_segment(Segment::Other {
-                                offset: segment_start,
-                                size: size + 2,
-                                label: marker_label(APP1),
-                            });
+                            structure.add_segment(Segment::new(
+                                segment_start,
+                                size + 2,
+                                SegmentKind::Other,
+                                Some(marker_label(APP1).to_string()),
+                            ));
                         } else {
                             // Read GUID (32 bytes as ASCII hex string)
                             let mut guid_bytes = [0u8; 32];
@@ -405,18 +405,13 @@ impl JpegIO {
                             let xmp_index = *structure.xmp_index_mut();
 
                             if let Some(idx) = xmp_index {
-                                if let Segment::Xmp {
-                                    segments, metadata, ..
-                                } = &mut structure.segments[idx]
-                                {
-                                    // Add location to segments
-                                    segments.push(Location {
-                                        offset: chunk_data_offset,
-                                        size: chunk_data_size,
-                                    });
+                                let segment = &mut structure.segments[idx];
+                                if segment.is_xmp() {
+                                    // Add range to existing segment
+                                    segment.ranges.push(ByteRange::new(chunk_data_offset, chunk_data_size));
 
                                     // Update or create metadata
-                                    match metadata {
+                                    match &mut segment.metadata {
                                         Some(crate::SegmentMetadata::JpegExtendedXmp {
                                             guid: existing_guid,
                                             chunk_offsets,
@@ -434,22 +429,27 @@ impl JpegIO {
                                         }
                                         None => {
                                             // First extended part - create metadata
-                                            *metadata =
+                                            segment.metadata =
                                                 Some(crate::SegmentMetadata::JpegExtendedXmp {
                                                     guid,
                                                     chunk_offsets: vec![chunk_offset],
                                                     total_size,
                                                 });
                                         }
+                                        #[cfg(feature = "exif")]
+                                        Some(crate::SegmentMetadata::Thumbnail(_)) => {
+                                            // XMP segment shouldn't have thumbnail metadata, but handle gracefully
+                                        }
                                     }
                                 }
                             } else {
                                 // Extended XMP without main XMP - malformed but handle gracefully
-                                structure.add_segment(Segment::Other {
-                                    offset: segment_start,
-                                    size: size + 2,
-                                    label: marker_label(APP1),
-                                });
+                                structure.add_segment(Segment::new(
+                                    segment_start,
+                                    size + 2,
+                                    SegmentKind::Other,
+                                    Some(marker_label(APP1).to_string()),
+                                ));
                             }
 
                             // Skip to next marker
@@ -498,20 +498,28 @@ impl JpegIO {
                                     Err(_) => None, // Ignore EXIF parsing errors
                                 };
 
-                                structure.add_segment(Segment::Exif {
-                                    offset: segment_start,
-                                    size: size + 2,
-                                    thumbnail,
-                                });
+                                let thumbnail_meta = thumbnail.map(crate::SegmentMetadata::Thumbnail);
+                                let mut segment = Segment::new(
+                                    segment_start,
+                                    size + 2,
+                                    SegmentKind::Exif,
+                                    Some("app1".to_string()),
+                                );
+                                if let Some(meta) = thumbnail_meta {
+                                    segment = segment.with_metadata(meta);
+                                }
+                                structure.add_segment(segment);
                             }
 
                             #[cfg(not(feature = "exif"))]
                             {
                                 // Just record the EXIF segment without parsing thumbnails
-                                structure.add_segment(Segment::Exif {
-                                    offset: segment_start,
-                                    size: size + 2,
-                                });
+                                structure.add_segment(Segment::new(
+                                    segment_start,
+                                    size + 2,
+                                    SegmentKind::Exif,
+                                    Some("app1".to_string()),
+                                ));
 
                                 // Skip remaining EXIF data
                                 let remaining = (data_size as usize) - sig_buf.len();
@@ -521,11 +529,12 @@ impl JpegIO {
                             // Other APP1 segment
                             let remaining = (data_size as usize) - sig_buf.len();
                             source.seek(SeekFrom::Current(remaining as i64))?;
-                            structure.add_segment(Segment::Other {
-                                offset: segment_start,
-                                size: size + 2,
-                                label: marker_label(APP1),
-                            });
+                            structure.add_segment(Segment::new(
+                                segment_start,
+                                size + 2,
+                                SegmentKind::Other,
+                                Some(marker_label(APP1).to_string()),
+                            ));
                         }
 
                         // If not XMP or EXIF, treat as Other APP1 segment
@@ -535,11 +544,12 @@ impl JpegIO {
                             // Other APP1 segment (probably EXIF)
                             let remaining = (data_size as usize) - sig_buf.len();
                             source.seek(SeekFrom::Current(remaining as i64))?;
-                            structure.add_segment(Segment::Other {
-                                offset: segment_start,
-                                size: size + 2,
-                                label: marker_label(APP1),
-                            });
+                            structure.add_segment(Segment::new(
+                                segment_start,
+                                size + 2,
+                                SegmentKind::Other,
+                                Some(marker_label(APP1).to_string()),
+                            ));
                         }
                     }
 
@@ -577,33 +587,22 @@ impl JpegIO {
                         // Check if this is a continuation of the previous JUMBF segment
                         let mut is_continuation = false;
                         if seq_num > 1 {
-                            if let Some(Segment::Jumbf {
-                                segments,
-                                size: total_size,
-                                ..
-                            }) = structure.segments.last_mut()
-                            {
-                                // Add this segment to the existing JUMBF
-                                segments.push(Location {
-                                    offset: data_start,
-                                    size: data_size,
-                                });
-                                *total_size += data_size;
-                                is_continuation = true;
+                            if let Some(last_segment) = structure.segments.last_mut() {
+                                if last_segment.is_jumbf() {
+                                    // Add this range to the existing JUMBF
+                                    last_segment.ranges.push(ByteRange::new(data_start, data_size));
+                                    is_continuation = true;
+                                }
                             }
                         }
 
                         if !is_continuation {
                             // New JUMBF segment
-                            structure.add_segment(Segment::Jumbf {
-                                offset: data_start,
-                                size: data_size,
-                                segments: vec![Location {
-                                    offset: data_start,
-                                    size: data_size,
-                                }],
-                                data: LazyData::NotLoaded,
-                            });
+                            structure.add_segment(Segment::with_ranges(
+                                vec![ByteRange::new(data_start, data_size)],
+                                SegmentKind::Jumbf,
+                                Some("app11".to_string()),
+                            ));
                         }
 
                         // Skip remaining JUMBF data
@@ -613,11 +612,12 @@ impl JpegIO {
                         // Other APP11 segment - skip remaining data
                         let remaining = data_size - bytes_to_read as u64;
                         source.seek(SeekFrom::Current(remaining as i64))?;
-                        structure.add_segment(Segment::Other {
-                            offset: segment_start,
-                            size: size + 2,
-                            label: marker_label(APP11),
-                        });
+                        structure.add_segment(Segment::new(
+                            segment_start,
+                            size + 2,
+                            SegmentKind::Other,
+                            Some(marker_label(APP11).to_string()),
+                        ));
                     }
 
                     offset += 2 + size;
@@ -625,22 +625,24 @@ impl JpegIO {
 
                 // RST markers have no length
                 RST0..=RST7 => {
-                    structure.add_segment(Segment::Other {
+                    structure.add_segment(Segment::new(
                         offset,
-                        size: 2,
-                        label: marker_label(marker),
-                    });
+                        2,
+                        SegmentKind::Other,
+                        Some(marker_label(marker).to_string()),
+                    ));
                     offset += 2;
                 }
 
                 _ => {
                     // Standard marker with length
                     let size = source.read_u16::<BigEndian>()? as u64;
-                    structure.add_segment(Segment::Other {
+                    structure.add_segment(Segment::new(
                         offset,
-                        size: size + 2,
-                        label: marker_label(marker),
-                    });
+                        size + 2,
+                        SegmentKind::Other,
+                        Some(marker_label(marker).to_string()),
+                    ));
                     offset += 2 + size;
                     source.seek(SeekFrom::Start(offset))?;
                 }
@@ -723,22 +725,20 @@ impl ContainerIO for JpegIO {
         let has_xmp = structure
             .segments
             .iter()
-            .any(|s| matches!(s, Segment::Xmp { .. }));
+            .any(|s| s.is_xmp());
         let has_jumbf = structure
             .segments
             .iter()
-            .any(|s| matches!(s, Segment::Jumbf { .. }));
+            .any(|s| s.is_jumbf());
 
         for segment in &structure.segments {
             match segment {
-                Segment::Header { .. } => {
+                segment if segment.is_type(SegmentKind::Header) => {
                     // Already wrote SOI
                     continue;
                 }
 
-                Segment::Xmp {
-                    segments, metadata, ..
-                } => {
+                segment if segment.is_xmp() => {
                     match &updates.xmp {
                         crate::MetadataUpdate::Remove => {
                             // Skip existing XMP - effectively removing it
@@ -754,32 +754,32 @@ impl ContainerIO for JpegIO {
                         }
                         crate::MetadataUpdate::Keep => {
                             // Check if this is JPEG Extended XMP
-                            if let Some(meta) = metadata {
+                            if let Some(meta) = &segment.metadata {
                                 if let Some((guid, chunk_offsets, total_size)) =
                                     meta.as_jpeg_extended_xmp()
                                 {
-                                    // Write main XMP segment (first in segments)
-                                    if !segments.is_empty() {
+                                    // Write main XMP segment (first in ranges)
+                                    if !segment.ranges.is_empty() {
                                         writer.write_u8(0xFF)?;
                                         writer.write_u8(APP1)?;
                                         writer.write_u16::<BigEndian>(
-                                            (segments[0].size + XMP_SIGNATURE.len() as u64 + 2)
+                                            (segment.ranges[0].size + XMP_SIGNATURE.len() as u64 + 2)
                                                 as u16,
                                         )?;
                                         writer.write_all(XMP_SIGNATURE)?;
 
-                                        if current_read_pos != segments[0].offset {
-                                            source.seek(SeekFrom::Start(segments[0].offset))?;
-                                            current_read_pos = segments[0].offset;
+                                        if current_read_pos != segment.ranges[0].offset {
+                                            source.seek(SeekFrom::Start(segment.ranges[0].offset))?;
+                                            current_read_pos = segment.ranges[0].offset;
                                         }
 
-                                        let mut limited = source.take(segments[0].size);
+                                        let mut limited = source.take(segment.ranges[0].size);
                                         copy(&mut limited, writer)?;
-                                        current_read_pos += segments[0].size;
+                                        current_read_pos += segment.ranges[0].size;
                                     }
 
-                                    // Write extended XMP segments (segments[1..])
-                                    for (i, segment) in segments[1..].iter().enumerate() {
+                                    // Write extended XMP segments (ranges[1..])
+                                    for (i, range) in segment.ranges[1..].iter().enumerate() {
                                         let chunk_offset =
                                             chunk_offsets.get(i).copied().unwrap_or(0);
 
@@ -792,7 +792,7 @@ impl ContainerIO for JpegIO {
                                             + 32
                                             + 4
                                             + 4
-                                            + segment.size as usize
+                                            + range.size as usize
                                             + 2;
                                         writer.write_u16::<BigEndian>(seg_size as u16)?;
 
@@ -815,14 +815,14 @@ impl ContainerIO for JpegIO {
                                         writer.write_u32::<BigEndian>(chunk_offset)?;
 
                                         // Copy the data
-                                        if current_read_pos != segment.offset {
-                                            source.seek(SeekFrom::Start(segment.offset))?;
-                                            current_read_pos = segment.offset;
+                                        if current_read_pos != range.offset {
+                                            source.seek(SeekFrom::Start(range.offset))?;
+                                            current_read_pos = range.offset;
                                         }
 
-                                        let mut limited = source.take(segment.size);
+                                        let mut limited = source.take(range.size);
                                         copy(&mut limited, writer)?;
-                                        current_read_pos += segment.size;
+                                        current_read_pos += range.size;
                                     }
 
                                     xmp_written = true;
@@ -830,23 +830,23 @@ impl ContainerIO for JpegIO {
                                 }
                             }
 
-                            // Simple XMP (single or concatenated segments, no extended metadata)
-                            for segment in segments {
+                            // Simple XMP (single or concatenated ranges, no extended metadata)
+                            for range in &segment.ranges {
                                 writer.write_u8(0xFF)?;
                                 writer.write_u8(APP1)?;
                                 writer.write_u16::<BigEndian>(
-                                    (segment.size + XMP_SIGNATURE.len() as u64 + 2) as u16,
+                                    (range.size + XMP_SIGNATURE.len() as u64 + 2) as u16,
                                 )?;
                                 writer.write_all(XMP_SIGNATURE)?;
 
-                                if current_read_pos != segment.offset {
-                                    source.seek(SeekFrom::Start(segment.offset))?;
-                                    current_read_pos = segment.offset;
+                                if current_read_pos != range.offset {
+                                    source.seek(SeekFrom::Start(range.offset))?;
+                                    current_read_pos = range.offset;
                                 }
 
-                                let mut limited = source.take(segment.size);
+                                let mut limited = source.take(range.size);
                                 copy(&mut limited, writer)?;
-                                current_read_pos += segment.size;
+                                current_read_pos += range.size;
                             }
 
                             xmp_written = true;
@@ -854,7 +854,7 @@ impl ContainerIO for JpegIO {
                     }
                 }
 
-                Segment::Jumbf { segments, .. } => {
+                segment if segment.is_jumbf() => {
                     match &updates.jumbf {
                         crate::MetadataUpdate::Remove => {
                             // Skip existing JUMBF - effectively removing it
@@ -869,30 +869,30 @@ impl ContainerIO for JpegIO {
                             // Skip existing JUMBF
                         }
                         crate::MetadataUpdate::Keep => {
-                            // Copy existing JUMBF segments
-                            for loc in segments.iter() {
+                            // Copy existing JUMBF ranges
+                            for range in &segment.ranges {
                                 writer.write_u8(0xFF)?;
                                 writer.write_u8(APP11)?;
 
-                                let seg_size = loc.size + 2;
+                                let seg_size = range.size + 2;
                                 writer.write_u16::<BigEndian>(seg_size as u16)?;
 
                                 // Optimized seek
-                                if current_read_pos != loc.offset {
-                                    source.seek(SeekFrom::Start(loc.offset))?;
-                                    current_read_pos = loc.offset;
+                                if current_read_pos != range.offset {
+                                    source.seek(SeekFrom::Start(range.offset))?;
+                                    current_read_pos = range.offset;
                                 }
 
-                                let mut limited = source.take(loc.size);
+                                let mut limited = source.take(range.size);
                                 copy(&mut limited, writer)?;
-                                current_read_pos += loc.size;
+                                current_read_pos += range.size;
                             }
                             jumbf_written = true;
                         }
                     }
                 }
 
-                Segment::Other { label, .. } if *label == "APP1" && !xmp_written => {
+                segment if segment.path.as_deref() == Some("APP1") && !xmp_written => {
                     // First APP1 segment - good place to insert XMP if we're adding it
                     if let crate::MetadataUpdate::Set(new_xmp) = &updates.xmp {
                         if !has_xmp {
@@ -906,7 +906,7 @@ impl ContainerIO for JpegIO {
                     copy_other_segment(segment, source, writer, &mut current_read_pos)?;
                 }
 
-                Segment::Other { label, .. } if *label == "APP11" && !jumbf_written => {
+                segment if segment.path.as_deref() == Some("APP11") && !jumbf_written => {
                     // First APP11 segment - good place to insert JUMBF if we're adding it
                     if let crate::MetadataUpdate::Set(new_jumbf) = &updates.jumbf {
                         if !has_jumbf {
@@ -920,7 +920,7 @@ impl ContainerIO for JpegIO {
                     copy_other_segment(segment, source, writer, &mut current_read_pos)?;
                 }
 
-                Segment::ImageData { .. } => {
+                segment if segment.is_type(SegmentKind::ImageData) => {
                     // Before writing image data, insert any pending new metadata
                     if !xmp_written {
                         if let crate::MetadataUpdate::Set(new_xmp) = &updates.xmp {
@@ -944,12 +944,12 @@ impl ContainerIO for JpegIO {
                     copy_other_segment(segment, source, writer, &mut current_read_pos)?;
                 }
 
-                Segment::Exif { .. } => {
+                segment if segment.is_type(SegmentKind::Exif) => {
                     // Copy EXIF segment as-is (thumbnails are embedded in it)
                     copy_other_segment(segment, source, writer, &mut current_read_pos)?;
                 }
 
-                Segment::Other { .. } => {
+                _ => {
                     copy_other_segment(segment, source, writer, &mut current_read_pos)?;
                 }
             }
@@ -966,8 +966,10 @@ impl ContainerIO for JpegIO {
     ) -> Result<Option<crate::EmbeddedThumbnail>> {
         // Check if any EXIF segment has an embedded thumbnail
         for segment in structure.segments() {
-            if let Segment::Exif { thumbnail, .. } = segment {
-                return Ok(thumbnail.clone());
+            if segment.is_type(SegmentKind::Exif) {
+                if let Some(thumb) = segment.thumbnail() {
+                    return Ok(Some(thumb.clone()));
+                }
             }
         }
         Ok(None)
@@ -1105,11 +1107,10 @@ fn copy_other_segment<R: Read + Seek, W: Write>(
     writer: &mut W,
     current_read_pos: &mut u64,
 ) -> Result<()> {
-    let (offset, size) = match segment {
-        Segment::ImageData { offset, size, .. } => (*offset, *size),
-        Segment::Other { offset, size, .. } => (*offset, *size),
-        _ => return Ok(()), // Shouldn't happen, but handle gracefully
-    };
+    // Get primary location for this segment
+    let location = segment.primary_location();
+    let offset = location.offset;
+    let size = location.size;
 
     // Optimized seek
     if *current_read_pos != offset {

@@ -19,6 +19,7 @@
   },
   "builder": {
     "generate_c2pa_archive": true,
+    "created_assertion_labels": ["c2pa.hash.data"],
     "claim_generator_info": {
       "name": "c2pa-rs testing",
       "version": "1.0.0",

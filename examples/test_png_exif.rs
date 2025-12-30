@@ -75,16 +75,17 @@ fn main() {
             .structure()
             .segments()
             .iter()
-            .find(|s| matches!(s, asset_io::Segment::Exif { .. }));
+            .find(|s| s.is_exif());
 
-        if let Some(asset_io::Segment::Exif { offset, size, .. }) = exif_segment {
+        if let Some(exif_segment) = exif_segment {
+            let location = exif_segment.location();
             println!("✓ EXIF segment detected!");
-            println!("  Offset: {}", offset);
-            println!("  Size: {} bytes", size);
+            println!("  Offset: {}", location.offset);
+            println!("  Size: {} bytes", location.size);
 
             // Verify the data is correct
-            let exif_start = *offset as usize;
-            let exif_end = exif_start + *size as usize;
+            let exif_start = location.offset as usize;
+            let exif_end = exif_start + location.size as usize;
             let exif_data = &png_data[exif_start..exif_end];
 
             if exif_data.starts_with(b"MM") {
@@ -117,7 +118,7 @@ fn main() {
             .structure()
             .segments()
             .iter()
-            .any(|s| matches!(s, asset_io::Segment::Exif { .. }));
+            .any(|s| s.is_exif());
 
         if has_exif_output {
             println!("✓ EXIF preserved after write!");

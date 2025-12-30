@@ -44,6 +44,49 @@ pub const DEFAULT_CHUNK_SIZE: usize = 65536;
 /// - Image data: Handled via streaming, not single allocation
 pub const MAX_SEGMENT_SIZE: u64 = 256 * 1024 * 1024;
 
+/// Logical classification of a segment (SDK-assigned)
+///
+/// This represents what the segment IS from the SDK's perspective,
+/// independent of how it's physically stored in any particular format.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SegmentKind {
+    /// File header/signature
+    Header,
+    /// XMP metadata
+    Xmp,
+    /// JUMBF/C2PA data
+    Jumbf,
+    /// Compressed image data
+    ImageData,
+    /// EXIF metadata
+    Exif,
+    /// Embedded thumbnail
+    Thumbnail,
+    /// Other/unknown segment type
+    Other,
+}
+
+impl SegmentKind {
+    /// Get a string representation of this kind
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Header => "header",
+            Self::Xmp => "xmp",
+            Self::Jumbf => "jumbf",
+            Self::ImageData => "image_data",
+            Self::Exif => "exif",
+            Self::Thumbnail => "thumbnail",
+            Self::Other => "other",
+        }
+    }
+}
+
+impl std::fmt::Display for SegmentKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
 /// Format-specific metadata for segments
 ///
 /// This allows storing format-specific information needed for proper
@@ -184,44 +227,60 @@ impl LazyData {
     }
 }
 
-/// A segment of a file
+/// A logical segment of a file
 ///
-/// This represents a logical piece of the file (XMP, JUMBF, image data, etc.)
-/// which may span one or more byte ranges in the file.
+/// This represents the SDK's interpretation/abstraction of file data,
+/// which may span multiple physical locations or structures in the file.
+///
+/// For example, JPEG Extended XMP appears as multiple APP1 markers in the
+/// physical file, but is exposed as a single logical XMP segment.
 ///
 /// # Examples
 ///
 /// ```
-/// use asset_io::segment::{Segment, ByteRange, LazyData};
+/// use asset_io::{Segment, SegmentKind, ByteRange};
 ///
 /// // Single range segment (most common)
-/// let header = Segment::new(0, 100, "header");
+/// let header = Segment::new(0, 100, SegmentKind::Header, None);
+///
+/// // Segment with format-specific path
+/// let xmp = Segment::new(1000, 500, SegmentKind::Xmp, Some("app1".to_string()));
 ///
 /// // Multi-range segment (e.g., JPEG Extended XMP)
-/// let xmp = Segment::with_ranges(
+/// let xmp_ext = Segment::with_ranges(
 ///     vec![
 ///         ByteRange::new(1000, 500),
 ///         ByteRange::new(2000, 500),
 ///         ByteRange::new(3000, 500),
 ///     ],
-///     "xmp"
+///     SegmentKind::Xmp,
+///     Some("app1/extended".to_string())
 /// );
 /// ```
 #[derive(Debug)]
 pub struct Segment {
-    /// One or more byte ranges that make up this segment
+    /// One or more byte ranges in the physical file
     ///
     /// Most segments have a single range, but some (like JPEG Extended XMP
     /// or multi-part JUMBF) span multiple non-contiguous ranges.
     pub ranges: Vec<ByteRange>,
 
-    /// Human-readable label identifying the segment type
+    /// Logical classification assigned by the SDK
     ///
-    /// Standard labels: "header", "xmp", "jumbf", "image_data", "exif"
-    /// Format-specific labels: "app1", "ihdr", "ftyp", "moov/trak[0]", etc.
+    /// This represents WHAT the segment is from a cross-format perspective.
+    pub kind: SegmentKind,
+
+    /// Physical path in the format's structure (optional)
     ///
-    /// For hierarchical formats (BMFF, TIFF), use `/` for hierarchy and `[]` for indices.
-    pub label: String,
+    /// This is a breadcrumb back to WHERE the segment is in the file's
+    /// physical structure. Format-specific and optional.
+    ///
+    /// Examples:
+    /// - JPEG: "app1", "app11", "sos"
+    /// - PNG: "ihdr", "iTXt[xmp]", "caBX"
+    /// - MP4/BMFF: "ftyp", "moov/trak[0]/mdia", "moov/uuid/c2pa"
+    /// - TIFF: "ifd0", "ifd1/strips[0]"
+    pub path: Option<String>,
 
     /// Lazy-loaded data for this segment
     ///
@@ -241,15 +300,21 @@ impl Segment {
     /// # Example
     ///
     /// ```
-    /// use asset_io::segment::Segment;
+    /// use asset_io::{Segment, SegmentKind};
     ///
-    /// let header = Segment::new(0, 100, "header");
-    /// let xmp = Segment::new(1000, 500, "xmp");
+    /// let header = Segment::new(0, 100, SegmentKind::Header, None);
+    /// let xmp = Segment::new(1000, 500, SegmentKind::Xmp, Some("app1".to_string()));
     /// ```
-    pub fn new(offset: u64, size: u64, label: impl Into<String>) -> Self {
+    pub fn new(
+        offset: u64,
+        size: u64,
+        kind: SegmentKind,
+        path: Option<String>,
+    ) -> Self {
         Self {
             ranges: vec![ByteRange::new(offset, size)],
-            label: label.into(),
+            kind,
+            path,
             data: LazyData::NotLoaded,
             metadata: None,
         }
@@ -260,7 +325,7 @@ impl Segment {
     /// # Example
     ///
     /// ```
-    /// use asset_io::segment::{Segment, ByteRange};
+    /// use asset_io::{Segment, SegmentKind, ByteRange};
     ///
     /// let striped_image = Segment::with_ranges(
     ///     vec![
@@ -268,13 +333,19 @@ impl Segment {
     ///         ByteRange::new(5000, 4096),
     ///         ByteRange::new(9000, 4096),
     ///     ],
-    ///     "image_data"
+    ///     SegmentKind::ImageData,
+    ///     Some("ifd0/strips".to_string())
     /// );
     /// ```
-    pub fn with_ranges(ranges: Vec<ByteRange>, label: impl Into<String>) -> Self {
+    pub fn with_ranges(
+        ranges: Vec<ByteRange>,
+        kind: SegmentKind,
+        path: Option<String>,
+    ) -> Self {
         Self {
             ranges,
-            label: label.into(),
+            kind,
+            path,
             data: LazyData::NotLoaded,
             metadata: None,
         }
@@ -331,49 +402,36 @@ impl Segment {
         self.ranges.windows(2).all(|w| w[0].is_contiguous_with(&w[1]))
     }
 
-    /// Get the path/identifier for this segment
-    pub fn path(&self) -> &str {
-        &self.label
-    }
+    // Convenience methods for checking segment kind
 
-    /// Check if this is a specific type of segment
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use asset_io::segment::Segment;
-    ///
-    /// let xmp = Segment::new(1000, 500, "xmp");
-    /// assert!(xmp.is_type("xmp"));
-    ///
-    /// let moov = Segment::new(2000, 1000, "moov/trak[0]/mdia");
-    /// assert!(moov.is_type("moov"));
-    /// assert!(moov.is_type("trak"));
-    /// ```
-    pub fn is_type(&self, segment_type: &str) -> bool {
-        self.label.contains(segment_type)
+    /// Check if this segment has a specific kind
+    pub fn is_type(&self, kind: SegmentKind) -> bool {
+        self.kind == kind
     }
-
-    // Convenience methods for common segment types
 
     /// Check if this is an XMP segment
     pub fn is_xmp(&self) -> bool {
-        self.label == "xmp"
+        self.kind == SegmentKind::Xmp
     }
 
     /// Check if this is a JUMBF segment
     pub fn is_jumbf(&self) -> bool {
-        self.label == "jumbf"
+        self.kind == SegmentKind::Jumbf
     }
 
     /// Check if this is image data
     pub fn is_image_data(&self) -> bool {
-        self.label == "image_data"
+        self.kind == SegmentKind::ImageData
     }
 
     /// Check if this is EXIF metadata
     pub fn is_exif(&self) -> bool {
-        self.label == "exif"
+        self.kind == SegmentKind::Exif
+    }
+
+    /// Check if this is a header
+    pub fn is_header(&self) -> bool {
+        self.kind == SegmentKind::Header
     }
 
     /// Get embedded thumbnail if this segment has one

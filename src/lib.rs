@@ -83,7 +83,7 @@ pub use error::{Error, Result};
 pub use formats::ContainerIO;
 pub use media_type::MediaType;
 pub use segment::{
-    ByteRange, ChunkedSegmentReader, LazyData, Location, Segment, SegmentMetadata,
+    ByteRange, ChunkedSegmentReader, LazyData, Location, Segment, SegmentKind, SegmentMetadata,
     DEFAULT_CHUNK_SIZE, MAX_SEGMENT_SIZE,
 };
 pub use structure::Structure;

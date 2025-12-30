@@ -328,6 +328,37 @@ impl<R: Read + Seek> Asset<R> {
             .read_segment_chunked(&mut self.source, segment_index, chunk_size)
     }
 
+    /// Hash the asset excluding specified segments (zero-copy with mmap)
+    ///
+    /// This is a convenience method for C2PA workflows where you need to hash
+    /// the entire file except the C2PA manifest itself.
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use asset_io::*;
+    /// # use std::fs::File;
+    /// # fn example() -> Result<()> {
+    /// # let file = File::open("test.jpg")?;
+    /// # let mut asset = Asset::from_source(file)?;
+    /// use sha2::{Sha256, Digest};
+    /// 
+    /// let mut hasher = Sha256::new();
+    /// let c2pa_idx = asset.structure().c2pa_jumbf_index();
+    /// asset.hash_excluding_segments(&[c2pa_idx], &mut hasher)?;
+    /// let hash = hasher.finalize();
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[cfg(feature = "hashing")]
+    pub fn hash_excluding_segments<H: std::io::Write>(
+        &mut self,
+        excluded_indices: &[Option<usize>],
+        hasher: &mut H,
+    ) -> Result<()> {
+        self.structure
+            .hash_excluding_segments(&mut self.source, excluded_indices, hasher)
+    }
+
     /// Write to a writer with updates
     pub fn write<W: Write>(&mut self, writer: &mut W, updates: &Updates) -> Result<()> {
         self.source.seek(SeekFrom::Start(0))?;

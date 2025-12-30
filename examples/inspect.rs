@@ -50,42 +50,37 @@ fn main() -> asset_io::Result<()> {
     println!("\nSegment breakdown:");
     for (i, segment) in asset.structure().segments.iter().enumerate() {
         let location = segment.location();
-        let seg_type = match segment {
-            asset_io::Segment::Header { .. } => "Header".to_string(),
-            asset_io::Segment::Xmp { segments, .. } => {
-                if segments.len() > 1 {
-                    format!("XMP ({} parts)", segments.len())
-                } else {
-                    "XMP".to_string()
-                }
+        let seg_type = if segment.is_header() {
+            "Header".to_string()
+        } else if segment.is_xmp() {
+            if segment.ranges.len() > 1 {
+                format!("XMP ({} parts)", segment.ranges.len())
+            } else {
+                "XMP".to_string()
             }
-            asset_io::Segment::Jumbf { segments, .. } => {
-                if segments.len() > 1 {
-                    format!("JUMBF ({} parts)", segments.len())
-                } else {
-                    "JUMBF".to_string()
-                }
+        } else if segment.is_jumbf() {
+            if segment.ranges.len() > 1 {
+                format!("JUMBF ({} parts)", segment.ranges.len())
+            } else {
+                "JUMBF".to_string()
             }
-            asset_io::Segment::ImageData { .. } => "ImageData".to_string(),
-            asset_io::Segment::Exif { .. } => {
-                #[cfg(feature = "exif")]
-                {
-                    if let asset_io::Segment::Exif { thumbnail, .. } = segment {
-                        if thumbnail.is_some() {
-                            "EXIF (with thumbnail)".to_string()
-                        } else {
-                            "EXIF".to_string()
-                        }
-                    } else {
-                        "EXIF".to_string()
-                    }
-                }
-                #[cfg(not(feature = "exif"))]
-                {
+        } else if segment.is_image_data() {
+            "ImageData".to_string()
+        } else if segment.is_exif() {
+            #[cfg(feature = "exif")]
+            {
+                if segment.thumbnail().is_some() {
+                    "EXIF (with thumbnail)".to_string()
+                } else {
                     "EXIF".to_string()
                 }
             }
-            asset_io::Segment::Other { label, .. } => label.to_string(),
+            #[cfg(not(feature = "exif"))]
+            {
+                "EXIF".to_string()
+            }
+        } else {
+            segment.path.as_deref().unwrap_or("Other").to_string()
         };
         println!(
             "  [{:3}] {:20} at offset {:8}, size {:8}",

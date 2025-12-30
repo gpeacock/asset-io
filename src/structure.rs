@@ -86,14 +86,10 @@ impl Structure {
     pub fn add_segment(&mut self, segment: Segment) {
         let index = self.segments.len();
 
-        match &segment {
-            Segment::Xmp { .. } => {
-                self.xmp_index = Some(index);
-            }
-            Segment::Jumbf { .. } => {
-                self.jumbf_indices.push(index);
-            }
-            _ => {}
+        if segment.is_xmp() {
+            self.xmp_index = Some(index);
+        } else if segment.is_jumbf() {
+            self.jumbf_indices.push(index);
         }
 
         self.segments.push(segment);
@@ -109,9 +105,16 @@ impl Structure {
         self.xmp_index
     }
 
-    /// Get reference to jumbf indices (for format-specific handlers)
+    /// Get reference to JUMBF indices (for format-specific handlers)
     pub fn jumbf_indices(&self) -> &[usize] {
         &self.jumbf_indices
+    }
+
+    /// Get the first C2PA JUMBF index (most common case for C2PA workflows)
+    pub fn c2pa_jumbf_index(&self) -> Option<usize> {
+        // For now, return the first JUMBF segment
+        // TODO: Check segment metadata to identify C2PA-specific JUMBF
+        self.jumbf_indices.first().copied()
     }
 
     /// Get reference to segments (for format-specific handlers)
@@ -198,7 +201,11 @@ impl Structure {
         for segment in &self.segments {
             let should_exclude = exclusions
                 .iter()
-                .any(|pattern| segment.path().contains(pattern));
+                .any(|pattern| {
+                    segment.path.as_deref()
+                        .map(|p| p.contains(pattern))
+                        .unwrap_or(false)
+                });
 
             if should_exclude {
                 let loc = segment.location();
@@ -231,7 +238,11 @@ impl Structure {
         self.segments
             .iter()
             .enumerate()
-            .filter(|(_, seg)| seg.path().contains(pattern))
+            .filter(|(_, seg)| {
+                seg.path.as_deref()
+                    .map(|p| p.contains(pattern))
+                    .unwrap_or(false)
+            })
             .collect()
     }
 
@@ -245,10 +256,151 @@ impl Structure {
             .filter(|(_, seg)| {
                 !exclusions
                     .iter()
-                    .any(|pattern| seg.path().contains(pattern))
+                    .any(|pattern| {
+                        seg.path.as_deref()
+                            .map(|p| p.contains(pattern))
+                            .unwrap_or(false)
+                    })
             })
             .map(|(i, seg)| (i, seg, seg.location()))
             .collect()
+    }
+
+    /// Calculate hash over all ranges except excluded segments (zero-copy with mmap)
+    ///
+    /// This is optimized for C2PA workflows where you need to hash the entire file
+    /// except the C2PA manifest itself. Correctly handles multi-range segments.
+    ///
+    /// # Zero-Copy Behavior
+    /// - With memory mapping: Direct hash from mapped memory (no allocation)
+    /// - Without memory mapping: Streams through source in chunks
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use asset_io::*;
+    /// # use std::fs::File;
+    /// # fn example() -> Result<()> {
+    /// # let mut file = File::open("test.jpg")?;
+    /// # let mut asset = Asset::from_source(file)?;
+    /// let structure = asset.structure();
+    /// 
+    /// // Hash everything except C2PA JUMBF
+    /// use sha2::{Sha256, Digest};
+    /// let mut hasher = Sha256::new();
+    /// structure.hash_excluding_segments(
+    ///     asset.source_mut(),
+    ///     &[structure.c2pa_jumbf_index()],
+    ///     &mut hasher
+    /// )?;
+    /// let hash = hasher.finalize();
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[cfg(feature = "hashing")]
+    pub fn hash_excluding_segments<R: Read + Seek, H: std::io::Write>(
+        &self,
+        source: &mut R,
+        excluded_indices: &[Option<usize>],
+        hasher: &mut H,
+    ) -> Result<()> {
+        use crate::segment::ByteRange;
+        
+        // Build exclusion ranges from all segments and ALL their ranges
+        let mut exclusion_ranges: Vec<ByteRange> = Vec::new();
+        for &idx_opt in excluded_indices {
+            if let Some(idx) = idx_opt {
+                if idx < self.segments.len() {
+                    let segment = &self.segments[idx];
+                    // IMPORTANT: Include ALL ranges, not just the first one
+                    // This is critical for multi-part JUMBF in JPEG
+                    exclusion_ranges.extend_from_slice(&segment.ranges);
+                }
+            }
+        }
+        
+        // Sort exclusions by offset and merge overlapping/contiguous ranges
+        exclusion_ranges.sort_by_key(|r| r.offset);
+        let mut merged_exclusions: Vec<ByteRange> = Vec::new();
+        for range in exclusion_ranges {
+            if let Some(last) = merged_exclusions.last_mut() {
+                if last.end_offset() >= range.offset {
+                    // Overlapping or contiguous - merge
+                    let new_end = last.end_offset().max(range.end_offset());
+                    last.size = new_end - last.offset;
+                    continue;
+                }
+            }
+            merged_exclusions.push(range);
+        }
+        
+        // Calculate hashable ranges (everything except exclusions)
+        let mut ranges = Vec::new();
+        let mut last_end = 0u64;
+        
+        for exclusion in &merged_exclusions {
+            if last_end < exclusion.offset {
+                ranges.push(ByteRange {
+                    offset: last_end,
+                    size: exclusion.offset - last_end,
+                });
+            }
+            last_end = exclusion.end_offset();
+        }
+        
+        // Add final range to end of file
+        if last_end < self.total_size {
+            ranges.push(ByteRange {
+                offset: last_end,
+                size: self.total_size - last_end,
+            });
+        }
+        
+        // Hash the ranges (zero-copy if mmap available)
+        #[cfg(feature = "memory-mapped")]
+        if self.mmap.is_some() {
+            // Zero-copy path: hash directly from memory map
+            for range in ranges {
+                if let Some(slice) = self.get_mmap_slice(range) {
+                    hasher.write_all(slice)?;
+                } else {
+                    // Fallback to streaming if mmap slice unavailable
+                    self.hash_range_from_source(source, range, hasher)?;
+                }
+            }
+            return Ok(());
+        }
+        
+        // Streaming path: read in chunks
+        for range in ranges {
+            self.hash_range_from_source(source, range, hasher)?;
+        }
+        
+        Ok(())
+    }
+    
+    /// Helper to hash a single range from source (streaming)
+    #[cfg(feature = "hashing")]
+    fn hash_range_from_source<R: Read + Seek, H: std::io::Write>(
+        &self,
+        source: &mut R,
+        range: ByteRange,
+        hasher: &mut H,
+    ) -> Result<()> {
+        use std::io::SeekFrom;
+        
+        source.seek(SeekFrom::Start(range.offset))?;
+        
+        let mut remaining = range.size;
+        let mut buffer = vec![0u8; 8192];
+        
+        while remaining > 0 {
+            let to_read = remaining.min(buffer.len() as u64) as usize;
+            source.read_exact(&mut buffer[..to_read])?;
+            hasher.write_all(&buffer[..to_read])?;
+            remaining -= to_read as u64;
+        }
+        
+        Ok(())
     }
 
     /// Create a chunked stream for a specific segment
@@ -291,12 +443,12 @@ impl Structure {
     /// }
     /// ```
     pub fn image_data_range(&self) -> Option<ByteRange> {
-        self.segments.iter().find_map(|seg| match seg {
-            Segment::ImageData { offset, size, .. } => Some(ByteRange {
-                offset: *offset,
-                size: *size,
-            }),
-            _ => None,
+        self.segments.iter().find_map(|seg| {
+            if seg.is_image_data() {
+                Some(seg.location())
+            } else {
+                None
+            }
         })
     }
 }

@@ -113,6 +113,7 @@ dependencies = [
  "c2pa",
  "criterion",
  "fs2",
+ "hex",
  "md5",
  "memmap2",
  "quick-xml",
