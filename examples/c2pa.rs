@@ -30,7 +30,50 @@ use c2pa::{
     Builder, ClaimGeneratorInfo, HashRange, Reader,
 };
 use std::fs::File;
-use std::io::{Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
+
+/// Generate a DataHash for an asset by hashing it while excluding the C2PA manifest.
+///
+/// This function:
+/// 1. Finds the C2PA JUMBF segment in the asset
+/// 2. Creates exclusion ranges for all the manifest's byte ranges
+/// 3. Hashes the asset excluding those ranges
+/// 4. Returns a DataHash ready to be used in C2PA signing
+///
+/// # Arguments
+/// * `asset` - The asset to hash (must have a C2PA JUMBF segment)
+/// * `algorithm` - Hash algorithm name (e.g., "sha256")
+///
+/// # Returns
+/// A DataHash containing the hash and exclusion information
+fn generate_data_hash_for_asset<R: Read + Seek>(
+    asset: &mut Asset<R>,
+    algorithm: &str,
+) -> Result<DataHash, Box<dyn std::error::Error>> {
+    // Find the C2PA JUMBF segment
+    let manifest_segment_idx = asset
+        .structure()
+        .c2pa_jumbf_index()
+        .ok_or("No C2PA JUMBF segment found in asset")?;
+    let manifest_segment = &asset.structure().segments[manifest_segment_idx];
+
+    // Calculate manifest location and total size across all ranges
+    let manifest_offset = manifest_segment.ranges[0].offset;
+    let total_size: u64 = manifest_segment.ranges.iter().map(|r| r.size).sum();
+
+    // Create DataHash with exclusion
+    let mut dh = DataHash::new("jumbf_manifest", algorithm);
+    let hr = HashRange::new(manifest_offset, total_size);
+    dh.add_exclusion(hr.clone());
+
+    // Hash the asset excluding the manifest
+    let source = asset.source_mut();
+    source.seek(SeekFrom::Start(0))?;
+    let hash = hash_stream_by_alg(algorithm, source, Some(vec![hr]), true)?;
+    dh.set_hash(hash);
+
+    Ok(dh)
+}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
@@ -162,18 +205,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // === Step 6: Hash the output (excluding manifest) ===
     println!("\n=== Step 6: Hash Output (excluding manifest) ===");
 
-    let mut dh = DataHash::new("jumbf_manifest", "sha256");
-    let hr = HashRange::new(manifest_offset, total_size);
-    dh.add_exclusion(hr.clone());
-
-    // Hash the output excluding the manifest
-    let output_source = output_asset.source_mut();
-    output_source.seek(SeekFrom::Start(0))?;
-    let hash = hash_stream_by_alg("sha256", output_source, Some(vec![hr]), true)?;
-    dh.set_hash(hash.clone());
+    let dh = generate_data_hash_for_asset(&mut output_asset, "sha256")?;
 
     println!("✓ Generated hash (excluding manifest)");
-    println!("  Hash: {}", hex::encode(&hash));
+    println!("  Hash: {}", hex::encode(&dh.hash));
 
     // === Step 7: Sign and create final manifest ===
     println!("\n=== Step 7: Sign and Create Final Manifest ===");
