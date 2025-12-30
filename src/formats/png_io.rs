@@ -545,6 +545,21 @@ impl ContainerIO for PngIO {
                     writer.write_all(&buffer)?;
                 }
 
+                segment if segment.is_type(SegmentKind::Exif) => {
+                    // Copy EXIF chunk with header and CRC
+                    // Like IDAT, the segment location points to data, not the chunk start
+                    let location = segment.location();
+                    let chunk_start = location.offset - 8; // Back to length field
+
+                    source.seek(SeekFrom::Start(chunk_start))?;
+
+                    // Copy chunk: length(4) + type(4) + data(size) + crc(4)
+                    let chunk_size = 8 + location.size + 4;
+                    let mut buffer = vec![0u8; chunk_size as usize];
+                    source.read_exact(&mut buffer)?;
+                    writer.write_all(&buffer)?;
+                }
+
                 segment => {
                     // Check if this is IEND - we need to write new metadata before it
                     if segment.path.as_deref() == Some("IEND") {
