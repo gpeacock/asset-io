@@ -9,14 +9,17 @@
 //! 2. Create C2PA builder with actions/assertions
 //! 3. Generate placeholder manifest (reserves space)
 //! 4. Write output with placeholder manifest
-//! 5. Parse output to get actual structure/offsets
-//! 6. Hash output (excluding manifest placeholder)
+//! 5. Open output with memory mapping (zero-copy)
+//! 6. Hash output from mmap (zero-copy, excluding manifest)
 //! 7. Sign final manifest with hash
 //! 8. Overwrite output with final signed manifest
 //! 9. Verify output with C2PA reader
 //!
-//! The key insight: write once with placeholder, parse to get real offsets,
-//! hash excluding manifest, then overwrite with final manifest.
+//! ## Zero-Copy Optimization
+//!
+//! The hashing step uses memory-mapped I/O via `Asset::open()`, which internally
+//! uses `memmap2` for efficient zero-copy reads. The `hash_stream_by_alg()`
+//! function reads directly from the mmap without creating intermediate buffers.
 //!
 //! Based on the c2pa-rs data_hash.rs example, adapted for asset-io integration.
 //!
@@ -158,11 +161,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Write directly to output with placeholder manifest
     let updates = Updates::new().set_jumbf(placeholder_manifest.clone());
-    {
-        let mut output = File::create(&output_path)?;
-        asset.write(&mut output, &updates)?;
-        output.flush()?;
-    } // Drop output file handle
+    asset.write_to(&output_path, &updates)?;
     
     let output_size = std::fs::metadata(&output_path)?.len();
     println!(
@@ -170,12 +169,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         output_size
     );
 
-    // === Step 5: Parse output to get actual structure ===
-    println!("\n=== Step 5: Parse Output Asset ===");
+    // === Step 5: Open output with memory mapping for zero-copy hashing ===
+    println!("\n=== Step 5: Open Output for Hashing ===");
 
-    // Now parse what we just wrote to get the actual structure
+    // Open with memory mapping for efficient zero-copy hashing
     let mut output_asset = Asset::open(&output_path)?;
-
+    println!("✓ Opened output asset (uses mmap for zero-copy reads)");
+    
     // Get the ACTUAL manifest location from the parsed structure
     let manifest_segment_idx = output_asset
         .structure()
@@ -183,7 +183,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok_or("No C2PA JUMBF segment found in output structure")?;
     let manifest_segment = &output_asset.structure().segments[manifest_segment_idx];
 
-    println!("✓ Parsed output asset");
     println!("  C2PA segment at index {}", manifest_segment_idx);
     println!("  Manifest has {} range(s):", manifest_segment.ranges.len());
     for (i, range) in manifest_segment.ranges.iter().enumerate() {
@@ -203,7 +202,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // === Step 6: Hash the output (excluding manifest) ===
-    println!("\n=== Step 6: Hash Output (excluding manifest) ===");
+    println!("\n=== Step 6: Hash Output (zero-copy from mmap) ===");
 
     let dh = generate_data_hash_for_asset(&mut output_asset, "sha256")?;
 
