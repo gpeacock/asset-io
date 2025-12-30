@@ -716,245 +716,160 @@ impl ContainerIO for JpegIO {
         writer: &mut W,
         updates: &Updates,
     ) -> Result<()> {
-        // NOTE: This logic must stay in sync with calculate_updated_structure()
-        // TODO: Refactor to share decision logic between write() and calculate_updated_structure()
+        // Calculate the destination structure first - this tells us exactly what to write
+        let dest_structure = self.calculate_updated_structure(structure, updates)?;
+        
         source.seek(SeekFrom::Start(0))?;
-        let mut current_read_pos = 0u64;
 
         // Write SOI
         writer.write_u8(0xFF)?;
         writer.write_u8(SOI)?;
 
-        let mut xmp_written = false;
-        let mut jumbf_written = false;
-
-        // Track if file has existing XMP/JUMBF
-        let has_xmp = structure.segments.iter().any(|s| s.is_xmp());
-        let has_jumbf = structure.segments.iter().any(|s| s.is_jumbf());
-
-        for segment in &structure.segments {
-            match segment {
-                segment if segment.is_type(SegmentKind::Header) => {
+        // Iterate through destination structure and write each segment
+        for dest_segment in &dest_structure.segments {
+            match dest_segment {
+                seg if seg.is_type(SegmentKind::Header) => {
                     // Already wrote SOI
                     continue;
                 }
 
-                segment if segment.is_xmp() => {
+                seg if seg.is_xmp() => {
+                    // Write XMP based on updates
                     match &updates.xmp {
-                        crate::MetadataUpdate::Remove => {
-                            // Skip existing XMP - effectively removing it
-                            xmp_written = true;
-                        }
                         crate::MetadataUpdate::Set(new_xmp) => {
-                            // Replace with new XMP
-                            if !xmp_written {
-                                write_xmp_segment(writer, new_xmp)?;
-                                xmp_written = true;
-                            }
-                            // Skip existing XMP
+                            write_xmp_segment(writer, new_xmp)?;
                         }
                         crate::MetadataUpdate::Keep => {
-                            // Check if this is JPEG Extended XMP
-                            if let Some(meta) = &segment.metadata {
-                                if let Some((guid, chunk_offsets, total_size)) =
-                                    meta.as_jpeg_extended_xmp()
-                                {
-                                    // Write main XMP segment (first in ranges)
-                                    if !segment.ranges.is_empty() {
-                                        writer.write_u8(0xFF)?;
-                                        writer.write_u8(APP1)?;
-                                        writer.write_u16::<BigEndian>(
-                                            (segment.ranges[0].size
-                                                + XMP_SIGNATURE.len() as u64
-                                                + 2)
-                                                as u16,
-                                        )?;
-                                        writer.write_all(XMP_SIGNATURE)?;
+                            // Find corresponding source segment and copy it
+                            if let Some(source_seg) = structure.segments.iter().find(|s| s.is_xmp()) {
+                                // Handle extended XMP if present
+                                if let Some(meta) = &source_seg.metadata {
+                                    if let Some((guid, chunk_offsets, _total_size)) =
+                                        meta.as_jpeg_extended_xmp()
+                                    {
+                                        // Write main XMP segment
+                                        if !source_seg.ranges.is_empty() {
+                                            writer.write_u8(0xFF)?;
+                                            writer.write_u8(APP1)?;
+                                            writer.write_u16::<BigEndian>(
+                                                (source_seg.ranges[0].size
+                                                    + XMP_SIGNATURE.len() as u64
+                                                    + 2) as u16,
+                                            )?;
+                                            writer.write_all(XMP_SIGNATURE)?;
 
-                                        if current_read_pos != segment.ranges[0].offset {
-                                            source
-                                                .seek(SeekFrom::Start(segment.ranges[0].offset))?;
-                                            current_read_pos = segment.ranges[0].offset;
+                                            source.seek(SeekFrom::Start(source_seg.ranges[0].offset))?;
+                                            let mut limited = source.take(source_seg.ranges[0].size);
+                                            copy(&mut limited, writer)?;
                                         }
 
-                                        let mut limited = source.take(segment.ranges[0].size);
-                                        copy(&mut limited, writer)?;
-                                        current_read_pos += segment.ranges[0].size;
-                                    }
+                                        // Write extended XMP segments
+                                        for (i, range) in source_seg.ranges[1..].iter().enumerate() {
+                                            let chunk_offset = chunk_offsets.get(i).copied().unwrap_or(0);
 
-                                    // Write extended XMP segments (ranges[1..])
-                                    for (i, range) in segment.ranges[1..].iter().enumerate() {
-                                        let chunk_offset =
-                                            chunk_offsets.get(i).copied().unwrap_or(0);
+                                            writer.write_u8(0xFF)?;
+                                            writer.write_u8(APP1)?;
 
-                                        // Write APP1 marker
-                                        writer.write_u8(0xFF)?;
-                                        writer.write_u8(APP1)?;
+                                            let seg_size = XMP_EXTENDED_SIGNATURE.len()
+                                                + 32 + 4 + 4 + range.size as usize + 2;
+                                            writer.write_u16::<BigEndian>(seg_size as u16)?;
 
-                                        // Calculate segment size: signature + GUID + total_size + offset + data
-                                        let seg_size = XMP_EXTENDED_SIGNATURE.len()
-                                            + 32
-                                            + 4
-                                            + 4
-                                            + range.size as usize
-                                            + 2;
-                                        writer.write_u16::<BigEndian>(seg_size as u16)?;
+                                            writer.write_all(XMP_EXTENDED_SIGNATURE)?;
 
-                                        // Write extended XMP signature
-                                        writer.write_all(XMP_EXTENDED_SIGNATURE)?;
+                                            let guid_bytes = guid.as_bytes();
+                                            writer.write_all(&guid_bytes[..guid_bytes.len().min(32)])?;
+                                            for _ in guid_bytes.len()..32 {
+                                                writer.write_u8(0)?;
+                                            }
 
-                                        // Write GUID (pad to 32 bytes if needed)
-                                        let guid_bytes = guid.as_bytes();
-                                        writer
-                                            .write_all(&guid_bytes[..guid_bytes.len().min(32)])?;
-                                        // Pad if GUID is shorter than 32 bytes
-                                        for _ in guid_bytes.len()..32 {
-                                            writer.write_u8(0)?;
-                                        }
+                                            writer.write_u32::<BigEndian>(source_seg.ranges[1..].iter()
+                                                .map(|r| r.size as u32).sum())?;
+                                            writer.write_u32::<BigEndian>(chunk_offset)?;
 
-                                        // Write total size
-                                        writer.write_u32::<BigEndian>(total_size)?;
-
-                                        // Write chunk offset
-                                        writer.write_u32::<BigEndian>(chunk_offset)?;
-
-                                        // Copy the data
-                                        if current_read_pos != range.offset {
                                             source.seek(SeekFrom::Start(range.offset))?;
-                                            current_read_pos = range.offset;
+                                            let mut limited = source.take(range.size);
+                                            copy(&mut limited, writer)?;
                                         }
-
-                                        let mut limited = source.take(range.size);
-                                        copy(&mut limited, writer)?;
-                                        current_read_pos += range.size;
+                                        continue;
                                     }
-
-                                    xmp_written = true;
-                                    continue;
                                 }
-                            }
-
-                            // Simple XMP (single or concatenated ranges, no extended metadata)
-                            for range in &segment.ranges {
+                                
+                                // Simple XMP - just copy
                                 writer.write_u8(0xFF)?;
                                 writer.write_u8(APP1)?;
                                 writer.write_u16::<BigEndian>(
-                                    (range.size + XMP_SIGNATURE.len() as u64 + 2) as u16,
+                                    (source_seg.ranges[0].size + XMP_SIGNATURE.len() as u64 + 2) as u16,
                                 )?;
                                 writer.write_all(XMP_SIGNATURE)?;
 
-                                if current_read_pos != range.offset {
-                                    source.seek(SeekFrom::Start(range.offset))?;
-                                    current_read_pos = range.offset;
-                                }
-
-                                let mut limited = source.take(range.size);
+                                source.seek(SeekFrom::Start(source_seg.ranges[0].offset))?;
+                                let mut limited = source.take(source_seg.ranges[0].size);
                                 copy(&mut limited, writer)?;
-                                current_read_pos += range.size;
                             }
-
-                            xmp_written = true;
+                        }
+                        crate::MetadataUpdate::Remove => {
+                            // Skip - segment not in destination
                         }
                     }
                 }
 
-                segment if segment.is_jumbf() => {
+                seg if seg.is_jumbf() => {
+                    // Write JUMBF based on updates
                     match &updates.jumbf {
-                        crate::MetadataUpdate::Remove => {
-                            // Skip existing JUMBF - effectively removing it
-                            jumbf_written = true;
-                        }
                         crate::MetadataUpdate::Set(new_jumbf) => {
-                            // Replace with new JUMBF
-                            if !jumbf_written {
-                                write_jumbf_segments(writer, new_jumbf)?;
-                                jumbf_written = true;
-                            }
-                            // Skip existing JUMBF
+                            write_jumbf_segments(writer, new_jumbf)?;
                         }
                         crate::MetadataUpdate::Keep => {
-                            // Copy existing JUMBF ranges
-                            for range in &segment.ranges {
-                                writer.write_u8(0xFF)?;
-                                writer.write_u8(APP11)?;
+                            // Find corresponding source segment and copy it
+                            if let Some(source_seg) = structure.segments.iter().find(|s| s.is_jumbf()) {
+                                // Read the JUMBF data from source
+                                let total_size: u64 = source_seg.ranges.iter().map(|r| r.size).sum();
+                                let mut jumbf_data = vec![0u8; total_size as usize];
+                                let mut offset = 0;
 
-                                let seg_size = range.size + 2;
-                                writer.write_u16::<BigEndian>(seg_size as u16)?;
-
-                                // Optimized seek
-                                if current_read_pos != range.offset {
+                                for range in &source_seg.ranges {
                                     source.seek(SeekFrom::Start(range.offset))?;
-                                    current_read_pos = range.offset;
+                                    source.read_exact(&mut jumbf_data[offset..offset + range.size as usize])?;
+                                    offset += range.size as usize;
                                 }
 
-                                let mut limited = source.take(range.size);
-                                copy(&mut limited, writer)?;
-                                current_read_pos += range.size;
-                            }
-                            jumbf_written = true;
-                        }
-                    }
-                }
-
-                segment if segment.path.as_deref() == Some("APP1") && !xmp_written => {
-                    // First APP1 segment - good place to insert XMP if we're adding it
-                    if let crate::MetadataUpdate::Set(new_xmp) = &updates.xmp {
-                        if !has_xmp {
-                            // Insert new XMP before this segment
-                            write_xmp_segment(writer, new_xmp)?;
-                            xmp_written = true;
-                        }
-                    }
-
-                    // Copy the Other segment
-                    copy_other_segment(segment, source, writer, &mut current_read_pos)?;
-                }
-
-                segment if segment.path.as_deref() == Some("APP11") && !jumbf_written => {
-                    // First APP11 segment - good place to insert JUMBF if we're adding it
-                    if let crate::MetadataUpdate::Set(new_jumbf) = &updates.jumbf {
-                        if !has_jumbf {
-                            // Insert new JUMBF before this segment
-                            write_jumbf_segments(writer, new_jumbf)?;
-                            jumbf_written = true;
-                        }
-                    }
-
-                    // Copy the Other segment
-                    copy_other_segment(segment, source, writer, &mut current_read_pos)?;
-                }
-
-                segment if segment.is_type(SegmentKind::ImageData) => {
-                    // Before writing image data, insert any pending new metadata
-                    if !xmp_written {
-                        if let crate::MetadataUpdate::Set(new_xmp) = &updates.xmp {
-                            if !has_xmp {
-                                write_xmp_segment(writer, new_xmp)?;
-                                xmp_written = true;
+                                write_jumbf_segments(writer, &jumbf_data)?;
                             }
                         }
-                    }
-
-                    if !jumbf_written {
-                        if let crate::MetadataUpdate::Set(new_jumbf) = &updates.jumbf {
-                            if !has_jumbf {
-                                write_jumbf_segments(writer, new_jumbf)?;
-                                jumbf_written = true;
-                            }
+                        crate::MetadataUpdate::Remove => {
+                            // Skip - segment not in destination
                         }
                     }
-
-                    // Copy image data
-                    copy_other_segment(segment, source, writer, &mut current_read_pos)?;
                 }
 
-                segment if segment.is_type(SegmentKind::Exif) => {
-                    // Copy EXIF segment as-is (thumbnails are embedded in it)
-                    copy_other_segment(segment, source, writer, &mut current_read_pos)?;
+                seg if seg.is_type(SegmentKind::ImageData) => {
+                    // Find corresponding source segment
+                    if let Some(source_seg) = structure.segments.iter().find(|s| s.is_type(SegmentKind::ImageData)) {
+                        // Copy SOS marker + image data + any RST markers + EOI
+                        let location = source_seg.location();
+                        source.seek(SeekFrom::Start(location.offset))?;
+                        let mut limited = source.take(location.size);
+                        copy(&mut limited, writer)?;
+                    }
+                }
+
+                seg if seg.path.as_deref() == Some("EOI") => {
+                    // Write EOI marker
+                    writer.write_u8(0xFF)?;
+                    writer.write_u8(EOI)?;
                 }
 
                 _ => {
-                    copy_other_segment(segment, source, writer, &mut current_read_pos)?;
+                    // Copy other segments from source
+                    // Find corresponding source segment by kind and path
+                    if let Some(source_seg) = structure.segments.iter()
+                        .find(|s| s.kind == dest_segment.kind && s.path == dest_segment.path)
+                    {
+                        let location = source_seg.location();
+                        source.seek(SeekFrom::Start(location.offset))?;
+                        let mut limited = source.take(location.size);
+                        copy(&mut limited, writer)?;
+                    }
                 }
             }
         }
