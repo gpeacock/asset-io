@@ -716,6 +716,8 @@ impl ContainerIO for JpegIO {
         writer: &mut W,
         updates: &Updates,
     ) -> Result<()> {
+        // NOTE: This logic must stay in sync with calculate_updated_structure()
+        // TODO: Refactor to share decision logic between write() and calculate_updated_structure()
         source.seek(SeekFrom::Start(0))?;
         let mut current_read_pos = 0u64;
 
@@ -965,6 +967,9 @@ impl ContainerIO for JpegIO {
         source_structure: &Structure,
         updates: &Updates,
     ) -> Result<Structure> {
+        // NOTE: This logic must stay in sync with write()
+        // This calculates where segments will be WITHOUT actually writing
+        // The segment iteration and decision logic mirrors write() exactly
         use crate::MetadataUpdate;
 
         let mut dest_structure = Structure::new(Container::Jpeg, source_structure.media_type);

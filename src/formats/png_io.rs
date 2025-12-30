@@ -458,6 +458,8 @@ impl ContainerIO for PngIO {
         writer: &mut W,
         updates: &Updates,
     ) -> Result<()> {
+        // NOTE: This logic must stay in sync with calculate_updated_structure()
+        // TODO: Refactor to share decision logic between write() and calculate_updated_structure()
         source.seek(SeekFrom::Start(0))?;
 
         // Write PNG signature
@@ -603,6 +605,9 @@ impl ContainerIO for PngIO {
         source_structure: &Structure,
         updates: &Updates,
     ) -> Result<Structure> {
+        // NOTE: This logic must stay in sync with write()
+        // This calculates where segments will be WITHOUT actually writing
+        // The segment iteration and decision logic mirrors write() exactly
         use crate::MetadataUpdate;
 
         let mut dest_structure = Structure::new(Container::Png, source_structure.media_type);
