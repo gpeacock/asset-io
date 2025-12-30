@@ -305,12 +305,7 @@ impl Segment {
     /// let header = Segment::new(0, 100, SegmentKind::Header, None);
     /// let xmp = Segment::new(1000, 500, SegmentKind::Xmp, Some("app1".to_string()));
     /// ```
-    pub fn new(
-        offset: u64,
-        size: u64,
-        kind: SegmentKind,
-        path: Option<String>,
-    ) -> Self {
+    pub fn new(offset: u64, size: u64, kind: SegmentKind, path: Option<String>) -> Self {
         Self {
             ranges: vec![ByteRange::new(offset, size)],
             kind,
@@ -337,11 +332,7 @@ impl Segment {
     ///     Some("ifd0/strips".to_string())
     /// );
     /// ```
-    pub fn with_ranges(
-        ranges: Vec<ByteRange>,
-        kind: SegmentKind,
-        path: Option<String>,
-    ) -> Self {
+    pub fn with_ranges(ranges: Vec<ByteRange>, kind: SegmentKind, path: Option<String>) -> Self {
         Self {
             ranges,
             kind,
@@ -385,8 +376,14 @@ impl Segment {
     ///
     /// Note: For non-contiguous multi-range segments, this includes gaps!
     pub fn span(&self) -> ByteRange {
-        let first = self.ranges.first().expect("Segment must have at least one range");
-        let last = self.ranges.last().expect("Segment must have at least one range");
+        let first = self
+            .ranges
+            .first()
+            .expect("Segment must have at least one range");
+        let last = self
+            .ranges
+            .last()
+            .expect("Segment must have at least one range");
         ByteRange {
             offset: first.offset,
             size: last.end_offset() - first.offset,
@@ -399,7 +396,9 @@ impl Segment {
             return true;
         }
 
-        self.ranges.windows(2).all(|w| w[0].is_contiguous_with(&w[1]))
+        self.ranges
+            .windows(2)
+            .all(|w| w[0].is_contiguous_with(&w[1]))
     }
 
     // Convenience methods for checking segment kind

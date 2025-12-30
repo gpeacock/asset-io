@@ -233,32 +233,32 @@ impl JpegIO {
                         JPEG_XT_HEADER_SIZE + 8 // Skip JPEG XT header + repeated LBox/TBox
                     };
 
-                let data_size = range.size.saturating_sub(skip_bytes as u64);
-                if data_size > 0 {
-                    let mut skip_buf = vec![0u8; skip_bytes];
-                    source.read_exact(&mut skip_buf)?; // Skip the header
+                    let data_size = range.size.saturating_sub(skip_bytes as u64);
+                    if data_size > 0 {
+                        let mut skip_buf = vec![0u8; skip_bytes];
+                        source.read_exact(&mut skip_buf)?; // Skip the header
 
+                        let mut buf = vec![0u8; data_size as usize];
+                        source.read_exact(&mut buf)?;
+                        result.extend_from_slice(&buf);
+                    }
+                }
+            } else {
+                // Single range: skip JPEG XT header
+                let offset = segment.ranges[0].offset;
+                let size = segment.ranges[0].size;
+                source.seek(SeekFrom::Start(offset))?;
+
+                let mut skip_buf = [0u8; JPEG_XT_HEADER_SIZE];
+                source.read_exact(&mut skip_buf)?;
+
+                let data_size = size.saturating_sub(JPEG_XT_HEADER_SIZE as u64);
+                if data_size > 0 {
                     let mut buf = vec![0u8; data_size as usize];
                     source.read_exact(&mut buf)?;
                     result.extend_from_slice(&buf);
                 }
             }
-        } else {
-            // Single range: skip JPEG XT header
-            let offset = segment.ranges[0].offset;
-            let size = segment.ranges[0].size;
-            source.seek(SeekFrom::Start(offset))?;
-
-            let mut skip_buf = [0u8; JPEG_XT_HEADER_SIZE];
-            source.read_exact(&mut skip_buf)?;
-
-            let data_size = size.saturating_sub(JPEG_XT_HEADER_SIZE as u64);
-            if data_size > 0 {
-                let mut buf = vec![0u8; data_size as usize];
-                source.read_exact(&mut buf)?;
-                result.extend_from_slice(&buf);
-            }
-        }
         }
 
         Ok(if result.is_empty() {
@@ -408,7 +408,9 @@ impl JpegIO {
                                 let segment = &mut structure.segments[idx];
                                 if segment.is_xmp() {
                                     // Add range to existing segment
-                                    segment.ranges.push(ByteRange::new(chunk_data_offset, chunk_data_size));
+                                    segment
+                                        .ranges
+                                        .push(ByteRange::new(chunk_data_offset, chunk_data_size));
 
                                     // Update or create metadata
                                     match &mut segment.metadata {
@@ -498,7 +500,8 @@ impl JpegIO {
                                     Err(_) => None, // Ignore EXIF parsing errors
                                 };
 
-                                let thumbnail_meta = thumbnail.map(crate::SegmentMetadata::Thumbnail);
+                                let thumbnail_meta =
+                                    thumbnail.map(crate::SegmentMetadata::Thumbnail);
                                 let mut segment = Segment::new(
                                     segment_start,
                                     size + 2,
@@ -590,7 +593,9 @@ impl JpegIO {
                             if let Some(last_segment) = structure.segments.last_mut() {
                                 if last_segment.is_jumbf() {
                                     // Add this range to the existing JUMBF
-                                    last_segment.ranges.push(ByteRange::new(data_start, data_size));
+                                    last_segment
+                                        .ranges
+                                        .push(ByteRange::new(data_start, data_size));
                                     is_continuation = true;
                                 }
                             }
@@ -722,14 +727,8 @@ impl ContainerIO for JpegIO {
         let mut jumbf_written = false;
 
         // Track if file has existing XMP/JUMBF
-        let has_xmp = structure
-            .segments
-            .iter()
-            .any(|s| s.is_xmp());
-        let has_jumbf = structure
-            .segments
-            .iter()
-            .any(|s| s.is_jumbf());
+        let has_xmp = structure.segments.iter().any(|s| s.is_xmp());
+        let has_jumbf = structure.segments.iter().any(|s| s.is_jumbf());
 
         for segment in &structure.segments {
             match segment {
@@ -763,13 +762,16 @@ impl ContainerIO for JpegIO {
                                         writer.write_u8(0xFF)?;
                                         writer.write_u8(APP1)?;
                                         writer.write_u16::<BigEndian>(
-                                            (segment.ranges[0].size + XMP_SIGNATURE.len() as u64 + 2)
+                                            (segment.ranges[0].size
+                                                + XMP_SIGNATURE.len() as u64
+                                                + 2)
                                                 as u16,
                                         )?;
                                         writer.write_all(XMP_SIGNATURE)?;
 
                                         if current_read_pos != segment.ranges[0].offset {
-                                            source.seek(SeekFrom::Start(segment.ranges[0].offset))?;
+                                            source
+                                                .seek(SeekFrom::Start(segment.ranges[0].offset))?;
                                             current_read_pos = segment.ranges[0].offset;
                                         }
 
@@ -1127,15 +1129,20 @@ fn copy_other_segment<R: Read + Seek, W: Write>(
 
 /// Write JUMBF data as one or more APP11 segments
 fn write_jumbf_segments<W: Write>(writer: &mut W, jumbf: &[u8]) -> Result<()> {
-    // JPEG XT header: CI (2) + En (2) + Z (4) + LBox (4) + TBox (4) = 16 bytes
-    const JPEG_XT_OVERHEAD: usize = 16;
-    const MAX_DATA_PER_SEGMENT: usize = MAX_MARKER_SIZE - JPEG_XT_OVERHEAD;
+    // JPEG XT header for first segment: JP (2) + En (2) + Z (4) = 8 bytes
+    // For continuation segments, we also repeat LBox (4) + TBox (4) = 8 more bytes
+    const JPEG_XT_HEADER: usize = 8; // JP + En + Z
+    const LBOX_TBOX_SIZE: usize = 8; // LBox + TBox repeated in continuations
+    const MAX_DATA_PER_SEGMENT: usize = MAX_MARKER_SIZE - JPEG_XT_HEADER - LBOX_TBOX_SIZE;
 
     for (seg_num, chunk) in jumbf.chunks(MAX_DATA_PER_SEGMENT).enumerate() {
         writer.write_u8(0xFF)?;
         writer.write_u8(APP11)?;
 
-        let seg_size = chunk.len() + JPEG_XT_OVERHEAD + 2;
+        // For first segment: JPEG_XT_HEADER + chunk
+        // For continuation: JPEG_XT_HEADER + LBOX_TBOX + chunk
+        let continuation_overhead = if seg_num > 0 { LBOX_TBOX_SIZE } else { 0 };
+        let seg_size = JPEG_XT_HEADER + continuation_overhead + chunk.len() + 2;
         writer.write_u16::<BigEndian>(seg_size as u16)?;
 
         // JPEG XT header

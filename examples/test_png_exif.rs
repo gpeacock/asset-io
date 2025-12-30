@@ -71,11 +71,7 @@ fn main() {
         println!("Parsed {} segments", asset.structure().segments().len());
 
         // Check for EXIF segment
-        let exif_segment = asset
-            .structure()
-            .segments()
-            .iter()
-            .find(|s| s.is_exif());
+        let exif_segment = asset.structure().segments().iter().find(|s| s.is_exif());
 
         if let Some(exif_segment) = exif_segment {
             let location = exif_segment.location();

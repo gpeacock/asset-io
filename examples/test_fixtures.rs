@@ -155,10 +155,7 @@ fn test_fixture(path: &str) -> asset_io::Result<FixtureInfo> {
     let xmp_mod_path = "/tmp/test_xmp_mod.jpg";
     let new_xmp = b"<test>Modified XMP</test>".to_vec();
     let mut asset = Asset::open(path)?;
-    asset.write_to(
-        xmp_mod_path,
-        &Updates::new().set_xmp(new_xmp.clone()),
-    )?;
+    asset.write_to(xmp_mod_path, &Updates::new().set_xmp(new_xmp.clone()))?;
 
     let mut verify = Asset::open(xmp_mod_path)?;
     let mod_xmp = verify.xmp()?;
@@ -178,10 +175,7 @@ fn test_fixture(path: &str) -> asset_io::Result<FixtureInfo> {
     // Test 3: Remove JUMBF
     let jumbf_rm_path = "/tmp/test_jumbf_rm.jpg";
     let mut asset = Asset::open(path)?;
-    asset.write_to(
-        jumbf_rm_path,
-        &Updates::new().remove_jumbf(),
-    )?;
+    asset.write_to(jumbf_rm_path, &Updates::new().remove_jumbf())?;
 
     let mut verify = Asset::open(jumbf_rm_path)?;
     let has_jumbf = verify.jumbf()?.is_some();

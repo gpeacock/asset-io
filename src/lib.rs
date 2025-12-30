@@ -78,7 +78,7 @@ mod tiff;
 #[cfg(feature = "xmp")]
 pub mod xmp;
 
-pub use asset::{Asset, AssetBuilder};
+pub use asset::{Asset, AssetBuilder, VirtualAsset};
 pub use error::{Error, Result};
 pub use formats::ContainerIO;
 pub use media_type::MediaType;

@@ -341,7 +341,7 @@ impl<R: Read + Seek> Asset<R> {
     /// # let file = File::open("test.jpg")?;
     /// # let mut asset = Asset::from_source(file)?;
     /// use sha2::{Sha256, Digest};
-    /// 
+    ///
     /// let mut hasher = Sha256::new();
     /// let c2pa_idx = asset.structure().c2pa_jumbf_index();
     /// asset.hash_excluding_segments(&[c2pa_idx], &mut hasher)?;
@@ -364,6 +364,41 @@ impl<R: Read + Seek> Asset<R> {
         self.source.seek(SeekFrom::Start(0))?;
         self.handler
             .write(&self.structure, &mut self.source, writer, updates)
+    }
+
+    /// Create a virtual asset representing what would exist after applying updates
+    ///
+    /// No writing occurs. The virtual asset can be inspected, hashed, and
+    /// eventually written when ready.
+    ///
+    /// # Example
+    /// ```no_run
+    /// use asset_io::{Asset, Updates};
+    ///
+    /// # fn main() -> asset_io::Result<()> {
+    /// let asset = Asset::open("input.jpg")?;
+    /// let updates = Updates::new().set_jumbf(b"manifest".to_vec());
+    ///
+    /// // Create virtual asset (no I/O, instant)
+    /// let virtual_asset = asset.with_updates(updates)?;
+    ///
+    /// // Inspect structure (for now, same as source - will be updated later)
+    /// println!("Structure has {} segments", virtual_asset.structure().segments.len());
+    ///
+    /// // Write when ready
+    /// let mut output = std::fs::File::create("output.jpg")?;
+    /// virtual_asset.write_to(&mut output)?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn with_updates(self, updates: Updates) -> Result<VirtualAsset<R>> {
+        // TODO: Calculate destination structure from source + updates
+        // For now, virtual asset will use source structure (placeholder)
+
+        Ok(VirtualAsset {
+            source_asset: self,
+            updates,
+        })
     }
 }
 
@@ -397,5 +432,98 @@ impl AssetBuilder {
 impl Default for AssetBuilder {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// A virtual asset representing what would exist after applying updates
+///
+/// This is a "lazy" asset that hasn't been written yet. It can be inspected,
+/// hashed, and eventually written. Safe by construction - the structure is
+/// guaranteed to match because both are calculated from the same source and updates.
+///
+/// # Example
+/// ```no_run
+/// use asset_io::{Asset, Updates};
+/// use sha2::{Sha256, Digest};
+///
+/// # fn main() -> asset_io::Result<()> {
+/// let asset = Asset::open("input.jpg")?;
+/// let updates = Updates::new().set_jumbf(b"manifest".to_vec());
+///
+/// // Create virtual asset (no writing yet!)
+/// let virtual_asset = asset.with_updates(updates)?;
+///
+/// // Write when ready
+/// let mut output = std::fs::File::create("output.jpg")?;
+/// virtual_asset.write_to(&mut output)?;
+/// # Ok(())
+/// # }
+/// ```
+pub struct VirtualAsset<R: Read + Seek> {
+    source_asset: Asset<R>,
+    updates: Updates,
+}
+
+impl<R: Read + Seek> VirtualAsset<R> {
+    /// Get the structure (currently returns source structure as placeholder)
+    /// TODO: Return calculated destination structure
+    pub fn structure(&self) -> &Structure {
+        &self.source_asset.structure
+    }
+
+    /// Get immutable reference to the source asset
+    pub fn source_asset(&self) -> &Asset<R> {
+        &self.source_asset
+    }
+
+    /// Get mutable reference to the source asset
+    pub fn source_asset_mut(&mut self) -> &mut Asset<R> {
+        &mut self.source_asset
+    }
+
+    /// Get the updates that will be applied
+    pub fn updates(&self) -> &Updates {
+        &self.updates
+    }
+
+    /// Read XMP as it would appear in the output
+    pub fn xmp(&mut self) -> Result<Option<Vec<u8>>> {
+        use crate::MetadataUpdate;
+        match &self.updates.xmp {
+            MetadataUpdate::Set(data) => Ok(Some(data.clone())),
+            MetadataUpdate::Remove => Ok(None),
+            MetadataUpdate::Keep => self.source_asset.xmp(),
+        }
+    }
+
+    /// Read JUMBF as it would appear in the output
+    pub fn jumbf(&mut self) -> Result<Option<Vec<u8>>> {
+        use crate::MetadataUpdate;
+        match &self.updates.jumbf {
+            MetadataUpdate::Set(data) => Ok(Some(data.clone())),
+            MetadataUpdate::Remove => Ok(None),
+            MetadataUpdate::Keep => self.source_asset.jumbf(),
+        }
+    }
+
+    /// Write the virtual asset to a destination
+    pub fn write_to<W: Write>(self, writer: &mut W) -> Result<()> {
+        let mut source_asset = self.source_asset;
+        source_asset.write(writer, &self.updates)
+    }
+
+    /// Write and convert to a real Asset (consumes writer)
+    pub fn write_to_asset<W: Write + Read + Seek>(self, mut writer: W) -> Result<Asset<W>> {
+        self.write_to(&mut writer)?;
+        writer.seek(SeekFrom::Start(0))?;
+        // Parse the written output to get real structure
+        Asset::from_source(writer)
+    }
+
+    /// Apply additional updates to this virtual asset (chaining!)
+    pub fn with_updates(self, updates: Updates) -> Result<VirtualAsset<R>> {
+        // TODO: Merge updates intelligently
+        // For now, just replace
+        self.source_asset.with_updates(updates)
     }
 }

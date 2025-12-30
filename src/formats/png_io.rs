@@ -467,14 +467,8 @@ impl ContainerIO for PngIO {
         let mut jumbf_written = false;
 
         // Track if file has existing metadata
-        let _has_xmp = structure
-            .segments
-            .iter()
-            .any(|s| s.is_xmp());
-        let _has_jumbf = structure
-            .segments
-            .iter()
-            .any(|s| s.is_jumbf());
+        let _has_xmp = structure.segments.iter().any(|s| s.is_xmp());
+        let _has_jumbf = structure.segments.iter().any(|s| s.is_jumbf());
 
         for segment in &structure.segments {
             match segment {

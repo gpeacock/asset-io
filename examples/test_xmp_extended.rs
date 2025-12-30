@@ -16,10 +16,7 @@ fn main() -> asset_io::Result<()> {
     let output = "/tmp/test_xmp_extended_write.jpg";
 
     let mut asset = Asset::open(input_str)?;
-    asset.write_to(
-        output,
-        &Updates::new().set_xmp(large_xmp.clone()),
-    )?;
+    asset.write_to(output, &Updates::new().set_xmp(large_xmp.clone()))?;
     println!("  ✓ Written to: {}", output);
 
     // Verify the written file

@@ -67,10 +67,7 @@ mod fixture_tests {
         let new_xmp = b"<test>Modified XMP</test>".to_vec();
 
         asset
-            .write_to(
-                output_path,
-                &Updates::new().set_xmp(new_xmp.clone()),
-            )
+            .write_to(output_path, &Updates::new().set_xmp(new_xmp.clone()))
             .expect("Failed to write asset");
 
         // Parse the output
@@ -404,9 +401,7 @@ mod thumbnail_tests {
 
 #[cfg(all(test, feature = "png"))]
 mod png_tests {
-    use asset_io::{
-        Asset, Container, ContainerIO, MediaType, PngIO, Updates,
-    };
+    use asset_io::{Asset, Container, ContainerIO, MediaType, PngIO, Updates};
     use std::io::Cursor;
 
     /// Create a minimal valid PNG (1x1 pixel, RGB)

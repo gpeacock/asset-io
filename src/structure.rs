@@ -199,13 +199,13 @@ impl Structure {
         let mut last_end = 0u64;
 
         for segment in &self.segments {
-            let should_exclude = exclusions
-                .iter()
-                .any(|pattern| {
-                    segment.path.as_deref()
-                        .map(|p| p.contains(pattern))
-                        .unwrap_or(false)
-                });
+            let should_exclude = exclusions.iter().any(|pattern| {
+                segment
+                    .path
+                    .as_deref()
+                    .map(|p| p.contains(pattern))
+                    .unwrap_or(false)
+            });
 
             if should_exclude {
                 let loc = segment.location();
@@ -239,7 +239,8 @@ impl Structure {
             .iter()
             .enumerate()
             .filter(|(_, seg)| {
-                seg.path.as_deref()
+                seg.path
+                    .as_deref()
                     .map(|p| p.contains(pattern))
                     .unwrap_or(false)
             })
@@ -254,13 +255,12 @@ impl Structure {
             .iter()
             .enumerate()
             .filter(|(_, seg)| {
-                !exclusions
-                    .iter()
-                    .any(|pattern| {
-                        seg.path.as_deref()
-                            .map(|p| p.contains(pattern))
-                            .unwrap_or(false)
-                    })
+                !exclusions.iter().any(|pattern| {
+                    seg.path
+                        .as_deref()
+                        .map(|p| p.contains(pattern))
+                        .unwrap_or(false)
+                })
             })
             .map(|(i, seg)| (i, seg, seg.location()))
             .collect()
@@ -280,18 +280,18 @@ impl Structure {
     /// # use asset_io::*;
     /// # use std::fs::File;
     /// # fn example() -> Result<()> {
-    /// # let mut file = File::open("test.jpg")?;
+    /// # let file = File::open("test.jpg")?;
     /// # let mut asset = Asset::from_source(file)?;
-    /// let structure = asset.structure();
-    /// 
+    ///
     /// // Hash everything except C2PA JUMBF
     /// use sha2::{Sha256, Digest};
     /// let mut hasher = Sha256::new();
-    /// structure.hash_excluding_segments(
-    ///     asset.source_mut(),
-    ///     &[structure.c2pa_jumbf_index()],
-    ///     &mut hasher
-    /// )?;
+    ///
+    /// // Get the excluded segments
+    /// let jumbf_index = asset.structure().c2pa_jumbf_index();
+    ///
+    /// // Use the Asset's hash_excluding_segments method instead
+    /// asset.hash_excluding_segments(&[jumbf_index], &mut hasher)?;
     /// let hash = hasher.finalize();
     /// # Ok(())
     /// # }
@@ -304,7 +304,7 @@ impl Structure {
         hasher: &mut H,
     ) -> Result<()> {
         use crate::segment::ByteRange;
-        
+
         // Build exclusion ranges from all segments and ALL their ranges
         let mut exclusion_ranges: Vec<ByteRange> = Vec::new();
         for &idx_opt in excluded_indices {
@@ -317,7 +317,7 @@ impl Structure {
                 }
             }
         }
-        
+
         // Sort exclusions by offset and merge overlapping/contiguous ranges
         exclusion_ranges.sort_by_key(|r| r.offset);
         let mut merged_exclusions: Vec<ByteRange> = Vec::new();
@@ -332,11 +332,11 @@ impl Structure {
             }
             merged_exclusions.push(range);
         }
-        
+
         // Calculate hashable ranges (everything except exclusions)
         let mut ranges = Vec::new();
         let mut last_end = 0u64;
-        
+
         for exclusion in &merged_exclusions {
             if last_end < exclusion.offset {
                 ranges.push(ByteRange {
@@ -346,7 +346,7 @@ impl Structure {
             }
             last_end = exclusion.end_offset();
         }
-        
+
         // Add final range to end of file
         if last_end < self.total_size {
             ranges.push(ByteRange {
@@ -354,7 +354,7 @@ impl Structure {
                 size: self.total_size - last_end,
             });
         }
-        
+
         // Hash the ranges (zero-copy if mmap available)
         #[cfg(feature = "memory-mapped")]
         if self.mmap.is_some() {
@@ -369,15 +369,15 @@ impl Structure {
             }
             return Ok(());
         }
-        
+
         // Streaming path: read in chunks
         for range in ranges {
             self.hash_range_from_source(source, range, hasher)?;
         }
-        
+
         Ok(())
     }
-    
+
     /// Helper to hash a single range from source (streaming)
     #[cfg(feature = "hashing")]
     fn hash_range_from_source<R: Read + Seek, H: std::io::Write>(
@@ -387,19 +387,19 @@ impl Structure {
         hasher: &mut H,
     ) -> Result<()> {
         use std::io::SeekFrom;
-        
+
         source.seek(SeekFrom::Start(range.offset))?;
-        
+
         let mut remaining = range.size;
         let mut buffer = vec![0u8; 8192];
-        
+
         while remaining > 0 {
             let to_read = remaining.min(buffer.len() as u64) as usize;
             source.read_exact(&mut buffer[..to_read])?;
             hasher.write_all(&buffer[..to_read])?;
             remaining -= to_read as u64;
         }
-        
+
         Ok(())
     }
 

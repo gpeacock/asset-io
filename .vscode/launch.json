@@ -1,0 +1,53 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug example 'c2pa'",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--example=c2pa",
+                    "--features=xmp,png,hashing"
+                ],
+                "filter": {
+                    "name": "c2pa",
+                    "kind": "example"
+                }
+            },
+            "args": [
+                "tests/fixtures/sample1.png"
+            ],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug example 'c2pa' (custom file)",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--example=c2pa",
+                    "--features=xmp,hashing"
+                ],
+                "filter": {
+                    "name": "c2pa",
+                    "kind": "example"
+                }
+            },
+            "args": [
+                "${input:imagePath}"
+            ],
+            "cwd": "${workspaceFolder}"
+        }
+    ],
+    "inputs": [
+        {
+            "id": "imagePath",
+            "type": "promptString",
+            "description": "Path to image file",
+            "default": "tests/fixtures/sample1.png"
+        }
+    ]
+}

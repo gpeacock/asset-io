@@ -55,9 +55,7 @@ fn main() -> asset_io::Result<()> {
     test_modification(
         input,
         "/tmp/test_replace_xmp_remove_jumbf.jpg",
-        Updates::new()
-            .set_xmp(test_xmp.clone())
-            .remove_jumbf(),
+        Updates::new().set_xmp(test_xmp.clone()).remove_jumbf(),
     )?;
 
     // Test 8: Add XMP to file without XMP
