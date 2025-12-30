@@ -1,7 +1,22 @@
 //! C2PA data hash example using asset-io
 //!
 //! This example demonstrates how to create a C2PA manifest using data hashing
-//! with the asset-io intermediate parsing workflow to get accurate structure offsets.
+//! with a single output file - no intermediate files required!
+//!
+//! ## Workflow
+//!
+//! 1. Open source asset with asset-io
+//! 2. Create C2PA builder with actions/assertions
+//! 3. Generate placeholder manifest (reserves space)
+//! 4. Write output with placeholder manifest
+//! 5. Parse output to get actual structure/offsets
+//! 6. Hash output (excluding manifest placeholder)
+//! 7. Sign final manifest with hash
+//! 8. Overwrite output with final signed manifest
+//! 9. Verify output with C2PA reader
+//!
+//! The key insight: write once with placeholder, parse to get real offsets,
+//! hash excluding manifest, then overwrite with final manifest.
 //!
 //! Based on the c2pa-rs data_hash.rs example, adapted for asset-io integration.
 //!
@@ -15,7 +30,7 @@ use c2pa::{
     Builder, ClaimGeneratorInfo, HashRange, Reader,
 };
 use std::fs::File;
-use std::io::{Seek, SeekFrom};
+use std::io::{Seek, SeekFrom, Write};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
@@ -91,35 +106,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Placeholder size: {} bytes", placeholder_manifest.len());
 
-    // === Step 4: Write intermediate asset with placeholder ===
-    println!("\n=== Step 4: Write Intermediate with Placeholder ===");
+    // === Step 4: Write output with placeholder ===
+    println!("\n=== Step 4: Write Output with Placeholder ===");
 
-    // Write to intermediate file with placeholder manifest
-    let intermediate_path = "target/intermediate_c2pa.tmp";
+    // Determine output path
+    let extension = asset.media_type().to_extension();
+    let output_path = format!("target/output_c2pa.{}", extension);
+
+    // Write directly to output with placeholder manifest
     let updates = Updates::new().set_jumbf(placeholder_manifest.clone());
-    asset.write_to(intermediate_path, &updates)?;
-
-    let intermediate_size = std::fs::metadata(intermediate_path)?.len();
-
+    {
+        let mut output = File::create(&output_path)?;
+        asset.write(&mut output, &updates)?;
+        output.flush()?;
+    } // Drop output file handle
+    
+    let output_size = std::fs::metadata(&output_path)?.len();
     println!(
-        "✓ Wrote intermediate with placeholder ({} bytes)",
-        intermediate_size
+        "✓ Wrote output with placeholder ({} bytes)",
+        output_size
     );
 
-    // === Step 5: Parse intermediate to get actual structure ===
-    println!("\n=== Step 5: Parse Intermediate Asset ===");
+    // === Step 5: Parse output to get actual structure ===
+    println!("\n=== Step 5: Parse Output Asset ===");
 
-    // Parse the intermediate file as a new asset
-    let mut intermediate_asset = Asset::open(intermediate_path)?;
+    // Now parse what we just wrote to get the actual structure
+    let mut output_asset = Asset::open(&output_path)?;
 
-    // Now get the ACTUAL manifest location from the parsed structure
-    let manifest_segment_idx = intermediate_asset
+    // Get the ACTUAL manifest location from the parsed structure
+    let manifest_segment_idx = output_asset
         .structure()
         .c2pa_jumbf_index()
-        .ok_or("No C2PA JUMBF segment found in intermediate structure")?;
-    let manifest_segment = &intermediate_asset.structure().segments[manifest_segment_idx];
+        .ok_or("No C2PA JUMBF segment found in output structure")?;
+    let manifest_segment = &output_asset.structure().segments[manifest_segment_idx];
 
-    println!("✓ Parsed intermediate asset");
+    println!("✓ Parsed output asset");
     println!("  C2PA segment at index {}", manifest_segment_idx);
     println!("  Manifest has {} range(s):", manifest_segment.ranges.len());
     for (i, range) in manifest_segment.ranges.iter().enumerate() {
@@ -138,17 +159,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         total_size, manifest_offset
     );
 
-    // === Step 6: Hash the intermediate (excluding manifest) ===
-    println!("\n=== Step 6: Hash Intermediate (excluding manifest) ===");
+    // === Step 6: Hash the output (excluding manifest) ===
+    println!("\n=== Step 6: Hash Output (excluding manifest) ===");
 
     let mut dh = DataHash::new("jumbf_manifest", "sha256");
     let hr = HashRange::new(manifest_offset, total_size);
     dh.add_exclusion(hr.clone());
 
-    // Hash the intermediate buffer excluding the manifest
-    let intermediate_cursor = intermediate_asset.source_mut();
-    intermediate_cursor.seek(SeekFrom::Start(0))?;
-    let hash = hash_stream_by_alg("sha256", intermediate_cursor, Some(vec![hr]), true)?;
+    // Hash the output excluding the manifest
+    let output_source = output_asset.source_mut();
+    output_source.seek(SeekFrom::Start(0))?;
+    let hash = hash_stream_by_alg("sha256", output_source, Some(vec![hr]), true)?;
     dh.set_hash(hash.clone());
 
     println!("✓ Generated hash (excluding manifest)");
@@ -163,21 +184,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         final_manifest.len()
     );
 
-    // === Step 8: Write final output with signed manifest ===
-    println!("\n=== Step 8: Write Final Output ===");
+    // Validate final manifest fits in placeholder space
+    if final_manifest.len() > placeholder_manifest.len() {
+        return Err(format!(
+            "Final manifest ({} bytes) is larger than placeholder ({} bytes)",
+            final_manifest.len(),
+            placeholder_manifest.len()
+        )
+        .into());
+    }
+    println!(
+        "  Space check: {} / {} bytes used",
+        final_manifest.len(),
+        placeholder_manifest.len()
+    );
 
-    // Open source again for final write
-    let mut asset2 = Asset::open(source_path)?;
-    let extension = asset2.media_type().to_extension();
+    // === Step 8: Overwrite manifest in output ===
+    println!("\n=== Step 8: Overwrite Manifest in Output ===");
 
+    // For now, we rewrite the whole file with the final manifest
+    // TODO: Future optimization - seek and overwrite just the manifest bytes
+    let mut final_asset = Asset::open(source_path)?;
     let final_updates = Updates::new().set_jumbf(final_manifest.clone());
-    let output_path = format!("target/output_c2pa.{}", extension);
-
-    asset2.write_to(&output_path, &final_updates)?;
+    final_asset.write_to(&output_path, &final_updates)?;
 
     let output_size = std::fs::metadata(&output_path)?.len();
-    println!("✓ Wrote final output to: {}", output_path);
-    println!("  Output file size: {} bytes", output_size);
+    println!("✓ Rewrote output with final manifest");
+    println!("  Output file: {} ({} bytes)", output_path, output_size);
 
     // === Step 9: Verify the output ===
     println!("\n=== Step 9: Verify Output ===");
@@ -221,11 +254,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("1. ✓ Opened source with asset-io");
     println!("2. ✓ Created C2PA builder with assertions");
     println!("3. ✓ Generated placeholder manifest");
-    println!("4. ✓ Wrote intermediate with placeholder");
-    println!("5. ✓ Parsed intermediate to get actual structure");
-    println!("6. ✓ Hashed intermediate excluding manifest");
+    println!("4. ✓ Wrote output with placeholder");
+    println!("5. ✓ Parsed output to get actual structure");
+    println!("6. ✓ Hashed output excluding manifest");
     println!("7. ✓ Signed final manifest with hash");
-    println!("8. ✓ Wrote final output with signed manifest");
+    println!("8. ✓ Overwrote manifest in output");
     println!("9. ✓ Verified C2PA manifest in output");
 
     Ok(())
