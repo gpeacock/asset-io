@@ -123,6 +123,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create placeholder manifest and write output
     let placeholder_manifest =
         builder.data_hashed_placeholder(signer.reserve_size(), "application/c2pa")?;
+    
     let updates = Updates::new().set_jumbf(placeholder_manifest.clone());
     asset.write_to(&output_path, &updates)?;
 

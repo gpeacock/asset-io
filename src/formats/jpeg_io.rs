@@ -210,54 +210,21 @@ impl JpegIO {
         }
 
         let mut result = Vec::new();
-        const JPEG_XT_HEADER_SIZE: usize = 8;
 
-        // For now, extract all JUMBF segments and concatenate them
-        // TODO: Filter by C2PA-specific JUMBF if needed
+        // Extract all JUMBF segments and concatenate them
+        // Note: The parser already skips JPEG XT headers when creating ranges,
+        // so we just read the raw JUMBF data directly from the ranges
         for &index in structure.jumbf_indices() {
             let segment = &structure.segments()[index];
             if !segment.is_jumbf() {
                 continue;
             }
 
-            if segment.ranges.len() > 1 {
-                // Multi-range JUMBF: strip JPEG XT headers
-                for (i, range) in segment.ranges.iter().enumerate() {
-                    source.seek(SeekFrom::Start(range.offset))?;
-
-                    // First range: skip JPEG XT header (8 bytes)
-                    // Continuation ranges: skip JPEG XT header + repeated LBox/TBox (16 bytes total)
-                    let skip_bytes = if i == 0 {
-                        JPEG_XT_HEADER_SIZE
-                    } else {
-                        JPEG_XT_HEADER_SIZE + 8 // Skip JPEG XT header + repeated LBox/TBox
-                    };
-
-                    let data_size = range.size.saturating_sub(skip_bytes as u64);
-                    if data_size > 0 {
-                        let mut skip_buf = vec![0u8; skip_bytes];
-                        source.read_exact(&mut skip_buf)?; // Skip the header
-
-                        let mut buf = vec![0u8; data_size as usize];
-                        source.read_exact(&mut buf)?;
-                        result.extend_from_slice(&buf);
-                    }
-                }
-            } else {
-                // Single range: skip JPEG XT header
-                let offset = segment.ranges[0].offset;
-                let size = segment.ranges[0].size;
-                source.seek(SeekFrom::Start(offset))?;
-
-                let mut skip_buf = [0u8; JPEG_XT_HEADER_SIZE];
-                source.read_exact(&mut skip_buf)?;
-
-                let data_size = size.saturating_sub(JPEG_XT_HEADER_SIZE as u64);
-                if data_size > 0 {
-                    let mut buf = vec![0u8; data_size as usize];
-                    source.read_exact(&mut buf)?;
-                    result.extend_from_slice(&buf);
-                }
+            for range in &segment.ranges {
+                source.seek(SeekFrom::Start(range.offset))?;
+                let mut buf = vec![0u8; range.size as usize];
+                source.read_exact(&mut buf)?;
+                result.extend_from_slice(&buf);
             }
         }
 
@@ -565,26 +532,59 @@ impl JpegIO {
                     let data_start = offset + 4;
                     let segment_start = offset;
 
-                    // Check for JPEG XT + JUMBF structure
-                    // JPEG XT: CI(2) + En(2) + Z(4) = 8 bytes
-                    // JUMBF superbox: LBox(4) + TBox(4 "jumb")
+                    // Check for JPEG XT + JUMBF structure OR raw JUMBF
+                    // Format 1: JPEG XT: CI(2) + En(2) + Z(4) = 8 bytes, then JUMBF superbox
+                    // Format 2: Raw JUMBF superbox directly (used by c2pa crate)
                     let mut header = [0u8; 32];
                     let bytes_to_read = header.len().min(data_size as usize);
                     source.read_exact(&mut header[..bytes_to_read])?;
 
                     // Check if this is JPEG XT with JUMBF
                     let is_jpeg_xt = bytes_to_read >= 8 && &header[0..2] == b"JP";
-                    let has_jumb_box = bytes_to_read >= 16 && &header[12..16] == b"jumb";
-                    let has_c2pa = bytes_to_read >= 32 && &header[28..32] == C2PA_MARKER;
+                    let has_jumb_box_after_xt = bytes_to_read >= 16 && &header[12..16] == b"jumb";
+                    let has_c2pa_after_xt = bytes_to_read >= 32 && &header[28..32] == C2PA_MARKER;
+                    
+                    // Check if this is raw JUMBF (no JPEG XT wrapper)
+                    let has_jumb_box_direct = bytes_to_read >= 8 && &header[4..8] == b"jumb";
+                    let has_c2pa_direct = bytes_to_read >= 24 && &header[20..24] == C2PA_MARKER;
 
-                    let is_jumbf = is_jpeg_xt && (has_jumb_box || has_c2pa);
+                    let is_jumbf = (is_jpeg_xt && (has_jumb_box_after_xt || has_c2pa_after_xt))
+                        || (has_jumb_box_direct || has_c2pa_direct);
 
                     if is_jumbf {
-                        // Extract sequence number from JPEG XT header
-                        let seq_num = if bytes_to_read >= 8 {
+                        // Calculate the actual JUMBF data offset and size
+                        // For JPEG XT format:
+                        // - First segment: skip 8-byte header (JP + En + Z)
+                        // - Continuation segments: skip 8-byte header + 8-byte repeated LBox/TBox
+                        // For raw JUMBF, data starts immediately
+                        let (jumbf_data_offset, jumbf_data_size) = if is_jpeg_xt {
+                            const JPEG_XT_HEADER_SIZE: u64 = 8;
+                            const REPEATED_LBOX_TBOX_SIZE: u64 = 8;
+                            
+                            // Extract sequence number to detect continuation
+                            let seq_num = if bytes_to_read >= 8 {
+                                u32::from_be_bytes([header[4], header[5], header[6], header[7]])
+                            } else {
+                                1
+                            };
+                            
+                            // Continuation segments have extra overhead
+                            let overhead = if seq_num > 1 {
+                                JPEG_XT_HEADER_SIZE + REPEATED_LBOX_TBOX_SIZE
+                            } else {
+                                JPEG_XT_HEADER_SIZE
+                            };
+                            
+                            (data_start + overhead, data_size - overhead)
+                        } else {
+                            (data_start, data_size)
+                        };
+                        
+                        // Extract sequence number (only for JPEG XT format)
+                        let seq_num = if is_jpeg_xt && bytes_to_read >= 8 {
                             u32::from_be_bytes([header[4], header[5], header[6], header[7]])
                         } else {
-                            1
+                            1 // Raw JUMBF always treated as first/only segment
                         };
 
                         // Check if this is a continuation of the previous JUMBF segment
@@ -595,7 +595,7 @@ impl JpegIO {
                                     // Add this range to the existing JUMBF
                                     last_segment
                                         .ranges
-                                        .push(ByteRange::new(data_start, data_size));
+                                        .push(ByteRange::new(jumbf_data_offset, jumbf_data_size));
                                     is_continuation = true;
                                 }
                             }
@@ -604,7 +604,7 @@ impl JpegIO {
                         if !is_continuation {
                             // New JUMBF segment
                             structure.add_segment(Segment::with_ranges(
-                                vec![ByteRange::new(data_start, data_size)],
+                                vec![ByteRange::new(jumbf_data_offset, jumbf_data_size)],
                                 SegmentKind::Jumbf,
                                 Some("app11".to_string()),
                             ));
@@ -820,9 +820,10 @@ impl ContainerIO for JpegIO {
                             write_jumbf_segments(writer, new_jumbf)?;
                         }
                         crate::MetadataUpdate::Keep => {
-                            // Find corresponding source segment and copy it
+                            // Read existing JUMBF data and re-write it
+                            // (This ensures consistent JPEG XT formatting)
                             if let Some(source_seg) = structure.segments.iter().find(|s| s.is_jumbf()) {
-                                // Read the JUMBF data from source
+                                // Read the JUMBF data (without JPEG XT headers)
                                 let total_size: u64 = source_seg.ranges.iter().map(|r| r.size).sum();
                                 let mut jumbf_data = vec![0u8; total_size as usize];
                                 let mut offset = 0;
@@ -833,6 +834,7 @@ impl ContainerIO for JpegIO {
                                     offset += range.size as usize;
                                 }
 
+                                // Re-write with proper JPEG XT formatting
                                 write_jumbf_segments(writer, &jumbf_data)?;
                             }
                         }
@@ -941,8 +943,8 @@ impl ContainerIO for JpegIO {
                     match &updates.jumbf {
                         MetadataUpdate::Keep => {
                             // Keep existing JUMBF - calculate all APP11 segments
-                            let location = segment.location();
-                            let jumbf_data_size = location.size;
+                            // IMPORTANT: Use total size from ALL ranges, not just first one!
+                            let jumbf_data_size: u64 = segment.ranges.iter().map(|r| r.size).sum();
                             
                             // Calculate how many APP11 segments needed
                             let mut remaining = jumbf_data_size;
@@ -1021,7 +1023,7 @@ impl ContainerIO for JpegIO {
                 }
 
                 segment if segment.is_type(SegmentKind::ImageData) => {
-                    // SOS marker + image data
+                    // ImageData - just copy it (new metadata already added earlier)
                     let location = segment.location();
                     let segment_size = location.size;
                     dest_structure.add_segment(Segment::new(
@@ -1034,61 +1036,6 @@ impl ContainerIO for JpegIO {
                 }
 
                 segment if segment.is_type(SegmentKind::Other) && segment.path.as_deref() == Some("EOI") => {
-                    // Check if we need to add XMP/JUMBF before EOI
-                    if !xmp_written && !has_xmp {
-                        if let MetadataUpdate::Set(new_xmp) = &updates.xmp {
-                            let xmp_size = new_xmp.len() as u64;
-                            let segment_size = 2 + 2 + XMP_SIGNATURE.len() as u64 + xmp_size;
-                            dest_structure.add_segment(Segment::new(
-                                current_offset + 4 + XMP_SIGNATURE.len() as u64,
-                                xmp_size,
-                                SegmentKind::Xmp,
-                                Some("APP1/XMP".to_string()),
-                            ));
-                            current_offset += segment_size;
-                            xmp_written = true;
-                        }
-                    }
-
-                    if !jumbf_written && !has_jumbf {
-                        if let MetadataUpdate::Set(new_jumbf) = &updates.jumbf {
-                            // Calculate APP11 segments for new JUMBF
-                            let jumbf_size = new_jumbf.len() as u64;
-                            let mut remaining = jumbf_size;
-                            let mut ranges = Vec::new();
-                            
-                            const JPEG_XT_FIRST_OVERHEAD: usize = 8;
-                            const JPEG_XT_CONT_OVERHEAD: usize = 16;
-                            const MAX_DATA: usize = MAX_MARKER_SIZE - JPEG_XT_CONT_OVERHEAD;
-                            
-                            let mut seg_num = 0;
-                            while remaining > 0 {
-                                let data_in_segment = remaining.min(MAX_DATA as u64);
-                                let overhead = if seg_num == 0 {
-                                    JPEG_XT_FIRST_OVERHEAD
-                                } else {
-                                    JPEG_XT_CONT_OVERHEAD
-                                };
-                                let segment_size = 2 + 2 + overhead as u64 + data_in_segment;
-                                
-                                ranges.push(ByteRange::new(
-                                    current_offset + 4 + overhead as u64,
-                                    data_in_segment,
-                                ));
-                                current_offset += segment_size;
-                                remaining -= data_in_segment;
-                                seg_num += 1;
-                            }
-                            
-                            dest_structure.add_segment_with_ranges(
-                                SegmentKind::Jumbf,
-                                ranges,
-                                Some("APP11/C2PA".to_string()),
-                            );
-                            jumbf_written = true;
-                        }
-                    }
-
                     // EOI marker
                     dest_structure.add_segment(Segment::new(
                         current_offset,
@@ -1100,6 +1047,87 @@ impl ContainerIO for JpegIO {
                 }
 
                 _ => {
+                    // Before copying "Other" segments, check if this is the transition point
+                    // from APP markers to frame markers (DQT/SOF/etc)
+                    // If so, insert new XMP/JUMBF here
+                    let is_frame_marker = segment.path.as_deref().map(|p| {
+                        p.starts_with("DQT") || p.starts_with("SOF") || p.starts_with("DHT") || p.starts_with("DRI")
+                    }).unwrap_or(false);
+                    
+                    if is_frame_marker {
+                        // This is a frame marker - insert any pending new metadata before it
+                        if !xmp_written && !has_xmp {
+                            if let MetadataUpdate::Set(new_xmp) = &updates.xmp {
+                                let xmp_size = new_xmp.len() as u64;
+                                let segment_size = 2 + 2 + XMP_SIGNATURE.len() as u64 + xmp_size;
+                                dest_structure.add_segment(Segment::new(
+                                    current_offset + 4 + XMP_SIGNATURE.len() as u64,
+                                    xmp_size,
+                                    SegmentKind::Xmp,
+                                    Some("APP1/XMP".to_string()),
+                                ));
+                                current_offset += segment_size;
+                                xmp_written = true;
+                            }
+                        }
+
+                        if !jumbf_written && !has_jumbf {
+                            if let MetadataUpdate::Set(new_jumbf) = &updates.jumbf {
+                                // For c2pa-provided data (already in APP11 format), write directly
+                                // Otherwise wrap in JPEG XT format
+                                let is_already_app11 = new_jumbf.len() >= 2 && new_jumbf[0] == 0xFF && new_jumbf[1] == APP11;
+                                
+                                if is_already_app11 {
+                                    // Data already has APP11 markers - treat as opaque blob
+                                    // The write function will handle it correctly
+                                    // For structure calculation, we just need ONE segment encompassing all the data
+                                    dest_structure.add_segment(Segment::new(
+                                        current_offset,
+                                        new_jumbf.len() as u64,
+                                        SegmentKind::Jumbf,
+                                        Some("APP11/C2PA".to_string()),
+                                    ));
+                                    current_offset += new_jumbf.len() as u64;
+                                } else {
+                                    // Raw JUMBF - need to wrap in JPEG XT
+                                    let jumbf_size = new_jumbf.len() as u64;
+                                    let mut remaining = jumbf_size;
+                                    let mut ranges = Vec::new();
+                                    
+                                    const JPEG_XT_FIRST_OVERHEAD: usize = 8;
+                                    const JPEG_XT_CONT_OVERHEAD: usize = 16;
+                                    const MAX_DATA: usize = MAX_MARKER_SIZE - JPEG_XT_FIRST_OVERHEAD - JPEG_XT_CONT_OVERHEAD;
+                                    
+                                    let mut seg_num = 0;
+                                    while remaining > 0 {
+                                        let data_in_segment = remaining.min(MAX_DATA as u64);
+                                        let overhead = if seg_num == 0 {
+                                            JPEG_XT_FIRST_OVERHEAD
+                                        } else {
+                                            JPEG_XT_CONT_OVERHEAD
+                                        };
+                                        let segment_size = 2 + 2 + overhead as u64 + data_in_segment;
+                                        
+                                        ranges.push(ByteRange::new(
+                                            current_offset + 4 + overhead as u64,
+                                            data_in_segment,
+                                        ));
+                                        current_offset += segment_size;
+                                        remaining -= data_in_segment;
+                                        seg_num += 1;
+                                    }
+                                    
+                                    dest_structure.add_segment_with_ranges(
+                                        SegmentKind::Jumbf,
+                                        ranges,
+                                        Some("APP11/C2PA".to_string()),
+                                    );
+                                }
+                                jumbf_written = true;
+                            }
+                        }
+                    }
+                    
                     // Copy other segments as-is
                     let location = segment.location();
                     dest_structure.add_segment(Segment::new(
@@ -1261,6 +1289,42 @@ fn write_xmp_segment<W: Write>(writer: &mut W, xmp: &[u8]) -> Result<()> {
 
 /// Write JUMBF data as one or more APP11 segments
 fn write_jumbf_segments<W: Write>(writer: &mut W, jumbf: &[u8]) -> Result<()> {
+    // Check if the JUMBF data is already in APP11 segment format (complete with FF EB marker)
+    // (This happens when c2pa crate returns complete APP11 segments)
+    let is_complete_app11 = jumbf.len() >= 2 && jumbf[0] == 0xFF && jumbf[1] == APP11;
+    
+    if is_complete_app11 {
+        // Data is already in APP11 format with FF EB marker, write directly
+        writer.write_all(jumbf)?;
+        return Ok(());
+    }
+    
+    // Check if the JUMBF data is already in JPEG XT format (starts with "JP")
+    // (This can happen with some JUMBF sources, but note that when Keeping existing JUMBF,
+    // we now copy the complete APP11 segments directly in the write() function instead of
+    // going through this function, so this path is mainly for completeness)
+    let is_already_jpeg_xt = jumbf.len() >= 2 && &jumbf[0..2] == b"JP";
+    
+    if is_already_jpeg_xt {
+        // Data is in JPEG XT format payload, just needs APP11 marker + length wrapper
+        const MAX_SEGMENT_PAYLOAD: usize = MAX_MARKER_SIZE - 2; // Minus the 2-byte length field
+
+        for chunk in jumbf.chunks(MAX_SEGMENT_PAYLOAD) {
+            writer.write_u8(0xFF)?;
+            writer.write_u8(APP11)?;
+
+            // Length includes the 2-byte length field itself plus the chunk
+            let seg_size = 2 + chunk.len();
+            writer.write_u16::<BigEndian>(seg_size as u16)?;
+            
+            // Write the JPEG XT formatted chunk as-is
+            writer.write_all(chunk)?;
+        }
+        
+        return Ok(());
+    }
+    
+    // Otherwise, wrap raw JUMBF boxes in JPEG XT format
     // JPEG XT header for first segment: JP (2) + En (2) + Z (4) = 8 bytes
     // For continuation segments, we also repeat LBox (4) + TBox (4) = 8 more bytes
     const JPEG_XT_HEADER: usize = 8; // JP + En + Z
