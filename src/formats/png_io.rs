@@ -458,144 +458,118 @@ impl ContainerIO for PngIO {
         writer: &mut W,
         updates: &Updates,
     ) -> Result<()> {
-        // NOTE: This logic must stay in sync with calculate_updated_structure()
-        // TODO: Refactor to share decision logic between write() and calculate_updated_structure()
+        // Calculate the destination structure first - this tells us exactly what to write
+        let dest_structure = self.calculate_updated_structure(structure, updates)?;
+        
         source.seek(SeekFrom::Start(0))?;
 
         // Write PNG signature
         writer.write_all(PNG_SIGNATURE)?;
 
-        let mut xmp_written = false;
-        let mut jumbf_written = false;
-
-        // Track if file has existing metadata
-        let _has_xmp = structure.segments.iter().any(|s| s.is_xmp());
-        let _has_jumbf = structure.segments.iter().any(|s| s.is_jumbf());
-
-        for segment in &structure.segments {
-            match segment {
-                segment if segment.is_type(SegmentKind::Header) => {
-                    // Already wrote signature, skip
+        // Iterate through destination structure and write each segment
+        for dest_segment in &dest_structure.segments {
+            match dest_segment {
+                seg if seg.is_type(SegmentKind::Header) => {
+                    // Already wrote signature
                     continue;
                 }
 
-                segment if segment.is_xmp() => {
-                    use crate::MetadataUpdate;
-
+                seg if seg.is_xmp() => {
+                    // Write XMP based on updates
                     match &updates.xmp {
-                        MetadataUpdate::Keep => {
-                            // Copy existing XMP chunk
-                            // We need to read the XMP data from the file
-                            let location = segment.location();
-                            source.seek(SeekFrom::Start(location.offset))?;
-
-                            let mut xmp_data = vec![0u8; location.size as usize];
-                            source.read_exact(&mut xmp_data)?;
-
-                            Self::write_xmp_chunk(writer, &xmp_data)?;
-                            xmp_written = true;
-                        }
-                        MetadataUpdate::Set(new_xmp) if !xmp_written => {
-                            // Write new XMP
+                        crate::MetadataUpdate::Set(new_xmp) => {
                             Self::write_xmp_chunk(writer, new_xmp)?;
-                            xmp_written = true;
                         }
-                        MetadataUpdate::Remove | MetadataUpdate::Set(_) => {
-                            // Skip this chunk
+                        crate::MetadataUpdate::Keep => {
+                            // Find corresponding source segment and copy it
+                            if let Some(source_seg) = structure.segments.iter().find(|s| s.is_xmp()) {
+                                let location = source_seg.location();
+                                source.seek(SeekFrom::Start(location.offset))?;
+
+                                let mut xmp_data = vec![0u8; location.size as usize];
+                                source.read_exact(&mut xmp_data)?;
+
+                                Self::write_xmp_chunk(writer, &xmp_data)?;
+                            }
+                        }
+                        crate::MetadataUpdate::Remove => {
+                            // Skip - segment not in destination
                         }
                     }
                 }
 
-                segment if segment.is_jumbf() => {
-                    use crate::MetadataUpdate;
-
+                seg if seg.is_jumbf() => {
+                    // Write JUMBF based on updates
                     match &updates.jumbf {
-                        MetadataUpdate::Keep => {
-                            // Copy existing JUMBF chunk
-                            let location = segment.location();
-                            source.seek(SeekFrom::Start(location.offset))?;
-
-                            let mut jumbf_data = vec![0u8; location.size as usize];
-                            source.read_exact(&mut jumbf_data)?;
-
-                            Self::write_chunk(writer, C2PA, &jumbf_data)?;
-                            jumbf_written = true;
-                        }
-                        MetadataUpdate::Set(new_jumbf) if !jumbf_written => {
-                            // Write new JUMBF
+                        crate::MetadataUpdate::Set(new_jumbf) => {
                             Self::write_chunk(writer, C2PA, new_jumbf)?;
-                            jumbf_written = true;
                         }
-                        MetadataUpdate::Remove | MetadataUpdate::Set(_) => {
-                            // Skip this chunk
+                        crate::MetadataUpdate::Keep => {
+                            // Find corresponding source segment and copy it
+                            if let Some(source_seg) = structure.segments.iter().find(|s| s.is_jumbf()) {
+                                let location = source_seg.location();
+                                source.seek(SeekFrom::Start(location.offset))?;
+
+                                let mut jumbf_data = vec![0u8; location.size as usize];
+                                source.read_exact(&mut jumbf_data)?;
+
+                                Self::write_chunk(writer, C2PA, &jumbf_data)?;
+                            }
+                        }
+                        crate::MetadataUpdate::Remove => {
+                            // Skip - segment not in destination
                         }
                     }
                 }
 
-                segment if segment.is_type(SegmentKind::ImageData) => {
-                    // Copy IDAT chunk with header and CRC
-                    // We need to reconstruct the chunk structure
-                    let location = segment.location();
-                    let chunk_start = location.offset - 8; // Back to length field
+                seg if seg.is_type(SegmentKind::ImageData) => {
+                    // Find corresponding source segment and copy IDAT chunk
+                    if let Some(source_seg) = structure.segments.iter().find(|s| s.is_type(SegmentKind::ImageData)) {
+                        let location = source_seg.location();
+                        let chunk_start = location.offset - 8; // Back to length field
 
-                    source.seek(SeekFrom::Start(chunk_start))?;
+                        source.seek(SeekFrom::Start(chunk_start))?;
 
-                    // Copy chunk: length(4) + type(4) + data(size) + crc(4)
-                    let chunk_size = 8 + location.size + 4;
-                    let mut buffer = vec![0u8; chunk_size as usize];
-                    source.read_exact(&mut buffer)?;
-                    writer.write_all(&buffer)?;
-                }
-
-                segment if segment.is_type(SegmentKind::Exif) => {
-                    // Copy EXIF chunk with header and CRC
-                    // Like IDAT, the segment location points to data, not the chunk start
-                    let location = segment.location();
-                    let chunk_start = location.offset - 8; // Back to length field
-
-                    source.seek(SeekFrom::Start(chunk_start))?;
-
-                    // Copy chunk: length(4) + type(4) + data(size) + crc(4)
-                    let chunk_size = 8 + location.size + 4;
-                    let mut buffer = vec![0u8; chunk_size as usize];
-                    source.read_exact(&mut buffer)?;
-                    writer.write_all(&buffer)?;
-                }
-
-                segment => {
-                    // Check if this is IEND - we need to write new metadata before it
-                    if segment.path.as_deref() == Some("IEND") {
-                        // This is IEND - write any pending metadata first
-                        use crate::MetadataUpdate;
-
-                        if !xmp_written {
-                            if let MetadataUpdate::Set(new_xmp) = &updates.xmp {
-                                Self::write_xmp_chunk(writer, new_xmp)?;
-                                xmp_written = true;
-                            }
-                        }
-
-                        if !jumbf_written {
-                            if let MetadataUpdate::Set(new_jumbf) = &updates.jumbf {
-                                Self::write_chunk(writer, C2PA, new_jumbf)?;
-                                jumbf_written = true;
-                            }
-                        }
+                        // Copy chunk: length(4) + type(4) + data(size) + crc(4)
+                        let chunk_size = 8 + location.size + 4;
+                        let mut buffer = vec![0u8; chunk_size as usize];
+                        source.read_exact(&mut buffer)?;
+                        writer.write_all(&buffer)?;
                     }
+                }
 
-                    // Copy other chunks as-is
-                    let location = segment.location();
-                    source.seek(SeekFrom::Start(location.offset))?;
+                seg if seg.is_type(SegmentKind::Exif) => {
+                    // Find corresponding source segment and copy EXIF chunk
+                    if let Some(source_seg) = structure.segments.iter().find(|s| s.is_type(SegmentKind::Exif)) {
+                        let location = source_seg.location();
+                        let chunk_start = location.offset - 8; // Back to length field
 
-                    let mut buffer = vec![0u8; location.size as usize];
-                    source.read_exact(&mut buffer)?;
-                    writer.write_all(&buffer)?;
+                        source.seek(SeekFrom::Start(chunk_start))?;
+
+                        // Copy chunk: length(4) + type(4) + data(size) + crc(4)
+                        let chunk_size = 8 + location.size + 4;
+                        let mut buffer = vec![0u8; chunk_size as usize];
+                        source.read_exact(&mut buffer)?;
+                        writer.write_all(&buffer)?;
+                    }
+                }
+
+                _ => {
+                    // Copy other chunks from source
+                    // Find corresponding source segment by kind and path
+                    if let Some(source_seg) = structure.segments.iter()
+                        .find(|s| s.kind == dest_segment.kind && s.path == dest_segment.path)
+                    {
+                        let location = source_seg.location();
+                        source.seek(SeekFrom::Start(location.offset))?;
+
+                        let mut buffer = vec![0u8; location.size as usize];
+                        source.read_exact(&mut buffer)?;
+                        writer.write_all(&buffer)?;
+                    }
                 }
             }
         }
-
-        // If we didn't write new metadata and it's being added to a file without it,
-        // we should have written it before IEND (handled in the IEND case above)
 
         Ok(())
     }
