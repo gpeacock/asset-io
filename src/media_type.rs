@@ -22,14 +22,28 @@ pub enum MediaType {
     #[cfg(feature = "png")]
     /// PNG image
     Png,
-    // Future media types (commented out until container handlers implemented)
+
     // BMFF container variants (ISO Base Media File Format)
-    // Heic,      // HEIC image (HEVC/H.265 codec)
-    // Heif,      // HEIF image
-    // Avif,      // AVIF image (AV1 codec)
-    // Mp4Video,  // MP4 video
-    // Mp4Audio,  // M4A audio
-    // QuickTime, // QuickTime MOV video
+    #[cfg(feature = "bmff")]
+    /// HEIC image (HEVC/H.265 codec)
+    Heic,
+    #[cfg(feature = "bmff")]
+    /// HEIF image
+    Heif,
+    #[cfg(feature = "bmff")]
+    /// AVIF image (AV1 codec)
+    Avif,
+    #[cfg(feature = "bmff")]
+    /// MP4 video
+    Mp4Video,
+    #[cfg(feature = "bmff")]
+    /// M4A audio
+    Mp4Audio,
+    #[cfg(feature = "bmff")]
+    /// QuickTime MOV video
+    QuickTime,
+
+    // Future media types (commented out until container handlers implemented)
     //
     // RIFF container variants
     // WebP,
@@ -70,6 +84,18 @@ impl MediaType {
             MediaType::Jpeg,
             #[cfg(feature = "png")]
             MediaType::Png,
+            #[cfg(feature = "bmff")]
+            MediaType::Heic,
+            #[cfg(feature = "bmff")]
+            MediaType::Heif,
+            #[cfg(feature = "bmff")]
+            MediaType::Avif,
+            #[cfg(feature = "bmff")]
+            MediaType::Mp4Video,
+            #[cfg(feature = "bmff")]
+            MediaType::Mp4Audio,
+            #[cfg(feature = "bmff")]
+            MediaType::QuickTime,
         ]
     }
 
@@ -92,6 +118,13 @@ impl MediaType {
             MediaType::Jpeg => Container::Jpeg,
             #[cfg(feature = "png")]
             MediaType::Png => Container::Png,
+            #[cfg(feature = "bmff")]
+            MediaType::Heic
+            | MediaType::Heif
+            | MediaType::Avif
+            | MediaType::Mp4Video
+            | MediaType::Mp4Audio
+            | MediaType::QuickTime => Container::Bmff,
         }
     }
 
@@ -114,6 +147,18 @@ impl MediaType {
             MediaType::Jpeg => "image/jpeg",
             #[cfg(feature = "png")]
             MediaType::Png => "image/png",
+            #[cfg(feature = "bmff")]
+            MediaType::Heic => "image/heic",
+            #[cfg(feature = "bmff")]
+            MediaType::Heif => "image/heif",
+            #[cfg(feature = "bmff")]
+            MediaType::Avif => "image/avif",
+            #[cfg(feature = "bmff")]
+            MediaType::Mp4Video => "video/mp4",
+            #[cfg(feature = "bmff")]
+            MediaType::Mp4Audio => "audio/mp4",
+            #[cfg(feature = "bmff")]
+            MediaType::QuickTime => "video/quicktime",
         }
     }
 
@@ -136,6 +181,18 @@ impl MediaType {
             MediaType::Jpeg => "jpg",
             #[cfg(feature = "png")]
             MediaType::Png => "png",
+            #[cfg(feature = "bmff")]
+            MediaType::Heic => "heic",
+            #[cfg(feature = "bmff")]
+            MediaType::Heif => "heif",
+            #[cfg(feature = "bmff")]
+            MediaType::Avif => "avif",
+            #[cfg(feature = "bmff")]
+            MediaType::Mp4Video => "mp4",
+            #[cfg(feature = "bmff")]
+            MediaType::Mp4Audio => "m4a",
+            #[cfg(feature = "bmff")]
+            MediaType::QuickTime => "mov",
         }
     }
 }

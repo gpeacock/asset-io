@@ -117,6 +117,9 @@ pub(crate) mod jpeg_io;
 #[cfg(feature = "png")]
 pub(crate) mod png_io;
 
+#[cfg(feature = "bmff")]
+pub(crate) mod bmff_io;
+
 // ============================================================================
 // Container Registration Macro
 // ============================================================================
@@ -372,4 +375,7 @@ register_containers! {
 
     #[cfg(feature = "png")]
     Png => png_io::PngIO,
+
+    #[cfg(feature = "bmff")]
+    Bmff => bmff_io::BmffIO,
 }

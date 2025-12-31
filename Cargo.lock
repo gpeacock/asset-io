@@ -97,6 +97,7 @@ dependencies = [
 name = "asset-io"
 version = "0.1.0"
 dependencies = [
+ "atree",
  "byteorder",
  "c2pa",
  "fs2",

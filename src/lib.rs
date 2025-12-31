@@ -288,3 +288,5 @@ pub use formats::{detect_from_extension, detect_from_mime, Container};
 pub use formats::jpeg_io::JpegIO;
 #[cfg(feature = "png")]
 pub use formats::png_io::PngIO;
+#[cfg(feature = "bmff")]
+pub use formats::bmff_io::BmffIO;

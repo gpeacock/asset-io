@@ -137,7 +137,7 @@ impl SegmentMetadata {
 }
 
 /// Lazy-loaded data - only reads when accessed
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum LazyData {
     /// Data not yet loaded
     NotLoaded,
@@ -257,7 +257,7 @@ impl LazyData {
 ///     Some("app1/extended".to_string())
 /// );
 /// ```
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Segment {
     /// One or more byte ranges in the physical file
     ///
