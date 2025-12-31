@@ -252,6 +252,7 @@ pub(crate) fn write_c2pa_box<W: Write>(
     merkle_data: &[u8],
     merkle_offset: u64,
 ) -> Result<()> {
+    #[allow(dead_code)]
     const MANIFEST: &str = "manifest";
     const MERKLE: &str = "merkle";
     
@@ -506,6 +507,7 @@ pub(crate) fn build_bmff_tree<R: Read + Seek + ?Sized>(
 }
 
 /// Get UUID box by UUID and optional purpose
+#[allow(dead_code)]
 fn get_uuid_token(
     bmff_tree: &Arena<BoxInfo>,
     bmff_map: &HashMap<String, Vec<Token>>,
@@ -796,7 +798,7 @@ impl ContainerIO for BmffIO {
 
     fn write<R: Read + Seek, W: Write>(
         &self,
-        structure: &Structure,
+        _structure: &Structure,
         source: &mut R,
         writer: &mut W,
         updates: &Updates,
@@ -1038,7 +1040,6 @@ impl ContainerIO for BmffIO {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Cursor;
 
     #[test]
     fn test_bmff_detect() {
