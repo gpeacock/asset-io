@@ -1259,31 +1259,6 @@ fn write_xmp_segment<W: Write>(writer: &mut W, xmp: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// Helper to copy a segment (ImageData or Other)
-fn copy_other_segment<R: Read + Seek, W: Write>(
-    segment: &Segment,
-    source: &mut R,
-    writer: &mut W,
-    current_read_pos: &mut u64,
-) -> Result<()> {
-    // Get primary location for this segment
-    let location = segment.primary_location();
-    let offset = location.offset;
-    let size = location.size;
-
-    // Optimized seek
-    if *current_read_pos != offset {
-        source.seek(SeekFrom::Start(offset))?;
-        *current_read_pos = offset;
-    }
-
-    let mut limited = source.take(size);
-    copy(&mut limited, writer)?;
-    *current_read_pos += size;
-
-    Ok(())
-}
-
 /// Write JUMBF data as one or more APP11 segments
 fn write_jumbf_segments<W: Write>(writer: &mut W, jumbf: &[u8]) -> Result<()> {
     // JPEG XT header for first segment: JP (2) + En (2) + Z (4) = 8 bytes
