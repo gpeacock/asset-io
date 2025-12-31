@@ -2,3 +2,8 @@
 
 # Extended test fixtures (not committed to repo)
 /tests/fixtures-extended/
+
+# Large test files for mmap benchmarking (generate locally, don't commit)
+tests/fixtures/huge_test.png
+tests/fixtures/large_test.png
+tests/fixtures/massive_test.png
