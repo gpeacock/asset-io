@@ -68,6 +68,10 @@ required-features = ["memory-mapped"]
 name = "hash_benchmark"
 required-features = ["xmp", "memory-mapped", "hashing"]
 
+[[example]]
+name = "mmap_comparison"
+required-features = ["xmp", "memory-mapped", "hashing"]
+
 [profile.release]
 opt-level = 3
 lto = true
