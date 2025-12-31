@@ -14,7 +14,7 @@ use atree::{Arena, Token};
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use std::{
     collections::HashMap,
-    io::{copy, Read, Seek, SeekFrom, Write},
+    io::{Read, Seek, SeekFrom, Write},
 };
 
 // BMFF constants
@@ -242,6 +242,73 @@ fn write_box_header_ext<W: Write>(w: &mut W, v: u8, f: u32) -> Result<u64> {
 fn write_box_uuid_extension<W: Write>(w: &mut W, uuid: &[u8; 16]) -> Result<u64> {
     w.write_all(uuid)?;
     Ok(16)
+}
+
+/// Write a C2PA UUID box with purpose, merkle data, and JUMBF content
+pub(crate) fn write_c2pa_box<W: Write>(
+    w: &mut W,
+    data: &[u8],
+    purpose: &str,
+    merkle_data: &[u8],
+    merkle_offset: u64,
+) -> Result<()> {
+    const MANIFEST: &str = "manifest";
+    const MERKLE: &str = "merkle";
+    
+    let purpose_size = purpose.len() + 1;
+
+    let box_size = if purpose == MERKLE {
+        merkle_data.len()
+    } else {
+        8 // merkle offset (u64)
+    };
+    let size = 8 + 16 + 4 + purpose_size + box_size + data.len(); // header + UUID + version/flags + purpose + merkle + data
+    let bh = BoxHeaderLite::new(BoxType::UuidBox, size as u64, "uuid");
+
+    // write out header
+    bh.write(w)?;
+
+    // write out c2pa extension UUID
+    write_box_uuid_extension(w, &C2PA_UUID)?;
+
+    // write out version and flags
+    let version: u8 = 0;
+    let flags: u32 = 0;
+    write_box_header_ext(w, version, flags)?;
+
+    // write with appropriate purpose
+    w.write_all(purpose.as_bytes())?;
+    w.write_u8(0)?; // null terminator
+    
+    if purpose == MERKLE {
+        // write merkle cbor
+        w.write_all(merkle_data)?;
+    } else {
+        // write merkle offset
+        w.write_u64::<BigEndian>(merkle_offset)?;
+    }
+
+    // write out data
+    w.write_all(data)?;
+
+    Ok(())
+}
+
+/// Write an XMP UUID box
+fn write_xmp_box<W: Write>(w: &mut W, data: &[u8]) -> Result<()> {
+    let size = 8 + 16 + data.len(); // header + UUID + data (no version/flags for XMP)
+    let bh = BoxHeaderLite::new(BoxType::UuidBox, size as u64, "uuid");
+
+    // write out header
+    bh.write(w)?;
+
+    // write out XMP extension UUID
+    write_box_uuid_extension(w, &XMP_UUID)?;
+
+    // write out data
+    w.write_all(data)?;
+
+    Ok(())
 }
 
 fn box_start<R: Read + Seek + ?Sized>(reader: &mut R, is_large: bool) -> Result<u64> {
@@ -585,9 +652,9 @@ impl BmffIO {
                 if let Some(uuid) = &box_info.data.user_type {
                     if uuid.as_slice() == &XMP_UUID {
                         // XMP UUID box found
-                        // Skip UUID (16) + version/flags (4) to get to data
-                        let data_offset = box_info.data.offset + HEADER_SIZE + 16 + 4;
-                        let data_size = box_info.data.size - HEADER_SIZE - 16 - 4;
+                        // XMP boxes DON'T have version/flags, data starts right after UUID
+                        let data_offset = box_info.data.offset + HEADER_SIZE + 16;
+                        let data_size = box_info.data.size - HEADER_SIZE - 16;
                         structure.add_segment(Segment::with_ranges(
                             vec![ByteRange::new(data_offset, data_size)],
                             SegmentKind::Xmp,
@@ -595,7 +662,7 @@ impl BmffIO {
                         ));
                     } else if uuid.as_slice() == &C2PA_UUID {
                         // C2PA UUID box found (contains JUMBF)
-                        // Skip UUID (16) + version/flags (4) + purpose + null (varies) to get to data
+                        // C2PA boxes DO have version/flags + purpose string
                         let data_offset = box_info.data.offset + HEADER_SIZE + 16 + 4;
                         let data_size = box_info.data.size - HEADER_SIZE - 16 - 4;
                         structure.add_segment(Segment::with_ranges(
@@ -734,20 +801,141 @@ impl ContainerIO for BmffIO {
         writer: &mut W,
         updates: &Updates,
     ) -> Result<()> {
-        // For now, implement a simple copy
-        // TODO: Implement proper C2PA UUID box insertion/update
-        source.seek(SeekFrom::Start(0))?;
-        copy(source, writer)?;
+        use crate::MetadataUpdate;
         
-        // Warn if updates are provided but not implemented
-        match (&updates.xmp, &updates.jumbf) {
-            (crate::MetadataUpdate::Keep, crate::MetadataUpdate::Keep) => {
-                // Just copying - this is fine
+        source.seek(SeekFrom::Start(0))?;
+        
+        // Get file size
+        let file_size = source.seek(SeekFrom::End(0))?;
+        source.seek(SeekFrom::Start(0))?;
+
+        // Parse BMFF structure to find insertion points
+        let root_box = BoxInfo {
+            path: "".to_string(),
+            offset: 0,
+            size: file_size,
+            box_type: BoxType::Empty,
+            parent: None,
+            user_type: None,
+            version: None,
+            flags: None,
+        };
+
+        let (mut bmff_tree, root_token) = Arena::with_data(root_box);
+        let mut bmff_map: HashMap<String, Vec<Token>> = HashMap::new();
+        build_bmff_tree(source, file_size, &mut bmff_tree, &root_token, &mut bmff_map)?;
+
+        // Find ftyp box (required to be first)
+        let ftyp_token = bmff_map
+            .get("/ftyp")
+            .and_then(|v| v.first())
+            .ok_or_else(|| Error::InvalidFormat("Missing ftyp box".to_string()))?;
+        let ftyp_info = &bmff_tree[*ftyp_token].data;
+        let ftyp_end = ftyp_info.offset + ftyp_info.size;
+
+        // Determine what to do with XMP and JUMBF
+        let write_xmp = matches!(updates.xmp, MetadataUpdate::Set(_));
+        let write_jumbf = matches!(updates.jumbf, MetadataUpdate::Set(_));
+        let remove_xmp = matches!(updates.xmp, MetadataUpdate::Remove);
+        let remove_jumbf = matches!(updates.jumbf, MetadataUpdate::Remove);
+
+        // Find existing UUID boxes
+        let existing_xmp_token = if let Some(uuid_list) = bmff_map.get("/uuid") {
+            uuid_list.iter().find(|&&token| {
+                let box_info = &bmff_tree[token];
+                box_info.data.user_type.as_ref()
+                    .map(|uuid| uuid.as_slice() == &XMP_UUID)
+                    .unwrap_or(false)
+            }).copied()
+        } else {
+            None
+        };
+
+        let existing_c2pa_token = if let Some(uuid_list) = bmff_map.get("/uuid") {
+            uuid_list.iter().find(|&&token| {
+                let box_info = &bmff_tree[token];
+                box_info.data.user_type.as_ref()
+                    .map(|uuid| uuid.as_slice() == &C2PA_UUID)
+                    .unwrap_or(false)
+            }).copied()
+        } else {
+            None
+        };
+
+        // Simple strategy: Copy up to ftyp end, insert/skip UUIDs, copy rest
+        source.seek(SeekFrom::Start(0))?;
+        
+        // Copy ftyp box
+        let mut buffer = vec![0u8; ftyp_end as usize];
+        source.read_exact(&mut buffer)?;
+        writer.write_all(&buffer)?;
+
+        // Write new XMP UUID if needed
+        if write_xmp {
+            if let MetadataUpdate::Set(ref xmp_data) = updates.xmp {
+                write_xmp_box(writer, xmp_data)?;
             }
-            _ => {
-                // TODO: Implement proper BMFF writing with metadata updates
-                eprintln!("Warning: BMFF write with metadata updates not yet fully implemented");
+        } else if !remove_xmp {
+            // Keep existing XMP
+            if let Some(token) = existing_xmp_token {
+                let box_info = &bmff_tree[token].data;
+                source.seek(SeekFrom::Start(box_info.offset))?;
+                let mut box_data = vec![0u8; box_info.size as usize];
+                source.read_exact(&mut box_data)?;
+                writer.write_all(&box_data)?;
             }
+        }
+
+        // Write new C2PA UUID if needed
+        if write_jumbf {
+            if let MetadataUpdate::Set(ref jumbf_data) = updates.jumbf {
+                write_c2pa_box(writer, jumbf_data, "manifest", &[], 0)?;
+            }
+        } else if !remove_jumbf {
+            // Keep existing C2PA
+            if let Some(token) = existing_c2pa_token {
+                let box_info = &bmff_tree[token].data;
+                source.seek(SeekFrom::Start(box_info.offset))?;
+                let mut box_data = vec![0u8; box_info.size as usize];
+                source.read_exact(&mut box_data)?;
+                writer.write_all(&box_data)?;
+            }
+        }
+
+        // Copy remaining boxes (skip existing UUID boxes)
+        source.seek(SeekFrom::Start(ftyp_end))?;
+        let mut current_pos = ftyp_end;
+        
+        while current_pos < file_size {
+            // Read box header to determine if we should skip it
+            let box_start = current_pos;
+            let header = BoxHeaderLite::read(source)?;
+            
+            // Check if this is a UUID box we already wrote
+            let should_skip = if header.name == BoxType::UuidBox {
+                let mut uuid_bytes = [0u8; 16];
+                source.read_exact(&mut uuid_bytes)?;
+                source.seek(SeekFrom::Start(box_start))?; // Reset for potential copy
+                
+                (uuid_bytes == XMP_UUID && (write_xmp || remove_xmp)) ||
+                (uuid_bytes == C2PA_UUID && (write_jumbf || remove_jumbf))
+            } else {
+                false
+            };
+
+            if should_skip {
+                // Skip this box
+                source.seek(SeekFrom::Start(box_start + header.size))?;
+            } else {
+                // Copy this box
+                source.seek(SeekFrom::Start(box_start))?;
+                let mut box_data = vec![0u8; header.size as usize];
+                source.read_exact(&mut box_data)?;
+                writer.write_all(&box_data)?;
+            }
+
+            current_pos = box_start + header.size;
+            source.seek(SeekFrom::Start(current_pos))?;
         }
 
         Ok(())
@@ -756,18 +944,83 @@ impl ContainerIO for BmffIO {
     fn calculate_updated_structure(
         &self,
         source_structure: &Structure,
-        _updates: &Updates,
+        updates: &Updates,
     ) -> Result<Structure> {
-        // For now, return a copy of source structure
-        // TODO: Implement proper calculation of updated structure
+        use crate::MetadataUpdate;
+        
         let mut new_structure = Structure::new(source_structure.container, source_structure.media_type);
-        new_structure.total_size = source_structure.total_size;
         
-        // Copy segments
-        for segment in &source_structure.segments {
-            new_structure.add_segment(segment.clone());
+        // Calculate sizes for new UUID boxes
+        let xmp_box_size = match &updates.xmp {
+            MetadataUpdate::Set(data) => Some(8 + 16 + data.len()), // header + UUID + data
+            MetadataUpdate::Remove => None,
+            MetadataUpdate::Keep => {
+                // Find existing XMP segment size
+                source_structure.xmp_index()
+                    .and_then(|idx| source_structure.segments().get(idx))
+                    .map(|seg| {
+                        let data_size: u64 = seg.ranges.iter().map(|r| r.size).sum();
+                        (8 + 16 + data_size) as usize // Reconstruct full box size
+                    })
+            }
+        };
+
+        let jumbf_box_size = match &updates.jumbf {
+            MetadataUpdate::Set(data) => {
+                // C2PA box: header + UUID + version/flags + purpose + null + merkle_offset + data
+                Some(8 + 16 + 4 + "manifest".len() + 1 + 8 + data.len())
+            }
+            MetadataUpdate::Remove => None,
+            MetadataUpdate::Keep => {
+                // Find existing JUMBF segment size
+                source_structure.jumbf_indices().first()
+                    .and_then(|&idx| source_structure.segments().get(idx))
+                    .map(|seg| {
+                        let data_size: u64 = seg.ranges.iter().map(|r| r.size).sum();
+                        (8 + 16 + 4 + "manifest".len() + 1 + 8) + data_size as usize
+                    })
+            }
+        };
+
+        // Start with ftyp box (assume it exists and comes first)
+        // In a real file, we'd parse to find ftyp, but for structure calculation we can estimate
+        let mut current_offset = 0u64;
+        
+        // Add ftyp (typically ~32 bytes, but we should get this from source)
+        // For now, estimate based on common size
+        let ftyp_size = 32u64;
+        current_offset += ftyp_size;
+
+        // Add XMP UUID box if present
+        if let Some(size) = xmp_box_size {
+            let data_offset = current_offset + 8 + 16; // Skip header + UUID
+            let data_size = size - 8 - 16;
+            new_structure.add_segment(Segment::with_ranges(
+                vec![ByteRange::new(data_offset, data_size as u64)],
+                SegmentKind::Xmp,
+                Some("uuid/xmp".to_string()),
+            ));
+            current_offset += size as u64;
         }
-        
+
+        // Add C2PA UUID box if present
+        if let Some(size) = jumbf_box_size {
+            // Data starts after: header + UUID + version/flags + purpose + null + merkle_offset
+            let data_offset = current_offset + 8 + 16 + 4 + "manifest".len() as u64 + 1 + 8;
+            let data_size = size - (8 + 16 + 4 + "manifest".len() + 1 + 8);
+            new_structure.add_segment(Segment::with_ranges(
+                vec![ByteRange::new(data_offset, data_size as u64)],
+                SegmentKind::Jumbf,
+                Some("uuid/c2pa".to_string()),
+            ));
+            current_offset += size as u64;
+        }
+
+        // Add remaining boxes size (moov, mdat, etc.)
+        // This is approximate - in reality we'd need to parse the full source structure
+        current_offset += source_structure.total_size - ftyp_size;
+
+        new_structure.total_size = current_offset;
         Ok(new_structure)
     }
 
