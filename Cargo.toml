@@ -22,10 +22,7 @@ fs2 = { version = "0.4", optional = true }
 
 [dev-dependencies]
 c2pa = "0.72"
-criterion = "0.5"
-tempfile = "3.8"
 sha2 = "0.10"  # For examples only
-hex = "0.4"  # For examples only
 
 [features]
 default = ["jpeg", "test-utils"]
