@@ -1,27 +1,17 @@
 //! C2PA data hash example using asset-io
 //!
-//! This example demonstrates how to create a C2PA manifest using data hashing
-//! with a single output file - no intermediate files required!
+//! Demonstrates creating a C2PA manifest using data hashing with a single output file.
 //!
 //! ## Workflow
 //!
-//! 1. Open source asset with asset-io
+//! 1. Open source asset
 //! 2. Create C2PA builder with actions/assertions
 //! 3. Generate placeholder manifest (reserves space)
-//! 4. Write output with placeholder manifest
-//! 5. Open output with memory mapping (zero-copy)
-//! 6. Hash output from mmap (zero-copy, excluding manifest)
-//! 7. Sign final manifest with hash
-//! 8. Overwrite output with final signed manifest
-//! 9. Verify output with C2PA reader
-//!
-//! ## Zero-Copy Optimization
-//!
-//! The hashing step uses memory-mapped I/O via `Asset::open()`, which internally
-//! uses `memmap2` for efficient zero-copy reads. The `hash_stream_by_alg()`
-//! function reads directly from the mmap without creating intermediate buffers.
-//!
-//! Based on the c2pa-rs data_hash.rs example, adapted for asset-io integration.
+//! 4. Write output with placeholder
+//! 5. Hash output (zero-copy mmap, excluding manifest)
+//! 6. Sign final manifest with hash
+//! 7. Overwrite manifest bytes in-place
+//! 8. Verify output
 //!
 //! Run: `cargo run --example c2pa --features xmp,png tests/fixtures/sample1.png`
 
@@ -84,145 +74,51 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if args.len() < 2 {
         eprintln!("Usage: {} <image_file>", args[0]);
-        eprintln!("\nCreates a C2PA manifest using data hashing with asset-io");
         return Ok(());
     }
 
     let source_path = &args[1];
-    println!("=== C2PA Data Hash Example with asset-io ===\n");
-    println!("Source: {}", source_path);
 
-    // Load settings from test fixture
-    println!("\n=== Loading C2PA Settings ===");
+    // Load settings and signer
     let settings_str = std::fs::read_to_string("tests/fixtures/test_settings.json")?;
     Settings::from_string(&settings_str, "json")?;
     let signer = Settings::signer()?;
 
-    println!("✓ Loaded signer from settings");
-
-    // === Step 1: Open source asset with asset-io ===
-    println!("\n=== Step 1: Open Source Asset ===");
+    // Open source asset
     let mut asset = Asset::open(source_path)?;
-
     let mime_type = asset.media_type().to_mime();
-    println!("Container: {:?}", asset.container());
-    println!("Media type: {}", mime_type);
-    println!(
-        "Structure: {} segments, {} bytes",
-        asset.structure().segments.len(),
-        asset.structure().total_size
-    );
-
-    // Check if source already has C2PA data
-    if let Some(jumbf_idx) = asset.structure().c2pa_jumbf_index() {
-        println!("⚠ Source already has C2PA JUMBF at segment {}", jumbf_idx);
-        println!(
-            "  Offset: {}, Size: {}",
-            asset.structure().segments[jumbf_idx].ranges[0].offset,
-            asset.structure().segments[jumbf_idx].ranges[0].size
-        );
-    }
-
-    // === Step 2: Create C2PA Builder ===
-    println!("\n=== Step 2: Create C2PA Builder ===");
-
-    // Create ingredient from source
-    // let title = std::path::Path::new(source_path)
-    //     .file_name()
-    //     .and_then(|n| n.to_str())
-    //     .unwrap_or("source");
-    // let mut parent = Ingredient::new_v2(title, mime_type);
-    // parent.set_relationship(Relationship::ParentOf);
-
-    let mut builder = Builder::default();
-    let mut claim_generator = ClaimGeneratorInfo::new("asset-io-example".to_string());
-    claim_generator.set_version("0.1");
-
-    builder
-        .set_claim_generator_info(claim_generator)
-        .add_action(Action::new(c2pa_action::CREATED).set_source_type(DigitalSourceType::Empty))?;
-    // .add_action(Action::new(c2pa_action::OPENED).set_parameter("ingredients", [parent.instance_id()].to_vec())?)?
-    // .add_ingredient(parent);
-
-    println!("✓ Builder created with ingredient and c2pa.opened action");
-
-    // === Step 3: Create placeholder manifest ===
-    println!("\n=== Step 3: Create Placeholder Manifest ===");
-    let placeholder_manifest =
-        builder.data_hashed_placeholder(signer.reserve_size(), "application/c2pa")?;
-
-    println!("Placeholder size: {} bytes", placeholder_manifest.len());
-
-    // === Step 4: Write output with placeholder ===
-    println!("\n=== Step 4: Write Output with Placeholder ===");
-
-    // Determine output path
     let extension = asset.media_type().to_extension();
     let output_path = format!("target/output_c2pa.{}", extension);
 
-    // Write directly to output with placeholder manifest
+    // Create C2PA builder
+    let mut builder = Builder::default();
+    let mut claim_generator = ClaimGeneratorInfo::new("asset-io-example".to_string());
+    claim_generator.set_version("0.1");
+    builder
+        .set_claim_generator_info(claim_generator)
+        .add_action(Action::new(c2pa_action::CREATED).set_source_type(DigitalSourceType::Empty))?;
+
+    // Create placeholder manifest and write output
+    let placeholder_manifest =
+        builder.data_hashed_placeholder(signer.reserve_size(), "application/c2pa")?;
     let updates = Updates::new().set_jumbf(placeholder_manifest.clone());
     asset.write_to(&output_path, &updates)?;
-    
-    let output_size = std::fs::metadata(&output_path)?.len();
-    println!(
-        "✓ Wrote output with placeholder ({} bytes)",
-        output_size
-    );
 
-    // === Step 5: Open output with memory mapping for zero-copy hashing ===
-    println!("\n=== Step 5: Open Output for Hashing ===");
-
-    // Open with memory mapping for efficient zero-copy hashing
+    // Open output for hashing
     let mut output_asset = Asset::open(&output_path)?;
-    println!("✓ Opened output asset (uses mmap for zero-copy reads)");
-    
-    // Get the ACTUAL manifest location from the parsed structure
     let manifest_segment_idx = output_asset
         .structure()
         .c2pa_jumbf_index()
         .ok_or("No C2PA JUMBF segment found in output structure")?;
-    let manifest_segment = &output_asset.structure().segments[manifest_segment_idx];
+    let manifest_ranges = output_asset.structure().segments[manifest_segment_idx].ranges.clone();
 
-    println!("  C2PA segment at index {}", manifest_segment_idx);
-    println!("  Manifest has {} range(s):", manifest_segment.ranges.len());
-    for (i, range) in manifest_segment.ranges.iter().enumerate() {
-        println!(
-            "    Range {}: offset={}, size={}",
-            i, range.offset, range.size
-        );
-    }
-
-    // Calculate total exclusion size from actual structure
-    let manifest_offset = manifest_segment.ranges[0].offset;
-    let total_size: u64 = manifest_segment.ranges.iter().map(|r| r.size).sum();
-    
-    // Clone the ranges for later use
-    let manifest_ranges = manifest_segment.ranges.clone();
-
-    println!(
-        "  Total exclusion: {} bytes starting at offset {}",
-        total_size, manifest_offset
-    );
-
-    // === Step 6: Hash the output (excluding manifest) ===
-    println!("\n=== Step 6: Hash Output (zero-copy from mmap) ===");
-
+    // Hash output (excluding manifest)
     let dh = generate_data_hash_for_asset(&mut output_asset, "sha256")?;
 
-    println!("✓ Generated hash (excluding manifest)");
-    println!("  Hash: {}", hex::encode(&dh.hash));
-
-    // === Step 7: Sign and create final manifest ===
-    println!("\n=== Step 7: Sign and Create Final Manifest ===");
+    // Sign and create final manifest
     let mut final_manifest = builder.sign_data_hashed_embeddable(&signer, &dh, "application/c2pa")?;
 
-    println!(
-        "✓ Created final signed manifest ({} bytes)",
-        final_manifest.len()
-    );
-
-    // Validate final manifest fits in placeholder space
+    // Validate and pad final manifest
     if final_manifest.len() > placeholder_manifest.len() {
         return Err(format!(
             "Final manifest ({} bytes) is larger than placeholder ({} bytes)",
@@ -231,103 +127,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .into());
     }
-    
-    // Pad final manifest to match placeholder size (required for in-place overwrite)
     if final_manifest.len() < placeholder_manifest.len() {
-        let padding_needed = placeholder_manifest.len() - final_manifest.len();
-        println!("  Padding manifest with {} zero bytes to match placeholder size", padding_needed);
         final_manifest.resize(placeholder_manifest.len(), 0);
     }
-    
-    println!(
-        "  Final size: {} bytes (matches placeholder)",
-        final_manifest.len()
-    );
 
-    // === Step 8: Overwrite JUST the manifest bytes ===
-    println!("\n=== Step 8: Overwrite Manifest Bytes (In-Place) ===");
-
-    // Open file for read+write to overwrite just the manifest
+    // Overwrite manifest bytes in-place
     let mut output_file = OpenOptions::new()
         .read(true)
         .write(true)
         .open(&output_path)?;
 
-    // For JPEG: the manifest segment ranges point to the JUMBF data within APP11 segments
-    // We need to write the final manifest data across these ranges
     let mut bytes_written = 0usize;
-    for (i, range) in manifest_ranges.iter().enumerate() {
-        // Seek to this range's offset in the file
+    for range in manifest_ranges.iter() {
         output_file.seek(SeekFrom::Start(range.offset))?;
-        
-        // Calculate how much data to write in this range
         let remaining = final_manifest.len() - bytes_written;
         let to_write = remaining.min(range.size as usize);
-        
-        // Write this chunk of the manifest
         output_file.write_all(&final_manifest[bytes_written..bytes_written + to_write])?;
-        
-        println!("  Wrote range {}: {} bytes at offset {}", i, to_write, range.offset);
         bytes_written += to_write;
-        
         if bytes_written >= final_manifest.len() {
             break;
         }
     }
-    
     output_file.flush()?;
 
-    println!("✓ Overwrote {} bytes of manifest data (without rewriting entire file)", bytes_written);
-
-
-    // === Step 9: Verify the output ===
-    println!("\n=== Step 9: Verify Output ===");
-
-    // First, verify with asset-io that the JUMBF was written
-    let verify_asset = Asset::open(&output_path)?;
-    if let Some(jumbf_idx) = verify_asset.structure().c2pa_jumbf_index() {
-        println!("✓ asset-io found JUMBF in output at segment {}", jumbf_idx);
-        println!(
-            "  Offset: {}, Size: {}",
-            verify_asset.structure().segments[jumbf_idx].ranges[0].offset,
-            verify_asset.structure().segments[jumbf_idx].ranges[0].size
-        );
-    } else {
-        println!("✗ asset-io did NOT find JUMBF in output!");
-    }
-
-    // Then try to read with c2pa Reader
+    // Verify output
+    let _verify_asset = Asset::open(&output_path)?;
     let mut verify_file = File::open(&output_path)?;
-
-    match Reader::from_stream(mime_type, &mut verify_file) {
-        Ok(reader) => {
-            println!("✓ c2pa Reader successfully read C2PA data from output!");
-            println!("  Manifests found: {}", reader.manifests().len());
-            if let Some(manifest) = reader.active_manifest() {
-                println!("\nActive Manifest:");
-                println!("  Title: {:?}", manifest.title());
-                println!("  Format: {:?}", manifest.format());
-                println!("  Instance ID: {}", manifest.instance_id());
-                println!("  Assertions: {}", manifest.assertions().len());
-            }
-        }
-        Err(e) => {
-            println!("⚠ c2pa Reader could not read C2PA data: {}", e);
-            println!("  The JUMBF structure may be incorrect for c2pa validation.");
-        }
-    }
-
-    println!("\n=== Success! ===");
-    println!("\nWorkflow Summary:");
-    println!("1. ✓ Opened source with asset-io");
-    println!("2. ✓ Created C2PA builder with assertions");
-    println!("3. ✓ Generated placeholder manifest");
-    println!("4. ✓ Wrote output with placeholder");
-    println!("5. ✓ Parsed output to get actual structure");
-    println!("6. ✓ Hashed output excluding manifest");
-    println!("7. ✓ Signed final manifest with hash");
-    println!("8. ✓ Overwrote manifest in output");
-    println!("9. ✓ Verified C2PA manifest in output");
+    let _reader = Reader::from_stream(mime_type, &mut verify_file)?;
 
     Ok(())
 }
