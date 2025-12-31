@@ -50,7 +50,7 @@ test-utils = []
 
 [[example]]
 name = "c2pa"
-required-features = ["xmp", "memory-mapped", "hashing"]
+required-features = ["xmp", "hashing"]
 
 [[example]]
 name = "inspect"
