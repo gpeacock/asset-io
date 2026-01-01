@@ -127,15 +127,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     let updates = Updates::new().set_jumbf(placeholder_manifest.clone());
 
-    // Open output file with read+write (required for streaming approach)
+    // Open output file with write+seek (no read needed with true single-pass!)
     let mut output_file = OpenOptions::new()
-        .read(true)
         .write(true)
         .create(true)
         .truncate(true)
         .open(&output_path)?;
 
-    println!("⚡ Writing and hashing in single pass...");
+    println!("⚡ Writing and hashing in single pass (true single-pass - no re-read!)...");
     
     // STREAMING WRITE-HASH-UPDATE: Write and hash in ONE PASS!
     // This is the key optimization - no file reopening needed

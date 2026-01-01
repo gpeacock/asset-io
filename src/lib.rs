@@ -77,6 +77,7 @@ pub mod thumbnail;
 mod tiff;
 #[cfg(feature = "xmp")]
 pub mod xmp;
+pub mod processing_writer;
 
 pub use asset::{Asset, AssetBuilder, VirtualAsset};
 pub use error::{Error, Result};

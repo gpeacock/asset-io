@@ -35,9 +35,8 @@ fn main() -> asset_io::Result<()> {
     // Step 3: Prepare updates
     let updates = Updates::new().set_jumbf(placeholder);
 
-    // Step 4: Open output file with read+write (needed for re-reading during hash)
+    // Step 4: Open output file with write+seek (no read needed with true single-pass!)
     let mut output = OpenOptions::new()
-        .read(true)
         .write(true)
         .create(true)
         .truncate(true)

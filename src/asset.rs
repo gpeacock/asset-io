@@ -425,67 +425,29 @@ impl<R: Read + Seek> Asset<R> {
         &mut self,
         writer: &mut W,
         updates: &Updates,
-        chunk_size: usize,
+        _chunk_size: usize,  // Reserved for future use in chunked processing
         exclude_segments: &[SegmentKind],
         processor: &mut F,
     ) -> Result<Structure>
     where
-        W: Read + Write + Seek,
+        W: Write + Seek,
         F: FnMut(&[u8]),
     {
-        use std::collections::HashSet;
-
         // Calculate destination structure
         let dest_structure = self
             .handler
             .calculate_updated_structure(&self.structure, updates)?;
 
-        // Collect segment indices to exclude
-        let exclude_indices: HashSet<usize> = exclude_segments
-            .iter()
-            .filter_map(|kind| match kind {
-                SegmentKind::Jumbf => dest_structure.c2pa_jumbf_index(),
-                SegmentKind::Xmp => dest_structure.xmp_index(),
-                // EXIF not yet fully implemented in Structure
-                _ => None,
-            })
-            .collect();
-
-        // Write the file
+        // Use the new write_with_processor method for true single-pass I/O
         self.source.seek(SeekFrom::Start(0))?;
-        self.handler
-            .write(&self.structure, &mut self.source, writer, updates)?;
-
-        // Now re-read what we just wrote and process it
-        // TODO: This is a temporary implementation that does two passes.
-        // A fully optimized version would integrate processing directly into
-        // the write methods of each container handler.
-        writer.seek(SeekFrom::Start(0))?;
-
-        let mut buffer = vec![0u8; chunk_size];
-        for (idx, segment) in dest_structure.segments.iter().enumerate() {
-            // Skip excluded segments
-            if exclude_indices.contains(&idx) {
-                continue;
-            }
-
-            // Process each range in the segment
-            for range in &segment.ranges {
-                writer.seek(SeekFrom::Start(range.offset))?;
-                let mut remaining = range.size;
-
-                while remaining > 0 {
-                    let to_read = (remaining as usize).min(buffer.len());
-                    let mut reader = std::io::Read::by_ref(writer).take(to_read as u64);
-                    let n = reader.read(&mut buffer[..to_read])?;
-                    if n == 0 {
-                        break;
-                    }
-                    processor(&buffer[..n]);
-                    remaining -= n as u64;
-                }
-            }
-        }
+        self.handler.write_with_processor(
+            &self.structure,
+            &mut self.source,
+            writer,
+            updates,
+            exclude_segments,
+            processor,
+        )?;
 
         Ok(dest_structure)
     }

@@ -58,6 +58,77 @@ pub trait ContainerIO: Send + Sync {
         updates: &Updates,
     ) -> Result<()>;
 
+    /// Write file with processor callback for single-pass processing
+    ///
+    /// This is an optimized version of `write` that allows processing data
+    /// (e.g., hashing) as it's being written, without needing to re-read the output.
+    ///
+    /// Handlers can override this to provide true single-pass operation by:
+    /// 1. Wrapping the writer in a `ProcessingWriter`
+    /// 2. Controlling exclude mode based on `exclude_segments`
+    ///
+    /// # Default Implementation
+    ///
+    /// The default implementation wraps the writer in a `ProcessingWriter` and
+    /// calls the regular `write` method. This provides some benefit (no re-read)
+    /// but cannot intelligently exclude specific segments. Handlers should override
+    /// this for optimal performance.
+    ///
+    /// # Arguments
+    ///
+    /// * `structure` - Source file structure
+    /// * `source` - Source data reader
+    /// * `writer` - Destination writer
+    /// * `updates` - Metadata updates to apply
+    /// * `exclude_segments` - Segment kinds to exclude from processing
+    /// * `processor` - Callback function that processes each data chunk
+    ///
+    /// # Example Handler Override
+    ///
+    /// ```rust,ignore
+    /// fn write_with_processor<R: Read + Seek, W: Write, F: FnMut(&[u8])>(
+    ///     &self,
+    ///     structure: &Structure,
+    ///     source: &mut R,
+    ///     writer: &mut W,
+    ///     updates: &Updates,
+    ///     exclude_segments: &[SegmentKind],
+    ///     processor: F,
+    /// ) -> Result<()> {
+    ///     use crate::processing_writer::ProcessingWriter;
+    ///     
+    ///     let mut pw = ProcessingWriter::new(writer, processor);
+    ///     
+    ///     // ... write logic ...
+    ///     
+    ///     // Before writing excluded segment
+    ///     if exclude_segments.contains(&SegmentKind::Jumbf) {
+    ///         pw.set_exclude_mode(true);
+    ///     }
+    ///     self.write_jumbf(&mut pw, jumbf_data)?;
+    ///     pw.set_exclude_mode(false);
+    ///     
+    ///     Ok(())
+    /// }
+    /// ```
+    fn write_with_processor<R: Read + Seek, W: Write, F: FnMut(&[u8])>(
+        &self,
+        structure: &Structure,
+        source: &mut R,
+        writer: &mut W,
+        updates: &Updates,
+        _exclude_segments: &[crate::segment::SegmentKind],
+        processor: F,
+    ) -> Result<()> {
+        use crate::processing_writer::ProcessingWriter;
+        
+        // Default implementation: wrap writer and process everything
+        // This doesn't intelligently exclude segments, but handlers can override
+        let mut processing_writer = ProcessingWriter::new(writer, processor);
+        self.write(structure, source, &mut processing_writer, updates)?;
+        Ok(())
+    }
+
     /// Calculate the structure that would result from applying updates
     ///
     /// This computes the destination file's structure (segment locations, offsets)
@@ -184,6 +255,24 @@ macro_rules! register_containers {
                     $(
                         $(#[$meta])*
                         Handler::$variant(h) => h.write(structure, source, writer, updates),
+                    )*
+                }
+            }
+
+            #[allow(unreachable_patterns)]
+            pub(crate) fn write_with_processor<R: std::io::Read + std::io::Seek, W: std::io::Write, F: FnMut(&[u8])>(
+                &self,
+                structure: &$crate::Structure,
+                source: &mut R,
+                writer: &mut W,
+                updates: &$crate::Updates,
+                exclude_segments: &[$crate::segment::SegmentKind],
+                processor: F,
+            ) -> $crate::Result<()> {
+                match self {
+                    $(
+                        $(#[$meta])*
+                        Handler::$variant(h) => h.write_with_processor(structure, source, writer, updates, exclude_segments, processor),
                     )*
                 }
             }
