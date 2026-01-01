@@ -355,6 +355,31 @@ impl PngIO {
         crc ^ 0xFFFFFFFF
     }
 
+    /// Efficiently copy bytes from source to writer using chunked I/O
+    /// This avoids large allocations for big segments
+    fn copy_bytes<R: Read, W: Write>(source: &mut R, writer: &mut W, size: u64) -> Result<()> {
+        const CHUNK_SIZE: usize = 8 * 1024 * 1024; // 8MB chunks
+        
+        if size > CHUNK_SIZE as u64 {
+            let mut buffer = vec![0u8; CHUNK_SIZE];
+            let mut remaining = size;
+            
+            while remaining > 0 {
+                let to_copy = remaining.min(CHUNK_SIZE as u64) as usize;
+                source.read_exact(&mut buffer[..to_copy])?;
+                writer.write_all(&buffer[..to_copy])?;
+                remaining -= to_copy as u64;
+            }
+        } else {
+            // Small data - single allocation is fine
+            let mut buffer = vec![0u8; size as usize];
+            source.read_exact(&mut buffer)?;
+            writer.write_all(&buffer)?;
+        }
+        
+        Ok(())
+    }
+
     /// Write a PNG chunk with proper CRC
     fn write_chunk<W: Write>(writer: &mut W, chunk_type: &[u8], data: &[u8]) -> Result<()> {
         // Write length
@@ -527,14 +552,10 @@ impl ContainerIO for PngIO {
                     if let Some(source_seg) = structure.segments.iter().find(|s| s.is_type(SegmentKind::ImageData)) {
                         let location = source_seg.location();
                         let chunk_start = location.offset - 8; // Back to length field
+                        let chunk_size = 8 + location.size + 4;
 
                         source.seek(SeekFrom::Start(chunk_start))?;
-
-                        // Copy chunk: length(4) + type(4) + data(size) + crc(4)
-                        let chunk_size = 8 + location.size + 4;
-                        let mut buffer = vec![0u8; chunk_size as usize];
-                        source.read_exact(&mut buffer)?;
-                        writer.write_all(&buffer)?;
+                        Self::copy_bytes(source, writer, chunk_size)?;
                     }
                 }
 
@@ -543,14 +564,10 @@ impl ContainerIO for PngIO {
                     if let Some(source_seg) = structure.segments.iter().find(|s| s.is_type(SegmentKind::Exif)) {
                         let location = source_seg.location();
                         let chunk_start = location.offset - 8; // Back to length field
+                        let chunk_size = 8 + location.size + 4;
 
                         source.seek(SeekFrom::Start(chunk_start))?;
-
-                        // Copy chunk: length(4) + type(4) + data(size) + crc(4)
-                        let chunk_size = 8 + location.size + 4;
-                        let mut buffer = vec![0u8; chunk_size as usize];
-                        source.read_exact(&mut buffer)?;
-                        writer.write_all(&buffer)?;
+                        Self::copy_bytes(source, writer, chunk_size)?;
                     }
                 }
 
@@ -562,10 +579,7 @@ impl ContainerIO for PngIO {
                     {
                         let location = source_seg.location();
                         source.seek(SeekFrom::Start(location.offset))?;
-
-                        let mut buffer = vec![0u8; location.size as usize];
-                        source.read_exact(&mut buffer)?;
-                        writer.write_all(&buffer)?;
+                        Self::copy_bytes(source, writer, location.size)?;
                     }
                 }
             }
