@@ -26,7 +26,7 @@ c2pa = "0.72"
 sha2 = "0.10"  # For examples only
 
 [features]
-default = ["jpeg", "test-utils"]
+default = ["jpeg"]
 jpeg = ["md5"]
 png = []
 bmff = ["atree"]
@@ -38,8 +38,8 @@ all-formats = ["jpeg", "png", "bmff"]
 # Note: At least one format feature (jpeg, png) must be enabled for the library to compile.
 
 # Testing features
-# embed-fixtures: Compile small test fixtures into the binary (faster CI, no file I/O)
-# test-utils: Make test utilities available (enabled by default, disable with --no-default-features for production)
+# embed-fixtures: Compile test fixtures into the binary (faster CI, no file I/O)
+# test-utils: Make test utilities available (for examples and integration tests)
 embed-fixtures = []
 test-utils = []
 
@@ -57,7 +57,7 @@ required-features = ["xmp"]
 
 [[example]]
 name = "test_mmap"
-required-features = ["memory-mapped"]
+required-features = ["memory-mapped", "test-utils"]
 
 [[example]]
 name = "hash_benchmark"
@@ -116,11 +116,11 @@ required-features = ["png"]
 
 [[example]]
 name = "test_all_combinations"
-required-features = ["jpeg", "xmp"]
+required-features = ["jpeg", "xmp", "test-utils"]
 
 [[example]]
 name = "test_xmp_extended"
-required-features = ["jpeg", "xmp"]
+required-features = ["jpeg", "xmp", "test-utils"]
 
 [[example]]
 name = "test_png_exif"
@@ -128,7 +128,7 @@ required-features = ["png", "exif"]
 
 [[example]]
 name = "test_fixtures"
-required-features = ["jpeg", "xmp"]
+required-features = ["jpeg", "xmp", "test-utils"]
 
 [profile.release]
 opt-level = 3
