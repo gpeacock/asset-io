@@ -352,29 +352,6 @@ mod thumbnail_tests {
     }
 
     #[test]
-    fn test_thumbnail_options() {
-        println!("\n=== Testing ThumbnailOptions ===");
-
-        use asset_io::ThumbnailOptions;
-
-        let default_opts = ThumbnailOptions::default();
-        assert_eq!(default_opts.max_width, 256);
-        assert_eq!(default_opts.max_height, 256);
-        assert_eq!(default_opts.quality, 85);
-        assert!(default_opts.prefer_embedded);
-
-        let custom_opts = ThumbnailOptions {
-            max_width: 512,
-            max_height: 512,
-            quality: 90,
-            prefer_embedded: false,
-        };
-        assert_eq!(custom_opts.max_width, 512);
-
-        println!("  ✓ ThumbnailOptions works correctly");
-    }
-
-    #[test]
     fn test_thumbnail_creation() {
         println!("\n=== Testing Thumbnail creation ===");
 

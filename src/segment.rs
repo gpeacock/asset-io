@@ -60,8 +60,6 @@ pub enum SegmentKind {
     ImageData,
     /// EXIF metadata
     Exif,
-    /// Embedded thumbnail
-    Thumbnail,
     /// Other/unknown segment type
     Other,
 }
@@ -75,7 +73,6 @@ impl SegmentKind {
             Self::Jumbf => "jumbf",
             Self::ImageData => "image_data",
             Self::Exif => "exif",
-            Self::Thumbnail => "thumbnail",
             Self::Other => "other",
         }
     }
