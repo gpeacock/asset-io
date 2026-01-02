@@ -677,8 +677,8 @@ impl ContainerIO for PngIO {
     ) -> Result<()> {
         use crate::processing_writer::ProcessingWriter;
 
-        let exclude_segments = &updates.write_options.exclude_segments;
-        let exclusion_mode = updates.write_options.exclusion_mode;
+        let exclude_segments = &updates.processing.exclude_segments;
+        let exclusion_mode = updates.processing.exclusion_mode;
 
         let mut pw = ProcessingWriter::new(writer, |data| processor(data));
         let should_exclude_jumbf = exclude_segments.contains(&SegmentKind::Jumbf);

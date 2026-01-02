@@ -85,12 +85,12 @@ pub trait ContainerIO: Send + Sync {
     /// * `structure` - Source file structure
     /// * `source` - Source data reader
     /// * `writer` - Destination writer
-    /// * `updates` - Metadata updates to apply (includes write_options for exclusions)
+    /// * `updates` - Metadata updates to apply (includes processing options for exclusions)
     /// * `processor` - Callback function that processes each data chunk
     ///
-    /// # Write Options
+    /// # Processing Options
     ///
-    /// The `updates.write_options` field controls processing behavior:
+    /// The `updates.processing` field controls processing behavior:
     /// - `exclude_segments` - Segment kinds to exclude from processing
     /// - `exclusion_mode` - How to handle excluded segments (DataOnly vs EntireSegment)
     /// - `chunk_size` - Buffer size for streaming (optional)
@@ -108,8 +108,8 @@ pub trait ContainerIO: Send + Sync {
     /// ) -> Result<()> {
     ///     use crate::processing_writer::ProcessingWriter;
     ///     
-    ///     let exclude_segments = &updates.write_options.exclude_segments;
-    ///     let exclusion_mode = updates.write_options.exclusion_mode;
+    ///     let exclude_segments = &updates.processing.exclude_segments;
+    ///     let exclusion_mode = updates.processing.exclusion_mode;
     ///     
     ///     let mut pw = ProcessingWriter::new(writer, processor);
     ///     

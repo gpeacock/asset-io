@@ -2,9 +2,9 @@
 //!
 //! Tests SHA-256, SHA-384, and SHA-512 to find the fastest option.
 //!
-//! Run: `cargo run --release --example hash_benchmark --features xmp,png,memory-mapped,hashing tests/fixtures/massive_test.png`
+//! Run: `cargo run --release --example hash_benchmark --features xmp,png,memory-mapped tests/fixtures/massive_test.png`
 
-use asset_io::Asset;
+use asset_io::{Asset, Updates};
 use sha2::{Digest, Sha256, Sha384, Sha512};
 use std::time::Instant;
 
@@ -53,21 +53,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         for _ in 0..runs {
             let start = Instant::now();
 
-            // Hash the entire file (simulating C2PA workflow without exclusions for simplicity)
+            // Hash the entire file using read_with_processing (no exclusions for benchmark)
+            let updates = Updates::new(); // No exclusions
             match name {
                 "SHA-256" => {
                     let mut hasher = Sha256::new();
-                    asset.hash_excluding_segments(&[], &mut hasher)?;
+                    asset.read_with_processing(&updates, &mut |chunk| hasher.update(chunk))?;
                     let _hash = hasher.finalize();
                 }
                 "SHA-384" => {
                     let mut hasher = Sha384::new();
-                    asset.hash_excluding_segments(&[], &mut hasher)?;
+                    asset.read_with_processing(&updates, &mut |chunk| hasher.update(chunk))?;
                     let _hash = hasher.finalize();
                 }
                 "SHA-512" => {
                     let mut hasher = Sha512::new();
-                    asset.hash_excluding_segments(&[], &mut hasher)?;
+                    asset.read_with_processing(&updates, &mut |chunk| hasher.update(chunk))?;
                     let _hash = hasher.finalize();
                 }
                 _ => unreachable!(),

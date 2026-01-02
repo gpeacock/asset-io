@@ -4,9 +4,9 @@
 //! 1. Memory-mapped I/O (zero-copy hashing directly from mmap)
 //! 2. Regular file I/O (streaming with buffers)
 //!
-//! Run: `cargo run --release --example mmap_comparison --features xmp,png,memory-mapped,hashing tests/fixtures/massive_test.png`
+//! Run: `cargo run --release --example mmap_comparison --features xmp,png,memory-mapped tests/fixtures/massive_test.png`
 
-use asset_io::Asset;
+use asset_io::{Asset, Updates};
 use sha2::{Digest, Sha512};
 use std::time::Instant;
 
@@ -46,8 +46,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut asset = unsafe { Asset::open_with_mmap(source_path)? };
 
         // Hash using zero-copy from mmap
+        let updates = Updates::new();
         let mut hasher = Sha512::new();
-        asset.hash_excluding_segments(&[], &mut hasher)?;
+        asset.read_with_processing(&updates, &mut |chunk| hasher.update(chunk))?;
         let _hash = hasher.finalize();
 
         let elapsed = start.elapsed();
@@ -76,9 +77,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Open with regular file I/O (no mmap)
         let mut asset = Asset::open(source_path)?;
 
-        // Hash using streaming (will use 8KB buffers internally)
+        // Hash using streaming (uses ProcessingOptions chunk size)
+        let updates = Updates::new();
         let mut hasher = Sha512::new();
-        asset.hash_excluding_segments(&[], &mut hasher)?;
+        asset.read_with_processing(&updates, &mut |chunk| hasher.update(chunk))?;
         let _hash = hasher.finalize();
 
         let elapsed = start.elapsed();

@@ -98,23 +98,24 @@ pub use tiff::ExifInfo;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils;
 
-/// Options controlling how writes are processed
+/// Options controlling how data is processed during read or write operations
 ///
-/// These options configure streaming behavior, segment exclusions for hashing,
-/// and other processing parameters. All fields have sensible defaults.
+/// These options configure streaming behavior, segment exclusions, and other
+/// processing parameters. Used by both `read_with_processing()` and
+/// `write_with_processing()` for symmetric read/write operations.
 ///
 /// # Example
 ///
 /// ```no_run
-/// use asset_io::{WriteOptions, SegmentKind, ExclusionMode};
+/// use asset_io::{ProcessingOptions, SegmentKind, ExclusionMode};
 ///
-/// let options = WriteOptions::new()
+/// let options = ProcessingOptions::new()
 ///     .exclude(vec![SegmentKind::Jumbf])
 ///     .exclusion_mode(ExclusionMode::DataOnly)
 ///     .chunk_size(65536);
 /// ```
 #[derive(Debug, Clone, Default)]
-pub struct WriteOptions {
+pub struct ProcessingOptions {
     /// Chunk size for streaming operations (default: DEFAULT_CHUNK_SIZE = 64KB)
     pub chunk_size: Option<usize>,
 
@@ -126,8 +127,8 @@ pub struct WriteOptions {
     // Future: include_segments for explicit inclusion
 }
 
-impl WriteOptions {
-    /// Create new WriteOptions with defaults
+impl ProcessingOptions {
+    /// Create new ProcessingOptions with defaults
     pub fn new() -> Self {
         Self::default()
     }
@@ -155,6 +156,10 @@ impl WriteOptions {
         self.chunk_size.unwrap_or(DEFAULT_CHUNK_SIZE)
     }
 }
+
+/// Type alias for backwards compatibility
+#[deprecated(since = "0.2.0", note = "Use ProcessingOptions instead")]
+pub type WriteOptions = ProcessingOptions;
 
 /// Metadata update strategy
 ///
@@ -208,8 +213,9 @@ pub struct Updates {
     /// JUMBF data update strategy
     pub jumbf: MetadataUpdate,
 
-    /// Write processing options (chunk size, exclusions, etc.)
-    pub write_options: WriteOptions,
+    /// Processing options (chunk size, exclusions, etc.)
+    /// Used by both read_with_processing() and write_with_processing()
+    pub processing: ProcessingOptions,
 }
 
 impl Updates {
@@ -343,7 +349,7 @@ impl Updates {
     }
 
     // ========================================================================
-    // Write Options Builder Methods
+    // Processing Options Builder Methods
     // ========================================================================
 
     /// Set segments to exclude from processing (e.g., for C2PA hashing)
@@ -362,8 +368,8 @@ impl Updates {
         segments: Vec<SegmentKind>,
         mode: ExclusionMode,
     ) -> Self {
-        self.write_options.exclude_segments = segments;
-        self.write_options.exclusion_mode = mode;
+        self.processing.exclude_segments = segments;
+        self.processing.exclusion_mode = mode;
         self
     }
 
@@ -377,27 +383,27 @@ impl Updates {
     /// let updates = Updates::new().with_chunk_size(65536);
     /// ```
     pub fn with_chunk_size(mut self, size: usize) -> Self {
-        self.write_options.chunk_size = Some(size);
+        self.processing.chunk_size = Some(size);
         self
     }
 
-    /// Set custom write options
+    /// Set custom processing options
     ///
     /// # Example
     ///
     /// ```no_run
-    /// use asset_io::{Updates, WriteOptions, SegmentKind, ExclusionMode};
+    /// use asset_io::{Updates, ProcessingOptions, SegmentKind, ExclusionMode};
     ///
-    /// let options = WriteOptions::new()
+    /// let options = ProcessingOptions::new()
     ///     .exclude(vec![SegmentKind::Jumbf])
     ///     .exclusion_mode(ExclusionMode::DataOnly);
     ///
     /// let updates = Updates::new()
     ///     .set_jumbf(vec![0u8; 1000])
-    ///     .with_write_options(options);
+    ///     .with_processing(options);
     /// ```
-    pub fn with_write_options(mut self, options: WriteOptions) -> Self {
-        self.write_options = options;
+    pub fn with_processing(mut self, options: ProcessingOptions) -> Self {
+        self.processing = options;
         self
     }
 }

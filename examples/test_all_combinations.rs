@@ -3,7 +3,7 @@
 //! This example demonstrates all possible metadata operations and includes
 //! automated tests that run with `cargo test`.
 
-use asset_io::{Asset, ExclusionMode, Updates};
+use asset_io::{Asset, Updates};
 use std::fs;
 
 fn main() -> asset_io::Result<()> {

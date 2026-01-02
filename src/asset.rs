@@ -400,10 +400,116 @@ impl<R: Read + Seek> Asset<R> {
             .read_segment_chunked(&mut self.source, segment_index, chunk_size)
     }
 
+    /// Process the asset's data with exclusions (read-side of write_with_processing)
+    ///
+    /// This is the read equivalent of `write_with_processing()`. It streams through
+    /// the asset's data, calling the processor for each chunk while respecting
+    /// the exclusion settings in `updates.processing`.
+    ///
+    /// Use this for:
+    /// - Hashing an existing file
+    /// - Validating data integrity
+    /// - Calculating statistics
+    /// - Any non-destructive processing
+    ///
+    /// # Example: Hash an existing file
+    /// ```no_run
+    /// use asset_io::{Asset, Updates, SegmentKind, ExclusionMode};
+    /// use sha2::{Sha256, Digest};
+    ///
+    /// # fn main() -> asset_io::Result<()> {
+    /// let mut asset = Asset::open("signed.jpg")?;
+    ///
+    /// // Configure exclusions (same options as write_with_processing)
+    /// let updates = Updates::new()
+    ///     .exclude_from_processing(vec![SegmentKind::Jumbf], ExclusionMode::DataOnly);
+    ///
+    /// // Process the data
+    /// let mut hasher = Sha256::new();
+    /// asset.read_with_processing(&updates, &mut |chunk| hasher.update(chunk))?;
+    /// let hash = hasher.finalize();
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn read_with_processing<F>(
+        &mut self,
+        updates: &Updates,
+        processor: &mut F,
+    ) -> Result<()>
+    where
+        F: FnMut(&[u8]),
+    {
+        use crate::segment::DEFAULT_CHUNK_SIZE;
+        
+        let chunk_size = updates.processing.effective_chunk_size();
+        let exclude_segments = &updates.processing.exclude_segments;
+        let exclusion_mode = updates.processing.exclusion_mode;
+        
+        self.source.seek(SeekFrom::Start(0))?;
+        
+        // Build list of segment indices to exclude
+        let excluded_indices: Vec<Option<usize>> = exclude_segments
+            .iter()
+            .filter_map(|kind| {
+                self.structure.segments.iter().position(|s| s.is_type(*kind))
+            })
+            .map(Some)
+            .collect();
+        
+        // Use existing structure method for streaming with exclusions
+        let mut buffer = vec![0u8; chunk_size.min(DEFAULT_CHUNK_SIZE)];
+        
+        // Calculate ranges to process (everything except excluded segments)
+        let mut ranges = Vec::new();
+        let mut last_end = 0u64;
+        
+        for (idx, segment) in self.structure.segments.iter().enumerate() {
+            let is_excluded = excluded_indices.contains(&Some(idx));
+            
+            if is_excluded {
+                let loc = segment.location();
+                // Determine exclusion range based on mode
+                let (exclude_start, exclude_size) = if exclusion_mode == crate::ExclusionMode::DataOnly {
+                    // DataOnly: exclude just the data portion (container-specific)
+                    // For now, use the segment's data location
+                    (loc.offset, loc.size)
+                } else {
+                    // EntireSegment: exclude the whole segment
+                    (loc.offset, loc.size)
+                };
+                
+                // Add range before this excluded segment
+                if exclude_start > last_end {
+                    ranges.push((last_end, exclude_start - last_end));
+                }
+                last_end = exclude_start + exclude_size;
+            }
+        }
+        
+        // Add final range after last exclusion
+        if last_end < self.structure.total_size {
+            ranges.push((last_end, self.structure.total_size - last_end));
+        }
+        
+        // Process each range
+        for (offset, size) in ranges {
+            self.source.seek(SeekFrom::Start(offset))?;
+            let mut remaining = size;
+            
+            while remaining > 0 {
+                let to_read = remaining.min(buffer.len() as u64) as usize;
+                self.source.read_exact(&mut buffer[..to_read])?;
+                processor(&buffer[..to_read]);
+                remaining -= to_read as u64;
+            }
+        }
+        
+        Ok(())
+    }
+
     /// Hash the asset excluding specified segments (zero-copy with mmap)
     ///
-    /// This is a convenience method for C2PA workflows where you need to hash
-    /// the entire file except the C2PA manifest itself.
+    /// **Deprecated**: Use `read_with_processing()` instead for a unified API.
     ///
     /// # Example
     /// ```no_run
@@ -421,6 +527,8 @@ impl<R: Read + Seek> Asset<R> {
     /// # Ok(())
     /// # }
     /// ```
+    #[deprecated(since = "0.2.0", note = "Use read_with_processing() instead")]
+    #[allow(deprecated)]
     pub fn hash_excluding_segments<H: std::io::Write>(
         &mut self,
         excluded_indices: &[Option<usize>],

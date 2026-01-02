@@ -300,34 +300,25 @@ impl Structure {
 
     /// Calculate hash over all ranges except excluded segments (zero-copy with mmap)
     ///
-    /// This is optimized for C2PA workflows where you need to hash the entire file
-    /// except the C2PA manifest itself. Correctly handles multi-range segments.
+    /// **Deprecated**: Use `Asset::read_with_processing()` instead for a unified API.
     ///
-    /// # Zero-Copy Behavior
-    /// - With memory mapping: Direct hash from mapped memory (no allocation)
-    /// - Without memory mapping: Streams through source in chunks
-    ///
-    /// # Example
+    /// # Example using new API
     /// ```no_run
-    /// # use asset_io::*;
-    /// # use std::fs::File;
-    /// # fn example() -> Result<()> {
-    /// # let file = File::open("test.jpg")?;
-    /// # let mut asset = Asset::from_source(file)?;
-    ///
-    /// // Hash everything except C2PA JUMBF
+    /// use asset_io::{Asset, Updates, SegmentKind, ExclusionMode};
     /// use sha2::{Sha256, Digest};
+    ///
+    /// # fn main() -> asset_io::Result<()> {
+    /// let mut asset = Asset::open("signed.jpg")?;
+    /// let updates = Updates::new()
+    ///     .exclude_from_processing(vec![SegmentKind::Jumbf], ExclusionMode::DataOnly);
+    ///
     /// let mut hasher = Sha256::new();
-    ///
-    /// // Get the excluded segments
-    /// let jumbf_index = asset.structure().c2pa_jumbf_index();
-    ///
-    /// // Use the Asset's hash_excluding_segments method instead
-    /// asset.hash_excluding_segments(&[jumbf_index], &mut hasher)?;
+    /// asset.read_with_processing(&updates, &mut |chunk| hasher.update(chunk))?;
     /// let hash = hasher.finalize();
     /// # Ok(())
     /// # }
     /// ```
+    #[deprecated(since = "0.2.0", note = "Use Asset::read_with_processing() instead")]
     pub fn hash_excluding_segments<R: Read + Seek, H: std::io::Write>(
         &self,
         source: &mut R,
