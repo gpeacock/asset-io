@@ -13,7 +13,7 @@
 ### asset-io (Streaming Single-Pass)
 
 ```bash
-$ time cargo run --release --features png,xmp,hashing --example c2pa tests/fixtures/massive_test.png
+$ time cargo run --release --features png,xmp --example c2pa tests/fixtures/massive_test.png
 
 ⚡ Writing and hashing in single pass (true single-pass - no re-read!)...
 ✅ Write complete! Hash computed.
@@ -121,14 +121,14 @@ PNG allows inserting chunks, so we could:
 
 ### 3. Use Memory Mapping for Read-Only Operations
 
-For hashing existing files, memory mapping is much faster:
+For hashing existing files, memory mapping could be faster:
 
 ```rust
-// Current: reads through I/O
-asset.hash_excluding_segments(...)?;  // Slow for 366MB
+// Current: streaming with callback
+asset.read_with_processing(|bytes| hasher.update(bytes), &options)?;
 
-// Better: memory-mapped
-unsafe { asset.open_with_mmap()?.hash_excluding_segments(...)?; }  // Much faster
+// Future: memory-mapped for even faster access on large files
+// (not yet implemented)
 ```
 
 ## Conclusion
