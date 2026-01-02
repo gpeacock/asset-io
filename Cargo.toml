@@ -33,7 +33,6 @@ bmff = ["byteorder", "atree"]
 exif = []
 xmp = ["quick-xml", "md5"]
 memory-mapped = ["memmap2", "fs2"]
-hashing = []  # Remove sha2 from here
 all-formats = ["jpeg", "png", "bmff"]
 
 # TEMPORARY: C2PA testing feature (delete after validation)
@@ -49,7 +48,7 @@ test-utils = []
 
 [[example]]
 name = "c2pa"
-required-features = ["xmp", "hashing"]
+required-features = ["xmp"]
 
 [[example]]
 name = "inspect"
@@ -65,27 +64,26 @@ required-features = ["memory-mapped"]
 
 [[example]]
 name = "hash_benchmark"
-required-features = ["xmp", "memory-mapped", "hashing"]
+required-features = ["xmp", "memory-mapped"]
 
 [[example]]
 name = "mmap_comparison"
-required-features = ["xmp", "memory-mapped", "hashing"]
+required-features = ["xmp", "memory-mapped"]
 
 [[example]]
 name = "test_bmff_hash"
-required-features = ["bmff", "hashing"]
+required-features = ["bmff"]
 
 [[example]]
 name = "bmff_v3_hash"
-required-features = ["bmff", "hashing"]
+required-features = ["bmff"]
 
 [[example]]
 name = "bmff_c2pa_hash"
-required-features = ["bmff", "hashing"]
+required-features = ["bmff"]
 
 [[example]]
 name = "bench_hash_only"
-required-features = ["hashing"]
 
 [[example]]
 name = "test_bmff"
@@ -97,7 +95,7 @@ required-features = ["bmff", "xmp"]
 
 [[example]]
 name = "c2pa_streaming"
-required-features = ["xmp", "hashing"]
+required-features = ["xmp"]
 
 [[example]]
 name = "update_jumbf"
@@ -105,7 +103,7 @@ required-features = ["jpeg", "xmp"]
 
 [[example]]
 name = "test_large_164mb"
-required-features = ["bmff", "hashing"]
+required-features = ["bmff"]
 
 [[example]]
 name = "update_xmp_field"
@@ -113,7 +111,7 @@ required-features = ["jpeg", "xmp"]
 
 [[example]]
 name = "test_processing_writer_png"
-required-features = ["png", "hashing"]
+required-features = ["png"]
 
 [[example]]
 name = "test_png_jumbf_write"

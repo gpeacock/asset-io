@@ -142,7 +142,6 @@ impl Structure {
     }
 
     /// Calculate hash of specified segments without loading entire file
-    #[cfg(feature = "hashing")]
     pub fn calculate_hash<R: Read + Seek, H: std::io::Write>(
         &self,
         source: &mut R,
@@ -315,7 +314,6 @@ impl Structure {
     /// # Ok(())
     /// # }
     /// ```
-    #[cfg(feature = "hashing")]
     pub fn hash_excluding_segments<R: Read + Seek, H: std::io::Write>(
         &self,
         source: &mut R,
@@ -398,7 +396,6 @@ impl Structure {
     }
 
     /// Helper to hash a single range from source (streaming)
-    #[cfg(feature = "hashing")]
     fn hash_range_from_source<R: Read + Seek, H: std::io::Write>(
         &self,
         source: &mut R,

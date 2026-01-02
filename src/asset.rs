@@ -350,7 +350,6 @@ impl<R: Read + Seek> Asset<R> {
     /// # Ok(())
     /// # }
     /// ```
-    #[cfg(feature = "hashing")]
     pub fn hash_excluding_segments<H: std::io::Write>(
         &mut self,
         excluded_indices: &[Option<usize>],
