@@ -84,8 +84,8 @@ pub use error::{Error, Result};
 pub use formats::ContainerIO;
 pub use media_type::MediaType;
 pub use segment::{
-    ByteRange, ChunkedSegmentReader, LazyData, Location, Segment, SegmentKind, SegmentMetadata,
-    DEFAULT_CHUNK_SIZE, MAX_SEGMENT_SIZE,
+    ByteRange, ChunkedSegmentReader, ExclusionMode, LazyData, Location, Segment, SegmentKind,
+    SegmentMetadata, DEFAULT_CHUNK_SIZE, MAX_SEGMENT_SIZE,
 };
 pub use structure::Structure;
 pub use thumbnail::{EmbeddedThumbnail, ThumbnailFormat, ThumbnailGenerator, ThumbnailOptions};
@@ -319,7 +319,7 @@ pub use formats::png_io::PngIO;
 ///
 /// # Example
 /// ```no_run
-/// use asset_io::{Asset, Updates, SegmentKind, update_segment_with_structure};
+/// use asset_io::{Asset, Updates, SegmentKind, ExclusionMode, update_segment_with_structure};
 /// use sha2::{Sha256, Digest};
 /// use std::fs::File;
 ///
@@ -336,6 +336,7 @@ pub use formats::png_io::PngIO;
 ///     &updates,
 ///     8192,
 ///     &[SegmentKind::Jumbf],
+///     ExclusionMode::DataOnly,  // C2PA: include headers in hash
 ///     &mut |chunk| hasher.update(chunk),
 /// )?;
 ///

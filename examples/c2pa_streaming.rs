@@ -11,7 +11,7 @@
 //!
 //! Run with: cargo run --features jpeg,xmp,hashing --example c2pa_streaming
 
-use asset_io::{update_segment_with_structure, Asset, SegmentKind, Updates};
+use asset_io::{update_segment_with_structure, Asset, ExclusionMode, SegmentKind, Updates};
 use sha2::{Digest, Sha256};
 use std::fs::OpenOptions;
 
@@ -53,7 +53,8 @@ fn main() -> asset_io::Result<()> {
         &mut output,
         &updates,
         chunk_size,
-        &[SegmentKind::Jumbf], // Exclude JUMBF from hash
+        &[SegmentKind::Jumbf],    // Exclude JUMBF from hash
+        ExclusionMode::DataOnly,  // C2PA: include headers in hash
         &mut |chunk| hasher.update(chunk),
     )?;
 

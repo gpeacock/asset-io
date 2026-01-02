@@ -87,6 +87,50 @@ impl std::fmt::Display for SegmentKind {
     }
 }
 
+/// How to handle exclusion when processing segments during write operations
+///
+/// This controls what portion of a segment is excluded from processing
+/// (e.g., hashing) during [`write_with_processor`](crate::Asset::write_with_processing).
+///
+/// # C2PA Compliance
+///
+/// For C2PA manifest embedding, use [`DataOnly`](ExclusionMode::DataOnly) mode.
+/// The C2PA specification requires that container headers (markers, length fields,
+/// format-specific headers) are included in the hash to prevent insertion attacks.
+/// Only the manifest data itself should be excluded.
+///
+/// # Example
+///
+/// ```rust
+/// use asset_io::{ExclusionMode, SegmentKind};
+///
+/// // For C2PA: exclude only the JUMBF data, include headers in hash
+/// let mode = ExclusionMode::DataOnly;
+/// let exclude = &[SegmentKind::Jumbf];
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ExclusionMode {
+    /// Exclude the entire segment including container-specific headers
+    ///
+    /// For JPEG APP11: Excludes marker (FF EB) + length + JPEG XT headers + data
+    /// For PNG caBX: Excludes length + type + data + CRC
+    ///
+    /// This is simpler but NOT recommended for C2PA as it allows insertion attacks.
+    #[default]
+    EntireSegment,
+
+    /// Exclude only the data portion, include container headers in processing
+    ///
+    /// For JPEG APP11: Include marker + length + JPEG XT headers; exclude only JUMBF data
+    /// For PNG caBX: Include length + type; exclude only data + CRC
+    ///
+    /// This is required for C2PA compliance per the specification, which states:
+    /// "This is accomplished by including all the C2PA manifest segment headers
+    /// (APP11) and 2-byte length fields in the data-hash-map for all
+    /// manifest-containing segments."
+    DataOnly,
+}
+
 /// Format-specific metadata for segments
 ///
 /// This allows storing format-specific information needed for proper

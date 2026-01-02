@@ -915,12 +915,14 @@ impl ContainerIO for JpegIO {
         writer: &mut W,
         updates: &Updates,
         exclude_segments: &[SegmentKind],
+        exclusion_mode: crate::ExclusionMode,
         mut processor: F,
     ) -> Result<()> {
         use crate::processing_writer::ProcessingWriter;
 
         let mut pw = ProcessingWriter::new(writer, |data| processor(data));
         let should_exclude_jumbf = exclude_segments.contains(&SegmentKind::Jumbf);
+        let data_only_mode = exclusion_mode == crate::ExclusionMode::DataOnly;
 
         // Calculate the destination structure first
         let dest_structure = self.calculate_updated_structure(structure, updates)?;
@@ -1029,11 +1031,23 @@ impl ContainerIO for JpegIO {
                 }
 
                 seg if seg.is_jumbf() => {
-                    // Per C2PA spec: Headers are included in hash, only DATA is excluded
-                    // Use the special helper that toggles exclusion at the right point
+                    // Handle JUMBF based on exclusion mode:
+                    // - DataOnly: Include headers in hash, exclude only data (C2PA compliant)
+                    // - EntireSegment: Exclude entire segment including headers
                     match &updates.jumbf {
                         crate::MetadataUpdate::Set(new_jumbf) => {
-                            write_jumbf_with_exclusion(&mut pw, new_jumbf, should_exclude_jumbf)?;
+                            if data_only_mode {
+                                write_jumbf_with_exclusion(&mut pw, new_jumbf, should_exclude_jumbf)?;
+                            } else {
+                                // EntireSegment mode: exclude everything
+                                if should_exclude_jumbf {
+                                    pw.set_exclude_mode(true);
+                                }
+                                write_jumbf_segments(&mut pw, new_jumbf)?;
+                                if should_exclude_jumbf {
+                                    pw.set_exclude_mode(false);
+                                }
+                            }
                         }
                         crate::MetadataUpdate::Keep => {
                             if let Some(source_seg) =
@@ -1052,7 +1066,18 @@ impl ContainerIO for JpegIO {
                                     offset += range.size as usize;
                                 }
 
-                                write_jumbf_with_exclusion(&mut pw, &jumbf_data, should_exclude_jumbf)?;
+                                if data_only_mode {
+                                    write_jumbf_with_exclusion(&mut pw, &jumbf_data, should_exclude_jumbf)?;
+                                } else {
+                                    // EntireSegment mode: exclude everything
+                                    if should_exclude_jumbf {
+                                        pw.set_exclude_mode(true);
+                                    }
+                                    write_jumbf_segments(&mut pw, &jumbf_data)?;
+                                    if should_exclude_jumbf {
+                                        pw.set_exclude_mode(false);
+                                    }
+                                }
                             }
                         }
                         crate::MetadataUpdate::Remove => {}

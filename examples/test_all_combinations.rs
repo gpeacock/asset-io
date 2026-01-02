@@ -3,7 +3,7 @@
 //! This example demonstrates all possible metadata operations and includes
 //! automated tests that run with `cargo test`.
 
-use asset_io::{Asset, Updates};
+use asset_io::{Asset, ExclusionMode, Updates};
 use std::fs;
 
 fn main() -> asset_io::Result<()> {
@@ -540,6 +540,7 @@ mod tests {
                     &updates,
                     8192,
                     &[SegmentKind::Jumbf],
+                    ExclusionMode::DataOnly,
                     &mut |_chunk| {},
                 )
                 .expect(&format!("write_with_processing failed for {}", name));
@@ -635,6 +636,7 @@ mod tests {
                     &updates,
                     8192,
                     &[],
+                    ExclusionMode::default(),
                     &mut |_| {},
                 )
                 .expect("write_with_processing failed");

@@ -456,7 +456,7 @@ impl<R: Read + Seek> Asset<R> {
     ///
     /// # Example: C2PA workflow
     /// ```no_run
-    /// use asset_io::{Asset, Updates, SegmentKind};
+    /// use asset_io::{Asset, Updates, SegmentKind, ExclusionMode};
     /// use sha2::{Sha256, Digest};
     /// use std::fs::File;
     ///
@@ -469,12 +469,14 @@ impl<R: Read + Seek> Asset<R> {
     /// let updates = Updates::new().set_jumbf(placeholder);
     ///
     /// // Write and hash in one pass, excluding JUMBF from hash
+    /// // Use DataOnly mode for C2PA compliance (include headers in hash)
     /// let mut hasher = Sha256::new();
     /// let structure = asset.write_with_processing(
     ///     &mut output,
     ///     &updates,
     ///     8192,  // chunk size
     ///     &[SegmentKind::Jumbf],  // exclude from processing
+    ///     ExclusionMode::DataOnly,  // C2PA: include headers in hash
     ///     &mut |chunk| hasher.update(chunk),
     /// )?;
     ///
@@ -498,6 +500,7 @@ impl<R: Read + Seek> Asset<R> {
         updates: &Updates,
         _chunk_size: usize, // Reserved for future use in chunked processing
         exclude_segments: &[SegmentKind],
+        exclusion_mode: crate::ExclusionMode,
         processor: &mut F,
     ) -> Result<Structure>
     where
@@ -517,6 +520,7 @@ impl<R: Read + Seek> Asset<R> {
             writer,
             updates,
             exclude_segments,
+            exclusion_mode,
             processor,
         )?;
 

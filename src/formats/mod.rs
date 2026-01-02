@@ -65,7 +65,13 @@ pub trait ContainerIO: Send + Sync {
     ///
     /// Handlers can override this to provide true single-pass operation by:
     /// 1. Wrapping the writer in a `ProcessingWriter`
-    /// 2. Controlling exclude mode based on `exclude_segments`
+    /// 2. Controlling exclude mode based on `exclude_segments` and `exclusion_mode`
+    ///
+    /// # Exclusion Modes
+    ///
+    /// - [`ExclusionMode::EntireSegment`]: Exclude entire segment including headers
+    /// - [`ExclusionMode::DataOnly`]: Exclude only data, include headers in processing
+    ///   (required for C2PA compliance)
     ///
     /// # Default Implementation
     ///
@@ -81,6 +87,7 @@ pub trait ContainerIO: Send + Sync {
     /// * `writer` - Destination writer
     /// * `updates` - Metadata updates to apply
     /// * `exclude_segments` - Segment kinds to exclude from processing
+    /// * `exclusion_mode` - How to handle excluded segments (data-only vs entire segment)
     /// * `processor` - Callback function that processes each data chunk
     ///
     /// # Example Handler Override
@@ -93,20 +100,29 @@ pub trait ContainerIO: Send + Sync {
     ///     writer: &mut W,
     ///     updates: &Updates,
     ///     exclude_segments: &[SegmentKind],
+    ///     exclusion_mode: ExclusionMode,
     ///     processor: F,
     /// ) -> Result<()> {
     ///     use crate::processing_writer::ProcessingWriter;
     ///     
     ///     let mut pw = ProcessingWriter::new(writer, processor);
     ///     
-    ///     // ... write logic ...
+    ///     // ... write headers (always processed) ...
     ///     
-    ///     // Before writing excluded segment
+    ///     // For C2PA (DataOnly mode): only exclude the data portion
     ///     if exclude_segments.contains(&SegmentKind::Jumbf) {
-    ///         pw.set_exclude_mode(true);
+    ///         if exclusion_mode == ExclusionMode::DataOnly {
+    ///             // Headers already written above
+    ///             pw.set_exclude_mode(true);
+    ///             self.write_jumbf_data(&mut pw, jumbf_data)?;
+    ///             pw.set_exclude_mode(false);
+    ///         } else {
+    ///             // Exclude entire segment including headers
+    ///             pw.set_exclude_mode(true);
+    ///             self.write_jumbf_segment(&mut pw, jumbf_data)?;
+    ///             pw.set_exclude_mode(false);
+    ///         }
     ///     }
-    ///     self.write_jumbf(&mut pw, jumbf_data)?;
-    ///     pw.set_exclude_mode(false);
     ///     
     ///     Ok(())
     /// }
@@ -118,6 +134,7 @@ pub trait ContainerIO: Send + Sync {
         writer: &mut W,
         updates: &Updates,
         _exclude_segments: &[crate::segment::SegmentKind],
+        _exclusion_mode: crate::segment::ExclusionMode,
         processor: F,
     ) -> Result<()> {
         use crate::processing_writer::ProcessingWriter;
@@ -267,12 +284,13 @@ macro_rules! register_containers {
                 writer: &mut W,
                 updates: &$crate::Updates,
                 exclude_segments: &[$crate::segment::SegmentKind],
+                exclusion_mode: $crate::segment::ExclusionMode,
                 processor: F,
             ) -> $crate::Result<()> {
                 match self {
                     $(
                         $(#[$meta])*
-                        Handler::$variant(h) => h.write_with_processor(structure, source, writer, updates, exclude_segments, processor),
+                        Handler::$variant(h) => h.write_with_processor(structure, source, writer, updates, exclude_segments, exclusion_mode, processor),
                     )*
                 }
             }

@@ -46,7 +46,7 @@
 //!
 //! Run: `cargo run --example c2pa --features xmp,png tests/fixtures/sample1.png`
 
-use asset_io::{update_segment_with_structure, Asset, SegmentKind, Updates};
+use asset_io::{update_segment_with_structure, Asset, ExclusionMode, SegmentKind, Updates};
 use c2pa::{
     assertions::{c2pa_action, Action, DataHash, DigitalSourceType},
     settings::Settings,
@@ -313,8 +313,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let structure = asset.write_with_processing(
         &mut output_file,
         &updates,
-        8192,                  // 8KB chunks
-        &[SegmentKind::Jumbf], // Exclude JUMBF from hash
+        8192,                       // 8KB chunks
+        &[SegmentKind::Jumbf],      // Exclude JUMBF from hash
+        ExclusionMode::DataOnly,    // C2PA: include headers in hash
         &mut |chunk| hasher.update(chunk),
     )?;
 

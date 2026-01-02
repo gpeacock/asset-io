@@ -662,12 +662,14 @@ impl ContainerIO for PngIO {
         writer: &mut W,
         updates: &Updates,
         exclude_segments: &[SegmentKind],
+        exclusion_mode: crate::ExclusionMode,
         mut processor: F,
     ) -> Result<()> {
         use crate::processing_writer::ProcessingWriter;
 
         let mut pw = ProcessingWriter::new(writer, |data| processor(data));
         let should_exclude_jumbf = exclude_segments.contains(&SegmentKind::Jumbf);
+        let data_only_mode = exclusion_mode == crate::ExclusionMode::DataOnly;
 
         // Calculate the destination structure first
         let dest_structure = self.calculate_updated_structure(structure, updates)?;
@@ -721,16 +723,28 @@ impl ContainerIO for PngIO {
                 }
 
                 seg if seg.is_jumbf() => {
-                    // Per C2PA spec: length+type are included in hash, data+CRC are excluded
-                    // Use the special helper that toggles exclusion at the right point
+                    // Handle JUMBF based on exclusion mode:
+                    // - DataOnly: Include length+type in hash, exclude data+CRC (C2PA compliant)
+                    // - EntireSegment: Exclude entire chunk including headers
                     match &updates.jumbf {
                         crate::MetadataUpdate::Set(new_jumbf) => {
-                            Self::write_chunk_with_exclusion(
-                                &mut pw,
-                                C2PA,
-                                new_jumbf,
-                                should_exclude_jumbf,
-                            )?;
+                            if data_only_mode {
+                                Self::write_chunk_with_exclusion(
+                                    &mut pw,
+                                    C2PA,
+                                    new_jumbf,
+                                    should_exclude_jumbf,
+                                )?;
+                            } else {
+                                // EntireSegment mode: exclude everything
+                                if should_exclude_jumbf {
+                                    pw.set_exclude_mode(true);
+                                }
+                                Self::write_chunk(&mut pw, C2PA, new_jumbf)?;
+                                if should_exclude_jumbf {
+                                    pw.set_exclude_mode(false);
+                                }
+                            }
                         }
                         crate::MetadataUpdate::Keep => {
                             if let Some(source_seg) =
@@ -742,12 +756,23 @@ impl ContainerIO for PngIO {
                                 let mut jumbf_data = vec![0u8; location.size as usize];
                                 source.read_exact(&mut jumbf_data)?;
 
-                                Self::write_chunk_with_exclusion(
-                                    &mut pw,
-                                    C2PA,
-                                    &jumbf_data,
-                                    should_exclude_jumbf,
-                                )?;
+                                if data_only_mode {
+                                    Self::write_chunk_with_exclusion(
+                                        &mut pw,
+                                        C2PA,
+                                        &jumbf_data,
+                                        should_exclude_jumbf,
+                                    )?;
+                                } else {
+                                    // EntireSegment mode: exclude everything
+                                    if should_exclude_jumbf {
+                                        pw.set_exclude_mode(true);
+                                    }
+                                    Self::write_chunk(&mut pw, C2PA, &jumbf_data)?;
+                                    if should_exclude_jumbf {
+                                        pw.set_exclude_mode(false);
+                                    }
+                                }
                             }
                         }
                         crate::MetadataUpdate::Remove => {}
