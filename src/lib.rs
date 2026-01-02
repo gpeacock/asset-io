@@ -88,7 +88,7 @@ pub use segment::{
     SegmentMetadata, DEFAULT_CHUNK_SIZE, MAX_SEGMENT_SIZE,
 };
 pub use structure::Structure;
-pub use thumbnail::{EmbeddedThumbnail, ThumbnailFormat, ThumbnailGenerator, ThumbnailOptions};
+pub use thumbnail::{EmbeddedThumbnailInfo, Thumbnail, ThumbnailFormat, ThumbnailGenerator, ThumbnailOptions};
 #[cfg(feature = "exif")]
 pub use tiff::ExifInfo;
 

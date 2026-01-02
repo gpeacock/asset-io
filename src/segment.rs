@@ -151,9 +151,9 @@ pub enum SegmentMetadata {
         total_size: u32,
     },
 
-    /// Embedded thumbnail (from EXIF or other metadata)
+    /// Embedded thumbnail location info (from EXIF or other metadata)
     #[cfg(feature = "exif")]
-    Thumbnail(crate::thumbnail::EmbeddedThumbnail),
+    Thumbnail(crate::thumbnail::EmbeddedThumbnailInfo),
 }
 
 impl SegmentMetadata {
@@ -170,11 +170,11 @@ impl SegmentMetadata {
         }
     }
 
-    /// Get embedded thumbnail if this is that variant
+    /// Get embedded thumbnail location info if this is that variant
     #[cfg(feature = "exif")]
-    pub fn as_thumbnail(&self) -> Option<&crate::thumbnail::EmbeddedThumbnail> {
+    pub(crate) fn as_thumbnail_info(&self) -> Option<&crate::thumbnail::EmbeddedThumbnailInfo> {
         match self {
-            Self::Thumbnail(thumb) => Some(thumb),
+            Self::Thumbnail(info) => Some(info),
             _ => None,
         }
     }
@@ -477,10 +477,10 @@ impl Segment {
         self.kind == SegmentKind::Header
     }
 
-    /// Get embedded thumbnail if this segment has one
+    /// Get embedded thumbnail location info if this segment has one
     #[cfg(feature = "exif")]
-    pub fn thumbnail(&self) -> Option<&crate::thumbnail::EmbeddedThumbnail> {
-        self.metadata.as_ref().and_then(|m| m.as_thumbnail())
+    pub(crate) fn thumbnail_info(&self) -> Option<&crate::thumbnail::EmbeddedThumbnailInfo> {
+        self.metadata.as_ref().and_then(|m| m.as_thumbnail_info())
     }
 }
 

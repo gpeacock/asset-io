@@ -462,12 +462,12 @@ impl JpegIO {
                                 let thumbnail = match crate::tiff::parse_thumbnail_info(&exif_data)
                                 {
                                     Ok(Some(thumb_info)) => {
-                                        // Create EmbeddedThumbnail with location relative to EXIF segment start
+                                        // Create EmbeddedThumbnailInfo with location relative to EXIF segment start
                                         let thumb_offset = segment_start
                                             + 4
                                             + EXIF_SIGNATURE.len() as u64
                                             + thumb_info.offset as u64;
-                                        Some(crate::thumbnail::EmbeddedThumbnail::new(
+                                        Some(crate::thumbnail::EmbeddedThumbnailInfo::new(
                                             thumb_offset,
                                             thumb_info.size as u64,
                                             crate::thumbnail::ThumbnailFormat::Jpeg,
@@ -1418,16 +1418,16 @@ impl ContainerIO for JpegIO {
     }
 
     #[cfg(feature = "exif")]
-    fn extract_embedded_thumbnail<R: Read + Seek>(
+    fn extract_embedded_thumbnail_info<R: Read + Seek>(
         &self,
         structure: &Structure,
         _source: &mut R,
-    ) -> Result<Option<crate::EmbeddedThumbnail>> {
+    ) -> Result<Option<crate::thumbnail::EmbeddedThumbnailInfo>> {
         // Check if any EXIF segment has an embedded thumbnail
         for segment in structure.segments() {
             if segment.is_type(SegmentKind::Exif) {
-                if let Some(thumb) = segment.thumbnail() {
-                    return Ok(Some(thumb.clone()));
+                if let Some(info) = segment.thumbnail_info() {
+                    return Ok(Some(info.clone()));
                 }
             }
         }

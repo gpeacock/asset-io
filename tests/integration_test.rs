@@ -279,26 +279,25 @@ mod thumbnail_tests {
     #[test]
     #[cfg(feature = "exif")]
     fn test_embedded_thumbnail() {
-        println!("\n=== Testing embedded_thumbnail() ===");
+        println!("\n=== Testing read_embedded_thumbnail() ===");
 
         use asset_io::Asset;
         let path = test_utils::fixture_path(test_utils::P1000708);
         let mut asset = Asset::open(&path).expect("Failed to open file");
 
         // Try to get embedded thumbnail (may or may not exist)
-        match asset.embedded_thumbnail() {
+        match asset.read_embedded_thumbnail() {
             Ok(Some(thumb)) => {
                 println!("  ✓ Found embedded thumbnail:");
-                println!("    Container: {:?}", thumb.container);
-                println!("    Offset: {} bytes", thumb.offset);
-                println!("    Size: {} bytes", thumb.size);
+                println!("    Format: {:?}", thumb.format);
+                println!("    Data size: {} bytes", thumb.data.len());
                 if let (Some(w), Some(h)) = (thumb.width, thumb.height) {
                     println!("    Dimensions: {}x{}", w, h);
                 }
 
                 // Verify it's reasonable
-                assert!(thumb.size > 0, "Thumbnail size should not be zero");
-                assert!(thumb.size < 100_000, "Thumbnail should be small");
+                assert!(!thumb.data.is_empty(), "Thumbnail data should not be empty");
+                assert!(thumb.data.len() < 100_000, "Thumbnail should be small");
             }
             Ok(None) => {
                 println!("  ℹ No embedded thumbnail (expected for most test files)");
@@ -376,26 +375,26 @@ mod thumbnail_tests {
     }
 
     #[test]
-    fn test_embedded_thumbnail_fits() {
-        println!("\n=== Testing EmbeddedThumbnail::fits() ===");
+    fn test_thumbnail_creation() {
+        println!("\n=== Testing Thumbnail creation ===");
 
-        use asset_io::{EmbeddedThumbnail, ThumbnailFormat};
+        use asset_io::{Thumbnail, ThumbnailFormat};
 
-        let thumb =
-            EmbeddedThumbnail::with_dimensions(vec![0u8; 100], ThumbnailFormat::Jpeg, 160, 120);
+        // Test with_dimensions
+        let thumb = Thumbnail::with_dimensions(vec![0u8; 100], ThumbnailFormat::Jpeg, 160, 120);
+        assert_eq!(thumb.data.len(), 100);
+        assert_eq!(thumb.format, ThumbnailFormat::Jpeg);
+        assert_eq!(thumb.width, Some(160));
+        assert_eq!(thumb.height, Some(120));
 
-        assert!(thumb.fits(256, 256), "160x120 should fit in 256x256");
-        assert!(
-            thumb.fits(160, 120),
-            "160x120 should fit exactly in 160x120"
-        );
-        assert!(!thumb.fits(128, 128), "160x120 should not fit in 128x128");
+        // Test new (without dimensions)
+        let thumb_no_dims = Thumbnail::new(vec![0u8; 50], ThumbnailFormat::Png);
+        assert_eq!(thumb_no_dims.data.len(), 50);
+        assert_eq!(thumb_no_dims.format, ThumbnailFormat::Png);
+        assert_eq!(thumb_no_dims.width, None);
+        assert_eq!(thumb_no_dims.height, None);
 
-        // Thumbnail without dimensions doesn't fit
-        let thumb_no_dims = EmbeddedThumbnail::new(0, 100, ThumbnailFormat::Jpeg, None, None);
-        assert!(!thumb_no_dims.fits(256, 256), "Unknown size should not fit");
-
-        println!("  ✓ EmbeddedThumbnail::fits() works correctly");
+        println!("  ✓ Thumbnail creation works correctly");
     }
 }
 

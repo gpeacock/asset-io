@@ -1017,16 +1017,16 @@ impl ContainerIO for PngIO {
     }
 
     #[cfg(feature = "exif")]
-    fn extract_embedded_thumbnail<R: Read + Seek>(
+    fn extract_embedded_thumbnail_info<R: Read + Seek>(
         &self,
         structure: &Structure,
         _source: &mut R,
-    ) -> Result<Option<crate::EmbeddedThumbnail>> {
+    ) -> Result<Option<crate::thumbnail::EmbeddedThumbnailInfo>> {
         // PNG doesn't typically have embedded thumbnails, but check EXIF anyway
         for segment in structure.segments() {
             if segment.is_type(SegmentKind::Exif) {
-                if let Some(thumb) = segment.thumbnail() {
-                    return Ok(Some(thumb.clone()));
+                if let Some(info) = segment.thumbnail_info() {
+                    return Ok(Some(info.clone()));
                 }
             }
         }

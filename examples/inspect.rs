@@ -74,15 +74,15 @@ fn main() -> asset_io::Result<()> {
     }
 
     // Check for embedded thumbnail (from EXIF)
-    match asset.embedded_thumbnail()? {
+    match asset.read_embedded_thumbnail()? {
         Some(thumb) => {
             let dims = match (thumb.width, thumb.height) {
                 (Some(w), Some(h)) => format!("{}x{}", w, h),
                 _ => "unknown dimensions".to_string(),
             };
             println!(
-                "\n✓ Found embedded thumbnail ({}, {} bytes at offset {})",
-                dims, thumb.size, thumb.offset
+                "\n✓ Found embedded thumbnail ({:?}, {}, {} bytes)",
+                thumb.format, dims, thumb.data.len()
             );
         }
         None => println!("\n✗ No embedded thumbnail found"),
@@ -109,11 +109,7 @@ fn main() -> asset_io::Result<()> {
         } else if segment.is_image_data() {
             "ImageData".to_string()
         } else if segment.is_exif() {
-            if segment.thumbnail().is_some() {
-                "EXIF (with thumbnail)".to_string()
-            } else {
-                "EXIF".to_string()
-            }
+            "EXIF".to_string()
         } else {
             segment.path.as_deref().unwrap_or("Other").to_string()
         };

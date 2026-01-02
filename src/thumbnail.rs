@@ -75,7 +75,7 @@ pub enum ThumbnailFormat {
     Other,
 }
 
-/// An embedded thumbnail extracted from a file
+/// An embedded thumbnail with its data
 ///
 /// Many image formats store pre-rendered thumbnails for quick preview:
 /// - JPEG: EXIF thumbnail (typically 160x120)
@@ -83,17 +83,14 @@ pub enum ThumbnailFormat {
 /// - WebP: VP8L thumbnail chunk
 /// - TIFF: IFD0 thumbnail
 ///
-/// The thumbnail data is stored as a location (offset/size) for lazy loading.
+/// This struct contains the actual thumbnail bytes, ready to use.
 #[derive(Debug, Clone)]
-pub struct EmbeddedThumbnail {
-    /// Offset of thumbnail data in the file
-    pub offset: u64,
-
-    /// Size of thumbnail data in bytes
-    pub size: u64,
+pub struct Thumbnail {
+    /// The raw thumbnail image data (typically JPEG)
+    pub data: Vec<u8>,
 
     /// Format of the thumbnail
-    pub container: ThumbnailFormat,
+    pub format: ThumbnailFormat,
 
     /// Width in pixels (if known)
     pub width: Option<u32>,
@@ -102,46 +99,65 @@ pub struct EmbeddedThumbnail {
     pub height: Option<u32>,
 }
 
-impl EmbeddedThumbnail {
-    /// Create a new embedded thumbnail with location
+impl Thumbnail {
+    /// Create a new thumbnail with data
+    pub fn new(data: Vec<u8>, format: ThumbnailFormat) -> Self {
+        Self {
+            data,
+            format,
+            width: None,
+            height: None,
+        }
+    }
+
+    /// Create a new thumbnail with dimensions
+    pub fn with_dimensions(data: Vec<u8>, format: ThumbnailFormat, width: u32, height: u32) -> Self {
+        Self {
+            data,
+            format,
+            width: Some(width),
+            height: Some(height),
+        }
+    }
+}
+
+/// Location info for an embedded thumbnail
+///
+/// This is used internally to track where thumbnail data is located.
+/// Use `Asset::read_embedded_thumbnail()` to get the actual bytes.
+#[derive(Debug, Clone)]
+pub struct EmbeddedThumbnailInfo {
+    /// Offset of thumbnail data in the file
+    pub offset: u64,
+
+    /// Size of thumbnail data in bytes
+    pub size: u64,
+
+    /// Format of the thumbnail
+    pub format: ThumbnailFormat,
+
+    /// Width in pixels (if known)
+    pub width: Option<u32>,
+
+    /// Height in pixels (if known)
+    pub height: Option<u32>,
+}
+
+impl EmbeddedThumbnailInfo {
+    /// Create a new embedded thumbnail info with location
     pub fn new(
         offset: u64,
         size: u64,
-        container: ThumbnailFormat,
+        format: ThumbnailFormat,
         width: Option<u32>,
         height: Option<u32>,
     ) -> Self {
         Self {
             offset,
             size,
-            container,
+            format,
             width,
             height,
-        }
-    }
-
-    /// Create a new embedded thumbnail with dimensions (for testing/legacy)
-    pub fn with_dimensions(
-        data: Vec<u8>,
-        container: ThumbnailFormat,
-        width: u32,
-        height: u32,
-    ) -> Self {
-        // For backwards compatibility - store as if at offset 0
-        Self {
-            offset: 0,
-            size: data.len() as u64,
-            container,
-            width: Some(width),
-            height: Some(height),
-        }
-    }
-
-    /// Check if this thumbnail is within the requested size
-    pub fn fits(&self, max_width: u32, max_height: u32) -> bool {
-        match (self.width, self.height) {
-            (Some(w), Some(h)) => w <= max_width && h <= max_height,
-            _ => false, // Unknown size - assume it doesn't fit
         }
     }
 }

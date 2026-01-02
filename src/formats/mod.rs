@@ -186,12 +186,13 @@ pub trait ContainerIO: Send + Sync {
     /// - PNG: No embedded thumbnails (returns None)
     ///
     /// This is the fastest thumbnail path - no decoding needed!
+    /// Returns location info; use Asset::read_embedded_thumbnail() to get actual bytes.
     #[cfg(feature = "exif")]
-    fn extract_embedded_thumbnail<R: Read + Seek>(
+    fn extract_embedded_thumbnail_info<R: Read + Seek>(
         &self,
         structure: &Structure,
         source: &mut R,
-    ) -> Result<Option<crate::EmbeddedThumbnail>>;
+    ) -> Result<Option<crate::thumbnail::EmbeddedThumbnailInfo>>;
 }
 
 // Container I/O modules - pub(crate) so register_containers! macro can access them
@@ -333,15 +334,15 @@ macro_rules! register_containers {
 
             #[cfg(feature = "exif")]
             #[allow(unreachable_patterns)]
-            pub(crate) fn extract_embedded_thumbnail<R: std::io::Read + std::io::Seek>(
+            pub(crate) fn extract_embedded_thumbnail_info<R: std::io::Read + std::io::Seek>(
                 &self,
                 structure: &$crate::Structure,
                 source: &mut R,
-            ) -> $crate::Result<Option<$crate::EmbeddedThumbnail>> {
+            ) -> $crate::Result<Option<$crate::thumbnail::EmbeddedThumbnailInfo>> {
                 match self {
                     $(
                         $(#[$meta])*
-                        Handler::$variant(h) => h.extract_embedded_thumbnail(structure, source),
+                        Handler::$variant(h) => h.extract_embedded_thumbnail_info(structure, source),
                     )*
                 }
             }

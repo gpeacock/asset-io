@@ -1057,11 +1057,11 @@ impl ContainerIO for BmffIO {
     }
 
     #[cfg(feature = "exif")]
-    fn extract_embedded_thumbnail<R: Read + Seek>(
+    fn extract_embedded_thumbnail_info<R: Read + Seek>(
         &self,
         _structure: &Structure,
         _source: &mut R,
-    ) -> Result<Option<crate::EmbeddedThumbnail>> {
+    ) -> Result<Option<crate::thumbnail::EmbeddedThumbnailInfo>> {
         // TODO: Implement BMFF thumbnail extraction
         Ok(None)
     }

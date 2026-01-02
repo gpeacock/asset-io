@@ -266,19 +266,48 @@ impl<R: Read + Seek> Asset<R> {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
-    /// // Try embedded thumbnail first (fastest!)
-    /// if let Some(thumb) = asset.embedded_thumbnail()? {
-    ///     println!("Found {}x{} thumbnail", thumb.width, thumb.height);
-    ///     return Ok(thumb.data);
+    /// ```no_run
+    /// use asset_io::Asset;
+    ///
+    /// # fn main() -> asset_io::Result<()> {
+    /// let mut asset = Asset::open("photo.jpg")?;
+    ///
+    /// // Try embedded thumbnail first (fastest - no decoding!)
+    /// if let Some(thumb) = asset.read_embedded_thumbnail()? {
+    ///     println!("Found {:?} thumbnail, {} bytes", thumb.format, thumb.data.len());
+    ///     if let (Some(w), Some(h)) = (thumb.width, thumb.height) {
+    ///         println!("Dimensions: {}x{}", w, h);
+    ///     }
+    ///     // thumb.data contains the raw JPEG/PNG bytes
     /// }
-    /// // Fall back to decoding main image
+    /// # Ok(())
+    /// # }
     /// ```
-    pub fn embedded_thumbnail(&mut self) -> Result<Option<crate::EmbeddedThumbnail>> {
+    pub fn read_embedded_thumbnail(&mut self) -> Result<Option<crate::Thumbnail>> {
         #[cfg(feature = "exif")]
         {
-            self.handler
-                .extract_embedded_thumbnail(&self.structure, &mut self.source)
+            use std::io::SeekFrom;
+            
+            // Get thumbnail location info
+            let info = self.handler
+                .extract_embedded_thumbnail_info(&self.structure, &mut self.source)?;
+            
+            match info {
+                Some(info) => {
+                    // Read the actual thumbnail data
+                    self.source.seek(SeekFrom::Start(info.offset))?;
+                    let mut data = vec![0u8; info.size as usize];
+                    self.source.read_exact(&mut data)?;
+                    
+                    Ok(Some(crate::Thumbnail {
+                        data,
+                        format: info.format,
+                        width: info.width,
+                        height: info.height,
+                    }))
+                }
+                None => Ok(None),
+            }
         }
 
         #[cfg(not(feature = "exif"))]
