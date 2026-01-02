@@ -49,7 +49,7 @@ required-features = ["xmp"]
 
 [[example]]
 name = "inspect"
-required-features = ["xmp"]
+required-features = ["all-formats", "xmp", "exif"]
 
 [[example]]
 name = "virtual_asset"

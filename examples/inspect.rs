@@ -1,7 +1,9 @@
-//! Example: Parse and inspect an image file
+//! Example: Parse and inspect a media file
 //!
-//! This example shows how to parse an image file (JPEG, PNG) and inspect its structure
-//! without loading the entire file into memory.
+//! This example shows how to parse any supported media file (JPEG, PNG, HEIC, AVIF, MP4, etc.)
+//! and inspect its structure without loading the entire file into memory.
+//!
+//! Run: `cargo run --example inspect --features all-formats,xmp,exif -- <file>`
 
 use asset_io::Asset;
 use std::env;
@@ -67,16 +69,9 @@ fn main() -> asset_io::Result<()> {
         } else if segment.is_image_data() {
             "ImageData".to_string()
         } else if segment.is_exif() {
-            #[cfg(feature = "exif")]
-            {
-                if segment.thumbnail().is_some() {
-                    "EXIF (with thumbnail)".to_string()
-                } else {
-                    "EXIF".to_string()
-                }
-            }
-            #[cfg(not(feature = "exif"))]
-            {
+            if segment.thumbnail().is_some() {
+                "EXIF (with thumbnail)".to_string()
+            } else {
                 "EXIF".to_string()
             }
         } else {
