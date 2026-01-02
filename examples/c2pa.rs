@@ -56,10 +56,10 @@ use sha2::{Digest, Sha512};
 use std::fs::OpenOptions;
 
 // BMFF support - uncomment when c2pa-rs adds bmff_hashed_placeholder/sign_bmff_hashed_embeddable APIs
-// Note: Will also need to add `serde_bytes` dependency for ByteBuf construction
 #[allow(dead_code, unused_variables)]
 mod bmff_support {
     use c2pa::assertions::{BmffHash, DataMap, ExclusionsMap, MerkleMap, SubsetMap, VecByteBuf};
+    use serde_bytes::ByteBuf;
     use sha2::{Digest, Sha256};
     use std::io::{Read, Seek, SeekFrom};
 
@@ -139,7 +139,7 @@ mod bmff_support {
                         num_chunks
                     );
 
-                    let mut hashes = Vec::new();
+                    let mut hashes: Vec<ByteBuf> = Vec::new();
                     for chunk_idx in 0..num_chunks {
                         let chunk_offset =
                             segment.ranges[0].offset + (chunk_idx * merkle_chunk_size);
@@ -154,9 +154,7 @@ mod bmff_support {
 
                         let mut hasher = Sha256::new();
                         hasher.update(&buffer);
-                        // When uncommenting, add: use serde_bytes::ByteBuf;
-                        // and replace line below with: hashes.push(ByteBuf::from(hasher.finalize().to_vec()));
-                        hashes.push(panic!("Need serde_bytes::ByteBuf"));
+                        hashes.push(ByteBuf::from(hasher.finalize().to_vec()));
                     }
 
                     merkle_maps.push(MerkleMap {

@@ -104,6 +104,7 @@ dependencies = [
  "md5",
  "memmap2",
  "quick-xml",
+ "serde_bytes",
  "sha2",
  "thiserror 1.0.69",
 ]

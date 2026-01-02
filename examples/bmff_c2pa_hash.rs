@@ -24,6 +24,7 @@ struct BmffHash {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct ExclusionsMap {
     box_path: String,
     data: Option<Vec<DataMap>>,
@@ -31,18 +32,21 @@ struct ExclusionsMap {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct DataMap {
     offset: u64,
     value: Vec<u8>,
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct SubsetMap {
     offset: u64,
     length: u64,
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct MerkleMap {
     unique_id: usize,
     local_id: usize,
@@ -101,7 +105,7 @@ fn main() -> asset_io::Result<()> {
     println!("====================================\n");
 
     // Parse the file
-    let mut asset = Asset::open(input)?;
+    let asset = Asset::open(input)?;
     let structure = asset.structure();
 
     println!("File: {}", input);
@@ -163,7 +167,7 @@ fn main() -> asset_io::Result<()> {
         let mut merkle_maps = Vec::new();
         let mut source = std::fs::File::open(input)?;
 
-        for (local_id, (idx, segment)) in mdat_boxes.iter().enumerate() {
+        for (local_id, (_idx, segment)) in mdat_boxes.iter().enumerate() {
             let mdat_size: u64 = segment.ranges.iter().map(|r| r.size).sum();
             let chunk_size = merkle_chunk_size_kb * 1024;
             let num_chunks = (mdat_size + chunk_size - 1) / chunk_size;

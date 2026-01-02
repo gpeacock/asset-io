@@ -51,7 +51,7 @@ fn main() -> asset_io::Result<()> {
     // Step 3: Update manifest in-place
     println!("\nStep 3: Update manifest in-place");
 
-    let mut file = OpenOptions::new()
+    let file = OpenOptions::new()
         .read(true)
         .write(true)
         .open(output_path)?;

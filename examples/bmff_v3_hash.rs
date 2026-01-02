@@ -9,6 +9,7 @@ use sha2::{Digest, Sha256};
 use std::io::{Read, Seek, SeekFrom};
 
 #[derive(Debug)]
+#[allow(dead_code)]
 struct BoxHash {
     box_type: String,
     offset: u64,
@@ -23,7 +24,7 @@ fn main() -> asset_io::Result<()> {
     println!("=====================================\n");
 
     // Parse the file to get structure
-    let mut asset = Asset::open(input)?;
+    let asset = Asset::open(input)?;
     let structure = asset.structure();
 
     println!("File: {}", input);
