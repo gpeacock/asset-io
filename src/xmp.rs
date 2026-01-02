@@ -1,88 +1,68 @@
 //! Minimal XMP parser
 //!
-//! This module provides just enough XMP parsing to extract and modify simple key/value pairs
-//! in XMP metadata for testing and basic operations.
+//! This module provides a lightweight XMP implementation for extracting and modifying
+//! simple key/value pairs in XMP metadata. Use [`MiniXmp`] for the primary API.
 //!
-//! XMP Structure:
-//! - XMP packets are XML-based RDF metadata
-//! - Properties can be attributes on rdf:Description or child elements
-//! - Packet padding maintains 2-4KB minimum size per spec
-//!
-//! # API Design
-//!
-//! ## Batch Operations (Efficient)
-//!
-//! For multiple keys, use batch operations to parse once:
+//! # Quick Start
 //!
 //! ```
-//! use asset_io::xmp::{get_keys, apply_updates};
+//! use asset_io::MiniXmp;
 //!
-//! let xmp = r#"<rdf:Description dc:title="Photo" dc:creator="John" />"#;
+//! let xmp_data = r#"<rdf:Description dc:title="Photo" dc:creator="John" />"#;
+//! let xmp = MiniXmp::new(xmp_data);
+//!
+//! // Read values
+//! assert_eq!(xmp.get("dc:title"), Some("Photo".to_string()));
+//! assert_eq!(xmp.get("dc:creator"), Some("John".to_string()));
+//!
+//! // Modify and get updated XMP
+//! let updated = xmp.set("dc:title", "New Photo").unwrap();
+//! let updated = updated.remove("dc:creator").unwrap();
+//! let xmp_string = updated.into_string();
+//! ```
+//!
+//! # Batch Operations
+//!
+//! For efficiency with multiple keys:
+//!
+//! ```
+//! use asset_io::MiniXmp;
+//!
+//! let xmp = MiniXmp::new(r#"<rdf:Description dc:title="Photo" dc:creator="John" />"#);
 //!
 //! // Get multiple values in one pass
-//! let values = get_keys(xmp, &["dc:title", "dc:creator", "dc:format"]);
+//! let values = xmp.get_many(&["dc:title", "dc:creator", "dc:format"]);
 //! assert_eq!(values[0], Some("Photo".to_string()));
-//! assert_eq!(values[1], Some("John".to_string()));
-//! assert_eq!(values[2], None);
+//! assert_eq!(values[2], None);  // Not found
 //!
-//! // Apply multiple updates in one pass
+//! // Apply multiple updates at once
 //! let updates = [
 //!     ("dc:title", Some("New Photo")),
 //!     ("dc:subject", Some("Landscape")),
 //!     ("dc:creator", None),  // None = remove
 //! ];
-//! let updated = apply_updates(xmp, &updates).unwrap();
-//! ```
-//!
-//! ## Single Operations (Convenience)
-//!
-//! For 1-2 operations, use convenience functions:
-//!
-//! ```
-//! use asset_io::xmp::{get_key, add_key, remove_key};
-//!
-//! let xmp = r#"<rdf:Description dc:title="Photo" />"#;
-//! let title = get_key(xmp, "dc:title");
-//! let xmp = add_key(xmp, "dc:creator", "John").unwrap();
-//! let xmp = remove_key(&xmp, "dc:title").unwrap();
+//! let updated = xmp.apply_updates(&updates).unwrap();
 //! ```
 //!
 //! # Limitations
 //!
-//! This is a **minimal** XMP implementation optimized for simplicity and size.
-//! It has several known limitations:
+//! This is a **minimal** XMP implementation ("Mini" is in the name!).
+//! It handles the most common XMP patterns but has limitations:
 //!
 //! ## Not Supported
 //!
-//! - **Structured properties** (e.g., nested elements, alt/bag/seq containers)
-//! - **Arrays** (only simple string values)
-//! - **Child elements** (writing only modifies attributes on `rdf:Description`)
-//! - **XMP packet padding** (writes don't maintain the 2-4KB minimum size)
-//! - **Namespaces** (no validation, assumes caller provides correct prefixes)
-//! - **Multiple `rdf:Description` blocks** (only processes the first one)
-//! - **XML comments and processing instructions** (preserved but not parsed)
+//! - Structured properties (nested elements, alt/bag/seq containers)
+//! - Arrays (only simple string values)
+//! - XMP packet padding (writes don't maintain the 2-4KB minimum size)
+//! - Namespace validation (assumes caller provides correct prefixes)
 //!
 //! ## What Works
 //!
 //! - Simple attribute-based properties (the most common XMP pattern)
-//! - Reading child elements with text content (e.g., `<dc:title>Photo</dc:title>`)
-//! - XML entity encoding/decoding (`&`, `<`, `>`, `"`, `'`)
+//! - Reading child elements with text content
+//! - Multiple `rdf:Description` blocks
+//! - XML entity encoding/decoding
 //! - UTF-8 text values
-//! - Streaming parsing (low memory overhead)
-//!
-//! ## When to Use This
-//!
-//! ✅ **Good for:**
-//! - Testing and development
-//! - Simple metadata queries (title, creator, etc.)
-//! - Lightweight embedded use cases
-//! - When you control the XMP structure
-//!
-//! ❌ **Not suitable for:**
-//! - Production XMP editing in complex applications
-//! - Structured/nested XMP properties
-//! - Full XMP spec compliance
-//! - XMP with multiple description blocks
 //!
 //! For full XMP support, consider the `xmp-toolkit` crate instead.
 
@@ -90,6 +70,152 @@ use crate::error::Result;
 use std::io::Cursor;
 
 const RDF_DESCRIPTION: &[u8] = b"rdf:Description";
+
+// ============================================================================
+// MiniXmp Struct API
+// ============================================================================
+
+/// A minimal XMP parser and editor
+///
+/// `MiniXmp` provides a lightweight way to read and modify XMP metadata without
+/// pulling in heavy dependencies. It handles the most common XMP patterns
+/// (simple attribute-based properties) but is not a full XMP implementation.
+///
+/// # Example
+///
+/// ```
+/// use asset_io::MiniXmp;
+///
+/// // Parse XMP from bytes or string
+/// let xmp = MiniXmp::new(r#"<rdf:Description dc:title="Photo" />"#);
+///
+/// // Read a value
+/// if let Some(title) = xmp.get("dc:title") {
+///     println!("Title: {}", title);
+/// }
+///
+/// // Modify (returns new MiniXmp)
+/// let updated = xmp.set("dc:creator", "John Doe").unwrap();
+///
+/// // Get the updated XMP string
+/// let xmp_string = updated.into_string();
+/// ```
+#[derive(Debug, Clone)]
+pub struct MiniXmp {
+    data: String,
+}
+
+impl MiniXmp {
+    /// Create a new MiniXmp from an XMP string
+    pub fn new(xmp: impl Into<String>) -> Self {
+        Self { data: xmp.into() }
+    }
+
+    /// Create a MiniXmp from raw bytes
+    ///
+    /// Returns `None` if the bytes are not valid UTF-8.
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        std::str::from_utf8(bytes).ok().map(|s| Self::new(s))
+    }
+
+    /// Get the XMP as a string slice
+    pub fn as_str(&self) -> &str {
+        &self.data
+    }
+
+    /// Get the XMP as bytes
+    pub fn as_bytes(&self) -> &[u8] {
+        self.data.as_bytes()
+    }
+
+    /// Consume self and return the XMP string
+    pub fn into_string(self) -> String {
+        self.data
+    }
+
+    /// Consume self and return the XMP as bytes
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.data.into_bytes()
+    }
+
+    /// Get a single value from the XMP
+    ///
+    /// Returns `None` if the key is not found.
+    pub fn get(&self, key: &str) -> Option<String> {
+        get_key(&self.data, key)
+    }
+
+    /// Get multiple values from the XMP in a single pass
+    ///
+    /// More efficient than calling `get()` multiple times.
+    pub fn get_many(&self, keys: &[&str]) -> Vec<Option<String>> {
+        get_keys(&self.data, keys)
+    }
+
+    /// Set a value in the XMP, returning a new MiniXmp
+    ///
+    /// If the key exists, it will be updated. If not, it will be added.
+    pub fn set(&self, key: &str, value: &str) -> Result<Self> {
+        add_key(&self.data, key, value).map(Self::new)
+    }
+
+    /// Remove a key from the XMP, returning a new MiniXmp
+    pub fn remove(&self, key: &str) -> Result<Self> {
+        remove_key(&self.data, key).map(Self::new)
+    }
+
+    /// Apply multiple updates at once, returning a new MiniXmp
+    ///
+    /// Each update is a `(key, value)` pair where `value` is:
+    /// - `Some("value")` to set/add the key
+    /// - `None` to remove the key
+    pub fn apply_updates(&self, updates: &[(&str, Option<&str>)]) -> Result<Self> {
+        apply_updates(&self.data, updates).map(Self::new)
+    }
+
+    /// Check if the XMP contains a key
+    pub fn contains(&self, key: &str) -> bool {
+        self.get(key).is_some()
+    }
+
+    /// Get the length of the XMP string in bytes
+    pub fn len(&self) -> usize {
+        self.data.len()
+    }
+
+    /// Check if the XMP is empty
+    pub fn is_empty(&self) -> bool {
+        self.data.is_empty()
+    }
+}
+
+impl std::fmt::Display for MiniXmp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.data)
+    }
+}
+
+impl From<String> for MiniXmp {
+    fn from(s: String) -> Self {
+        Self::new(s)
+    }
+}
+
+impl From<&str> for MiniXmp {
+    fn from(s: &str) -> Self {
+        Self::new(s)
+    }
+}
+
+impl AsRef<str> for MiniXmp {
+    fn as_ref(&self) -> &str {
+        &self.data
+    }
+}
+
+// ============================================================================
+// Free Functions (kept for compatibility, delegate to implementation below)
+// ============================================================================
 
 /// Validate that a key is a reasonable XMP property name.
 ///

@@ -117,6 +117,8 @@ pub mod thumbnail;
 mod tiff;
 #[cfg(feature = "xmp")]
 pub mod xmp;
+#[cfg(feature = "xmp")]
+pub use xmp::MiniXmp;
 
 pub use asset::{Asset, AssetBuilder};
 pub use error::{Error, Result};
