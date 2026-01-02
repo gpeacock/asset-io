@@ -65,6 +65,44 @@
 //! # Ok(())
 //! # }
 //! ```
+//!
+//! # Processing During Read/Write
+//!
+//! For C2PA workflows and similar use cases, you can process data (e.g., hash it)
+//! while reading or writing:
+//!
+//! ```no_run
+//! use asset_io::{Asset, Updates, SegmentKind, ExclusionMode};
+//! use sha2::{Sha256, Digest};
+//!
+//! # fn main() -> asset_io::Result<()> {
+//! let mut asset = Asset::open("signed.jpg")?;
+//!
+//! // Hash while reading, excluding specific segments
+//! let updates = Updates::new()
+//!     .exclude_from_processing(vec![SegmentKind::Jumbf], ExclusionMode::DataOnly);
+//!
+//! let mut hasher = Sha256::new();
+//! asset.read_with_processing(&updates, &mut |chunk| hasher.update(chunk))?;
+//! let hash = hasher.finalize();
+//! println!("Asset hash: {:x}", hash);
+//!
+//! // Or hash while writing (single-pass workflow)
+//! let mut output = std::fs::File::create("output.jpg")?;
+//! let updates = Updates::new()
+//!     .set_jumbf(b"placeholder".to_vec())
+//!     .exclude_from_processing(vec![SegmentKind::Jumbf], ExclusionMode::DataOnly);
+//!
+//! let mut hasher = Sha256::new();
+//! let dest_structure = asset.write_with_processing(
+//!     &mut output,
+//!     &updates,
+//!     &mut |chunk| hasher.update(chunk),
+//! )?;
+//! // Now you have the hash and can update the JUMBF in-place
+//! # Ok(())
+//! # }
+//! ```
 
 mod asset;
 mod error;

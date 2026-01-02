@@ -20,7 +20,7 @@ use std::io::{Result, Write};
 ///
 /// ```rust
 /// use std::io::Write;
-/// # use asset_io::processing_writer::ProcessingWriter;
+/// use asset_io::ProcessingWriter;
 /// use sha2::{Sha256, Digest};
 ///
 /// let mut output = Vec::new();
