@@ -131,7 +131,7 @@ impl JpegIO {
             source.seek(SeekFrom::Start(range.offset))?;
             let mut xmp_data = vec![0u8; range.size as usize];
             source.read_exact(&mut xmp_data)?;
-            return Ok(Some(xmp_data));
+            Ok(Some(xmp_data))
         } else {
             // Multiple ranges - concatenate them
             let total_size: u64 = segment.ranges.iter().map(|r| r.size).sum();
@@ -142,7 +142,7 @@ impl JpegIO {
                 source.read_exact(&mut chunk)?;
                 xmp_data.extend_from_slice(&chunk);
             }
-            return Ok(Some(xmp_data));
+            Ok(Some(xmp_data))
         }
     }
 

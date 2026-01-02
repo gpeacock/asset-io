@@ -127,6 +127,7 @@ pub trait ContainerIO: Send + Sync {
     ///     Ok(())
     /// }
     /// ```
+    #[allow(clippy::too_many_arguments)]
     fn write_with_processor<R: Read + Seek, W: Write, F: FnMut(&[u8])>(
         &self,
         structure: &Structure,
@@ -277,6 +278,7 @@ macro_rules! register_containers {
             }
 
             #[allow(unreachable_patterns)]
+            #[allow(clippy::too_many_arguments)]
             pub(crate) fn write_with_processor<R: std::io::Read + std::io::Seek, W: std::io::Write, F: FnMut(&[u8])>(
                 &self,
                 structure: &$crate::Structure,

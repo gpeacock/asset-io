@@ -154,17 +154,14 @@ pub fn get_keys(xmp: &str, keys: &[&str]) -> Vec<Option<String>> {
             Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => {
                 if e.name() == QName(RDF_DESCRIPTION) {
                     // Search attributes
-                    for attr_result in e.attributes() {
-                        if let Ok(attr) = attr_result {
-                            // Check if this attribute matches any of our keys
-                            for (i, key) in keys.iter().enumerate() {
-                                if attr.key == QName(key.as_bytes()) {
-                                    // Use decode_and_unescape_value to handle XML entities
-                                    if let Ok(s) = attr.decode_and_unescape_value(reader.decoder())
-                                    {
-                                        // Overwrite if found in later block (last wins)
-                                        results[i] = Some(s.to_string());
-                                    }
+                    for attr in e.attributes().flatten() {
+                        // Check if this attribute matches any of our keys
+                        for (i, key) in keys.iter().enumerate() {
+                            if attr.key == QName(key.as_bytes()) {
+                                // Use decode_and_unescape_value to handle XML entities
+                                if let Ok(s) = attr.decode_and_unescape_value(reader.decoder()) {
+                                    // Overwrite if found in later block (last wins)
+                                    results[i] = Some(s.to_string());
                                 }
                             }
                         }

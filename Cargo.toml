@@ -77,9 +77,6 @@ name = "bmff_c2pa_hash"
 required-features = ["bmff"]
 
 [[example]]
-name = "bench_hash_only"
-
-[[example]]
 name = "test_bmff"
 required-features = ["bmff"]
 
@@ -92,20 +89,8 @@ name = "update_jumbf"
 required-features = ["jpeg", "xmp"]
 
 [[example]]
-name = "test_large_164mb"
-required-features = ["bmff"]
-
-[[example]]
 name = "update_xmp_field"
 required-features = ["jpeg", "xmp"]
-
-[[example]]
-name = "test_processing_writer_png"
-required-features = ["png"]
-
-[[example]]
-name = "test_png_jumbf_write"
-required-features = ["png"]
 
 [[example]]
 name = "test_all_combinations"

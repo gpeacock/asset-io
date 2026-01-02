@@ -660,7 +660,7 @@ impl BmffIO {
             for uuid_token in uuid_list {
                 let box_info = &bmff_tree[*uuid_token];
                 if let Some(uuid) = &box_info.data.user_type {
-                    if uuid.as_slice() == &XMP_UUID {
+                    if uuid.as_slice() == XMP_UUID {
                         // XMP UUID box found
                         // XMP boxes DON'T have version/flags, data starts right after UUID
                         let data_offset = box_info.data.offset + HEADER_SIZE + 16;
@@ -670,7 +670,7 @@ impl BmffIO {
                             SegmentKind::Xmp,
                             Some("uuid/xmp".to_string()),
                         ));
-                    } else if uuid.as_slice() == &C2PA_UUID {
+                    } else if uuid.as_slice() == C2PA_UUID {
                         // C2PA UUID box found (contains JUMBF)
                         // C2PA boxes DO have version/flags + purpose string
                         let data_offset = box_info.data.offset + HEADER_SIZE + 16 + 4;
@@ -865,7 +865,7 @@ impl ContainerIO for BmffIO {
                         .data
                         .user_type
                         .as_ref()
-                        .map(|uuid| uuid.as_slice() == &XMP_UUID)
+                        .map(|uuid| uuid.as_slice() == XMP_UUID)
                         .unwrap_or(false)
                 })
                 .copied()
@@ -882,7 +882,7 @@ impl ContainerIO for BmffIO {
                         .data
                         .user_type
                         .as_ref()
-                        .map(|uuid| uuid.as_slice() == &C2PA_UUID)
+                        .map(|uuid| uuid.as_slice() == C2PA_UUID)
                         .unwrap_or(false)
                 })
                 .copied()
