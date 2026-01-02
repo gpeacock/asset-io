@@ -35,9 +35,6 @@ xmp = ["quick-xml", "md5"]
 memory-mapped = ["memmap2", "fs2"]
 all-formats = ["jpeg", "png", "bmff"]
 
-# TEMPORARY: C2PA testing feature (delete after validation)
-c2pa-test = []  # Enables C2PA integration tests in examples
-
 # Note: At least one format feature (jpeg, png) must be enabled for the library to compile.
 
 # Testing features
