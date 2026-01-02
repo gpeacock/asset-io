@@ -163,9 +163,9 @@ Update: [Seek→][Patch]           → in-place JUMBF update
 |--------|-------|-------|-----|-------|------|
 | JPEG | ✅ | ✅ | ✅ | ✅ | ✅ |
 | PNG | ✅ | ✅ | ✅ | ✅ | - |
-| HEIC/HEIF | ✅ | 🚧 | ✅ | ✅ | - |
-| AVIF | ✅ | 🚧 | ✅ | ✅ | - |
-| MP4/MOV | ✅ | 🚧 | ✅ | ✅ | - |
+| HEIC/HEIF | ✅ | ✅ | ✅ | ✅ | - |
+| AVIF | ✅ | ✅ | ✅ | ✅ | - |
+| MP4/MOV | ✅ | ✅ | ✅ | ✅ | - |
 
 ## Examples
 
@@ -246,7 +246,7 @@ asset.update_jumbf_in_place(new_jumbf)?
 - [x] MiniXmp parser
 - [x] EXIF parsing and thumbnail extraction
 - [x] Streaming processing callbacks
-- [ ] Full BMFF write support
+- [ ] BMFF thumbnail extraction
 - [ ] Memory-mapped I/O option
 - [ ] Async I/O support
 
