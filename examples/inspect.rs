@@ -48,6 +48,21 @@ fn main() -> asset_io::Result<()> {
         None => println!("\n✗ No JUMBF data found"),
     }
 
+    // Check for embedded thumbnail (from EXIF)
+    match asset.embedded_thumbnail()? {
+        Some(thumb) => {
+            let dims = match (thumb.width, thumb.height) {
+                (Some(w), Some(h)) => format!("{}x{}", w, h),
+                _ => "unknown dimensions".to_string(),
+            };
+            println!(
+                "\n✓ Found embedded thumbnail ({}, {} bytes at offset {})",
+                dims, thumb.size, thumb.offset
+            );
+        }
+        None => println!("\n✗ No embedded thumbnail found"),
+    }
+
     // Show segment breakdown
     println!("\nSegment breakdown:");
     for (i, segment) in asset.structure().segments.iter().enumerate() {
