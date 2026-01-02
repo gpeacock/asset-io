@@ -70,6 +70,7 @@ mod asset;
 mod error;
 mod formats;
 mod media_type;
+pub mod processing_writer;
 mod segment;
 mod structure;
 pub mod thumbnail;
@@ -77,7 +78,6 @@ pub mod thumbnail;
 mod tiff;
 #[cfg(feature = "xmp")]
 pub mod xmp;
-pub mod processing_writer;
 
 pub use asset::{Asset, AssetBuilder, VirtualAsset};
 pub use error::{Error, Result};
@@ -285,12 +285,12 @@ pub(crate) use formats::{detect_container, get_handler, Handler};
 pub use formats::{detect_from_extension, detect_from_mime, Container};
 
 // Re-export container handlers at crate root
+#[cfg(feature = "bmff")]
+pub use formats::bmff_io::BmffIO;
 #[cfg(feature = "jpeg")]
 pub use formats::jpeg_io::JpegIO;
 #[cfg(feature = "png")]
 pub use formats::png_io::PngIO;
-#[cfg(feature = "bmff")]
-pub use formats::bmff_io::BmffIO;
 /// Update a segment in an already-written stream using structure information
 ///
 /// This is a low-level utility for updating specific segments after a file has been
@@ -351,6 +351,12 @@ pub fn update_segment_with_structure<W: std::io::Write + std::io::Seek>(
 ) -> Result<usize> {
     use std::io::SeekFrom;
 
+    // PNG requires special handling for CRC recalculation
+    #[cfg(feature = "png")]
+    if structure.container == Container::Png {
+        return formats::png_io::update_png_segment_in_stream(writer, structure, kind, data);
+    }
+
     // Find the segment
     let segment_idx = match kind {
         SegmentKind::Jumbf => structure.c2pa_jumbf_index(),
@@ -383,7 +389,7 @@ pub fn update_segment_with_structure<W: std::io::Write + std::io::Seek>(
     let mut padded = data;
     padded.resize(total_capacity as usize, 0);
 
-    // Write across ranges
+    // For non-PNG formats, just write the data directly
     let mut offset = 0;
     for range in &segment.ranges {
         writer.seek(SeekFrom::Start(range.offset))?;

@@ -21,6 +21,10 @@ const C2PA: &[u8] = b"caBX";
 // XMP keyword in iTXt chunks
 const XMP_KEYWORD: &[u8] = b"XML:com.adobe.xmp\0";
 
+// Size of the iTXt header for XMP chunks (before XMP data)
+// = XMP_KEYWORD (18) + compression_flag (1) + compression_method (1) + language_tag_null (1) + translated_keyword_null (1)
+const ITXT_XMP_HEADER_SIZE: u64 = 22;
+
 /// Get human-readable label for a PNG chunk type
 fn chunk_label(chunk_type: &[u8; 4]) -> &'static str {
     match chunk_type {
@@ -359,11 +363,11 @@ impl PngIO {
     /// This avoids large allocations for big segments
     fn copy_bytes<R: Read, W: Write>(source: &mut R, writer: &mut W, size: u64) -> Result<()> {
         const CHUNK_SIZE: usize = 8 * 1024 * 1024; // 8MB chunks
-        
+
         if size > CHUNK_SIZE as u64 {
             let mut buffer = vec![0u8; CHUNK_SIZE];
             let mut remaining = size;
-            
+
             while remaining > 0 {
                 let to_copy = remaining.min(CHUNK_SIZE as u64) as usize;
                 source.read_exact(&mut buffer[..to_copy])?;
@@ -376,7 +380,7 @@ impl PngIO {
             source.read_exact(&mut buffer)?;
             writer.write_all(&buffer)?;
         }
-        
+
         Ok(())
     }
 
@@ -485,7 +489,7 @@ impl ContainerIO for PngIO {
     ) -> Result<()> {
         // Calculate the destination structure first - this tells us exactly what to write
         let dest_structure = self.calculate_updated_structure(structure, updates)?;
-        
+
         source.seek(SeekFrom::Start(0))?;
 
         // Write PNG signature
@@ -507,7 +511,8 @@ impl ContainerIO for PngIO {
                         }
                         crate::MetadataUpdate::Keep => {
                             // Find corresponding source segment and copy it
-                            if let Some(source_seg) = structure.segments.iter().find(|s| s.is_xmp()) {
+                            if let Some(source_seg) = structure.segments.iter().find(|s| s.is_xmp())
+                            {
                                 let location = source_seg.location();
                                 source.seek(SeekFrom::Start(location.offset))?;
 
@@ -531,7 +536,9 @@ impl ContainerIO for PngIO {
                         }
                         crate::MetadataUpdate::Keep => {
                             // Find corresponding source segment and copy it
-                            if let Some(source_seg) = structure.segments.iter().find(|s| s.is_jumbf()) {
+                            if let Some(source_seg) =
+                                structure.segments.iter().find(|s| s.is_jumbf())
+                            {
                                 let location = source_seg.location();
                                 source.seek(SeekFrom::Start(location.offset))?;
 
@@ -549,7 +556,11 @@ impl ContainerIO for PngIO {
 
                 seg if seg.is_type(SegmentKind::ImageData) => {
                     // Find corresponding source segment and copy IDAT chunk
-                    if let Some(source_seg) = structure.segments.iter().find(|s| s.is_type(SegmentKind::ImageData)) {
+                    if let Some(source_seg) = structure
+                        .segments
+                        .iter()
+                        .find(|s| s.is_type(SegmentKind::ImageData))
+                    {
                         let location = source_seg.location();
                         let chunk_start = location.offset - 8; // Back to length field
                         let chunk_size = 8 + location.size + 4;
@@ -561,7 +572,11 @@ impl ContainerIO for PngIO {
 
                 seg if seg.is_type(SegmentKind::Exif) => {
                     // Find corresponding source segment and copy EXIF chunk
-                    if let Some(source_seg) = structure.segments.iter().find(|s| s.is_type(SegmentKind::Exif)) {
+                    if let Some(source_seg) = structure
+                        .segments
+                        .iter()
+                        .find(|s| s.is_type(SegmentKind::Exif))
+                    {
                         let location = source_seg.location();
                         let chunk_start = location.offset - 8; // Back to length field
                         let chunk_size = 8 + location.size + 4;
@@ -574,7 +589,9 @@ impl ContainerIO for PngIO {
                 _ => {
                     // Copy other chunks from source
                     // Find corresponding source segment by kind and path
-                    if let Some(source_seg) = structure.segments.iter()
+                    if let Some(source_seg) = structure
+                        .segments
+                        .iter()
                         .find(|s| s.kind == dest_segment.kind && s.path == dest_segment.path)
                     {
                         let location = source_seg.location();
@@ -619,10 +636,12 @@ impl ContainerIO for PngIO {
                     match &updates.xmp {
                         MetadataUpdate::Keep => {
                             // Keep existing XMP chunk
+                            // XMP data is wrapped in iTXt: keyword + flags + XMP data
                             let location = segment.location();
-                            let chunk_size = 8 + location.size + 4; // length + type + data + CRC
+                            let chunk_data_size = ITXT_XMP_HEADER_SIZE + location.size;
+                            let chunk_size = 8 + chunk_data_size + 4; // length + type + data + CRC
                             dest_structure.add_segment(Segment::new(
-                                current_offset + 8, // Skip length + type
+                                current_offset + 8 + ITXT_XMP_HEADER_SIZE, // After length + type + iTXt header
                                 location.size,
                                 SegmentKind::Xmp,
                                 segment.path.clone(),
@@ -631,11 +650,12 @@ impl ContainerIO for PngIO {
                             xmp_written = true;
                         }
                         MetadataUpdate::Set(new_xmp) if !xmp_written => {
-                            // New XMP chunk
+                            // New XMP chunk - iTXt header adds 22 bytes
                             let xmp_size = new_xmp.len() as u64;
-                            let chunk_size = 8 + xmp_size + 4;
+                            let chunk_data_size = ITXT_XMP_HEADER_SIZE + xmp_size;
+                            let chunk_size = 8 + chunk_data_size + 4;
                             dest_structure.add_segment(Segment::new(
-                                current_offset + 8,
+                                current_offset + 8 + ITXT_XMP_HEADER_SIZE,
                                 xmp_size,
                                 SegmentKind::Xmp,
                                 Some("iTXt".to_string()),
@@ -714,10 +734,12 @@ impl ContainerIO for PngIO {
                     if segment.path.as_deref() == Some("IEND") {
                         if !xmp_written && !has_xmp {
                             if let MetadataUpdate::Set(new_xmp) = &updates.xmp {
+                                // New XMP chunk - iTXt header adds 22 bytes
                                 let xmp_size = new_xmp.len() as u64;
-                                let chunk_size = 8 + xmp_size + 4;
+                                let chunk_data_size = ITXT_XMP_HEADER_SIZE + xmp_size;
+                                let chunk_size = 8 + chunk_data_size + 4;
                                 dest_structure.add_segment(Segment::new(
-                                    current_offset + 8,
+                                    current_offset + 8 + ITXT_XMP_HEADER_SIZE,
                                     xmp_size,
                                     SegmentKind::Xmp,
                                     Some("iTXt".to_string()),
@@ -744,14 +766,18 @@ impl ContainerIO for PngIO {
                     }
 
                     // Copy other chunks as-is
+                    // Note: "Other" chunks store the FULL chunk (offset at length field,
+                    // size includes length + type + data + CRC), unlike data segments
+                    // which only store the data portion
                     let location = segment.location();
+                    let chunk_size = location.size; // Already includes full chunk
                     dest_structure.add_segment(Segment::new(
-                        current_offset,
+                        current_offset, // Full chunk starts here
                         location.size,
                         segment.kind,
                         segment.path.clone(),
                     ));
-                    current_offset += location.size;
+                    current_offset += chunk_size;
                 }
             }
         }
@@ -776,6 +802,109 @@ impl ContainerIO for PngIO {
         }
         Ok(None)
     }
+}
+
+/// Update a PNG segment in-place with proper CRC recalculation
+///
+/// PNG chunks have a CRC that must be recalculated when data changes.
+/// This function handles the PNG-specific update:
+/// - For JUMBF (caBX): Updates data and recalculates CRC
+/// - For XMP (iTXt): Updates XMP data portion and recalculates CRC
+///
+/// # Arguments
+/// - `writer`: A seekable writer positioned at the file
+/// - `structure`: The destination structure with segment positions
+/// - `kind`: SegmentKind::Jumbf or SegmentKind::Xmp
+/// - `data`: The new data (will be padded to fit existing capacity)
+///
+/// # Returns
+/// Number of bytes written (the padded data size)
+pub fn update_png_segment_in_stream<W: Write + Seek>(
+    writer: &mut W,
+    structure: &Structure,
+    kind: SegmentKind,
+    data: Vec<u8>,
+) -> Result<usize> {
+    // Find the segment
+    let segment_idx = match kind {
+        SegmentKind::Jumbf => structure.c2pa_jumbf_index(),
+        SegmentKind::Xmp => structure.xmp_index(),
+        _ => {
+            return Err(Error::InvalidFormat(format!(
+                "PNG in-place update not supported for {:?}",
+                kind
+            )))
+        }
+    }
+    .ok_or_else(|| Error::InvalidFormat(format!("No {:?} segment found in PNG", kind)))?;
+
+    let segment = &structure.segments[segment_idx];
+    let data_offset = segment.location().offset;
+    let data_capacity = segment.location().size;
+
+    // Validate size
+    if data.len() as u64 > data_capacity {
+        return Err(Error::InvalidFormat(format!(
+            "Data ({} bytes) exceeds PNG chunk capacity ({} bytes)",
+            data.len(),
+            data_capacity
+        )));
+    }
+
+    // Pad data to exact capacity
+    let mut padded_data = data;
+    padded_data.resize(data_capacity as usize, 0);
+
+    match kind {
+        SegmentKind::Jumbf => {
+            // caBX chunk layout:
+            // [length:4][type:4][data:N][crc:4]
+            // data_offset points to start of data (after type)
+            
+            // Write the data
+            writer.seek(SeekFrom::Start(data_offset))?;
+            writer.write_all(&padded_data)?;
+
+            // Calculate CRC over chunk_type + data
+            let crc = PngIO::calculate_crc(C2PA, &padded_data);
+
+            // CRC is immediately after data
+            // (we're already positioned there after writing data)
+            writer.write_u32::<BigEndian>(crc)?;
+        }
+
+        SegmentKind::Xmp => {
+            // iTXt XMP chunk layout:
+            // [length:4][type:4][header:22][xmp_data:N][crc:4]
+            // data_offset points to start of XMP data (after header)
+            // header = keyword(18) + flags(4)
+
+            // Write the XMP data
+            writer.seek(SeekFrom::Start(data_offset))?;
+            writer.write_all(&padded_data)?;
+
+            // Build complete chunk data for CRC calculation
+            // iTXt chunk data = keyword + flags + XMP data
+            let mut chunk_data = Vec::with_capacity(ITXT_XMP_HEADER_SIZE as usize + padded_data.len());
+            chunk_data.extend_from_slice(XMP_KEYWORD); // 18 bytes
+            chunk_data.push(0); // compression flag
+            chunk_data.push(0); // compression method
+            chunk_data.push(0); // language tag null
+            chunk_data.push(0); // translated keyword null
+            chunk_data.extend_from_slice(&padded_data);
+
+            // Calculate CRC over "iTXt" + chunk_data
+            let crc = PngIO::calculate_crc(ITXT, &chunk_data);
+
+            // CRC is immediately after XMP data
+            writer.write_u32::<BigEndian>(crc)?;
+        }
+
+        _ => unreachable!(),
+    }
+
+    writer.flush()?;
+    Ok(padded_data.len())
 }
 
 #[cfg(test)]
