@@ -53,10 +53,6 @@ name = "inspect"
 required-features = ["all-formats", "xmp", "exif"]
 
 [[example]]
-name = "virtual_asset"
-required-features = ["xmp"]
-
-[[example]]
 name = "test_mmap"
 required-features = ["memory-mapped", "test-utils"]
 
