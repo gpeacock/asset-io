@@ -296,7 +296,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let placeholder_manifest =
         builder.data_hashed_placeholder(signer.reserve_size(), "application/c2pa")?;
 
-    let updates = Updates::new().set_jumbf(placeholder_manifest.clone());
+    // Configure updates with write options for C2PA hashing
+    let updates = Updates::new()
+        .set_jumbf(placeholder_manifest.clone())
+        .exclude_from_processing(vec![SegmentKind::Jumbf], ExclusionMode::DataOnly);
 
     // Open output file with write+seek (no read needed with true single-pass!)
     let mut output_file = OpenOptions::new()
@@ -313,9 +316,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let structure = asset.write_with_processing(
         &mut output_file,
         &updates,
-        8192,                       // 8KB chunks
-        &[SegmentKind::Jumbf],      // Exclude JUMBF from hash
-        ExclusionMode::DataOnly,    // C2PA: include headers in hash
         &mut |chunk| hasher.update(chunk),
     )?;
 

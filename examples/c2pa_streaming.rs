@@ -32,8 +32,10 @@ fn main() -> asset_io::Result<()> {
     let placeholder = vec![0u8; placeholder_size];
     println!("📦 Created placeholder JUMBF: {} bytes", placeholder.len());
 
-    // Step 3: Prepare updates
-    let updates = Updates::new().set_jumbf(placeholder);
+    // Step 3: Prepare updates with write options for C2PA hashing
+    let updates = Updates::new()
+        .set_jumbf(placeholder)
+        .exclude_from_processing(vec![SegmentKind::Jumbf], ExclusionMode::DataOnly);
 
     // Step 4: Open output file with write+seek (no read needed with true single-pass!)
     let mut output = OpenOptions::new()
@@ -47,14 +49,10 @@ fn main() -> asset_io::Result<()> {
     // This is the key optimization - we hash while writing!
     println!("\n⚡ Writing and hashing in single pass...");
     let mut hasher = Sha256::new();
-    let chunk_size = 8192; // 8KB chunks
 
     let structure = asset.write_with_processing(
         &mut output,
         &updates,
-        chunk_size,
-        &[SegmentKind::Jumbf],    // Exclude JUMBF from hash
-        ExclusionMode::DataOnly,  // C2PA: include headers in hash
         &mut |chunk| hasher.update(chunk),
     )?;
 

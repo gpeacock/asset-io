@@ -522,7 +522,9 @@ mod tests {
             // The placeholder needs to be valid JUMBF for the parser to find it after update
             let placeholder = create_test_jumbf();
             let placeholder_size = placeholder.len();
-            let updates = Updates::new().set_jumbf(placeholder.clone());
+            let updates = Updates::new()
+                .set_jumbf(placeholder.clone())
+                .exclude_from_processing(vec![SegmentKind::Jumbf], ExclusionMode::DataOnly);
 
             // Create output file
             let mut output_file = std::fs::OpenOptions::new()
@@ -538,9 +540,6 @@ mod tests {
                 .write_with_processing(
                     &mut output_file,
                     &updates,
-                    8192,
-                    &[SegmentKind::Jumbf],
-                    ExclusionMode::DataOnly,
                     &mut |_chunk| {},
                 )
                 .expect(&format!("write_with_processing failed for {}", name));
@@ -634,9 +633,6 @@ mod tests {
                 .write_with_processing(
                     &mut output_file,
                     &updates,
-                    8192,
-                    &[],
-                    ExclusionMode::default(),
                     &mut |_| {},
                 )
                 .expect("write_with_processing failed");

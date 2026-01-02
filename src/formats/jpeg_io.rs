@@ -926,11 +926,12 @@ impl ContainerIO for JpegIO {
         source: &mut R,
         writer: &mut W,
         updates: &Updates,
-        exclude_segments: &[SegmentKind],
-        exclusion_mode: crate::ExclusionMode,
         mut processor: F,
     ) -> Result<()> {
         use crate::processing_writer::ProcessingWriter;
+
+        let exclude_segments = &updates.write_options.exclude_segments;
+        let exclusion_mode = updates.write_options.exclusion_mode;
 
         let mut pw = ProcessingWriter::new(writer, |data| processor(data));
         let should_exclude_jumbf = exclude_segments.contains(&SegmentKind::Jumbf);

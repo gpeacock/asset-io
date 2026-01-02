@@ -98,6 +98,64 @@ pub use tiff::ExifInfo;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils;
 
+/// Options controlling how writes are processed
+///
+/// These options configure streaming behavior, segment exclusions for hashing,
+/// and other processing parameters. All fields have sensible defaults.
+///
+/// # Example
+///
+/// ```no_run
+/// use asset_io::{WriteOptions, SegmentKind, ExclusionMode};
+///
+/// let options = WriteOptions::new()
+///     .exclude(vec![SegmentKind::Jumbf])
+///     .exclusion_mode(ExclusionMode::DataOnly)
+///     .chunk_size(65536);
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct WriteOptions {
+    /// Chunk size for streaming operations (default: DEFAULT_CHUNK_SIZE = 64KB)
+    pub chunk_size: Option<usize>,
+
+    /// Segments to exclude from processing (e.g., for hashing)
+    pub exclude_segments: Vec<SegmentKind>,
+
+    /// How to handle exclusions (default: EntireSegment)
+    pub exclusion_mode: ExclusionMode,
+    // Future: include_segments for explicit inclusion
+}
+
+impl WriteOptions {
+    /// Create new WriteOptions with defaults
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the chunk size for streaming operations
+    pub fn chunk_size(mut self, size: usize) -> Self {
+        self.chunk_size = Some(size);
+        self
+    }
+
+    /// Set segments to exclude from processing
+    pub fn exclude(mut self, segments: Vec<SegmentKind>) -> Self {
+        self.exclude_segments = segments;
+        self
+    }
+
+    /// Set the exclusion mode (EntireSegment or DataOnly)
+    pub fn exclusion_mode(mut self, mode: ExclusionMode) -> Self {
+        self.exclusion_mode = mode;
+        self
+    }
+
+    /// Get the effective chunk size (uses DEFAULT_CHUNK_SIZE if not set)
+    pub fn effective_chunk_size(&self) -> usize {
+        self.chunk_size.unwrap_or(DEFAULT_CHUNK_SIZE)
+    }
+}
+
 /// Metadata update strategy
 ///
 /// Specifies how to handle a particular type of metadata when writing an asset.
@@ -149,6 +207,9 @@ pub struct Updates {
 
     /// JUMBF data update strategy
     pub jumbf: MetadataUpdate,
+
+    /// Write processing options (chunk size, exclusions, etc.)
+    pub write_options: WriteOptions,
 }
 
 impl Updates {
@@ -280,6 +341,65 @@ impl Updates {
     pub fn with_jumbf(jumbf: Vec<u8>) -> Self {
         Self::new().set_jumbf(jumbf)
     }
+
+    // ========================================================================
+    // Write Options Builder Methods
+    // ========================================================================
+
+    /// Set segments to exclude from processing (e.g., for C2PA hashing)
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use asset_io::{Updates, SegmentKind, ExclusionMode};
+    ///
+    /// let updates = Updates::new()
+    ///     .set_jumbf(vec![0u8; 1000])
+    ///     .exclude_from_processing(vec![SegmentKind::Jumbf], ExclusionMode::DataOnly);
+    /// ```
+    pub fn exclude_from_processing(
+        mut self,
+        segments: Vec<SegmentKind>,
+        mode: ExclusionMode,
+    ) -> Self {
+        self.write_options.exclude_segments = segments;
+        self.write_options.exclusion_mode = mode;
+        self
+    }
+
+    /// Set the chunk size for streaming operations
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use asset_io::Updates;
+    ///
+    /// let updates = Updates::new().with_chunk_size(65536);
+    /// ```
+    pub fn with_chunk_size(mut self, size: usize) -> Self {
+        self.write_options.chunk_size = Some(size);
+        self
+    }
+
+    /// Set custom write options
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use asset_io::{Updates, WriteOptions, SegmentKind, ExclusionMode};
+    ///
+    /// let options = WriteOptions::new()
+    ///     .exclude(vec![SegmentKind::Jumbf])
+    ///     .exclusion_mode(ExclusionMode::DataOnly);
+    ///
+    /// let updates = Updates::new()
+    ///     .set_jumbf(vec![0u8; 1000])
+    ///     .with_write_options(options);
+    /// ```
+    pub fn with_write_options(mut self, options: WriteOptions) -> Self {
+        self.write_options = options;
+        self
+    }
 }
 
 // Re-export generated items from formats module
@@ -327,16 +447,16 @@ pub use formats::png_io::PngIO;
 /// let mut asset = Asset::open("input.jpg")?;
 /// let mut output = File::create("output.jpg")?;
 ///
-/// // Write and hash
+/// // Write and hash with C2PA-compliant exclusions
 /// let placeholder = vec![0u8; 20000];
-/// let updates = Updates::new().set_jumbf(placeholder);
+/// let updates = Updates::new()
+///     .set_jumbf(placeholder)
+///     .exclude_from_processing(vec![SegmentKind::Jumbf], ExclusionMode::DataOnly);
+///
 /// let mut hasher = Sha256::new();
 /// let structure = asset.write_with_processing(
 ///     &mut output,
 ///     &updates,
-///     8192,
-///     &[SegmentKind::Jumbf],
-///     ExclusionMode::DataOnly,  // C2PA: include headers in hash
 ///     &mut |chunk| hasher.update(chunk),
 /// )?;
 ///

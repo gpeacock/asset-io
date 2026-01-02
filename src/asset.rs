@@ -4,8 +4,7 @@
 //! without needing to know the specific media type.
 
 use crate::{
-    detect_container, error::Result, get_handler, segment::SegmentKind, structure::Structure,
-    Container, Updates,
+    detect_container, error::Result, get_handler, structure::Structure, Container, Updates,
 };
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -464,19 +463,17 @@ impl<R: Read + Seek> Asset<R> {
     /// let mut asset = Asset::open("input.jpg")?;
     /// let mut output = File::create("output.jpg")?;
     ///
-    /// // Prepare placeholder JUMBF
+    /// // Prepare placeholder JUMBF with exclusion options
     /// let placeholder = vec![0u8; 20000];
-    /// let updates = Updates::new().set_jumbf(placeholder);
+    /// let updates = Updates::new()
+    ///     .set_jumbf(placeholder)
+    ///     .exclude_from_processing(vec![SegmentKind::Jumbf], ExclusionMode::DataOnly);
     ///
-    /// // Write and hash in one pass, excluding JUMBF from hash
-    /// // Use DataOnly mode for C2PA compliance (include headers in hash)
+    /// // Write and hash in one pass
     /// let mut hasher = Sha256::new();
     /// let structure = asset.write_with_processing(
     ///     &mut output,
     ///     &updates,
-    ///     8192,  // chunk size
-    ///     &[SegmentKind::Jumbf],  // exclude from processing
-    ///     ExclusionMode::DataOnly,  // C2PA: include headers in hash
     ///     &mut |chunk| hasher.update(chunk),
     /// )?;
     ///
@@ -498,9 +495,6 @@ impl<R: Read + Seek> Asset<R> {
         &mut self,
         writer: &mut W,
         updates: &Updates,
-        _chunk_size: usize, // Reserved for future use in chunked processing
-        exclude_segments: &[SegmentKind],
-        exclusion_mode: crate::ExclusionMode,
         processor: &mut F,
     ) -> Result<Structure>
     where
@@ -519,8 +513,6 @@ impl<R: Read + Seek> Asset<R> {
             &mut self.source,
             writer,
             updates,
-            exclude_segments,
-            exclusion_mode,
             processor,
         )?;
 
