@@ -133,6 +133,11 @@ impl MiniXmp {
         self.data
     }
 
+    /// Alias for `into_string` - consume self and return the inner string
+    pub fn into_inner(self) -> String {
+        self.data
+    }
+
     /// Consume self and return the XMP as bytes
     pub fn into_bytes(self) -> Vec<u8> {
         self.data.into_bytes()
@@ -142,26 +147,26 @@ impl MiniXmp {
     ///
     /// Returns `None` if the key is not found.
     pub fn get(&self, key: &str) -> Option<String> {
-        get_key(&self.data, key)
+        get_keys_impl(&self.data, &[key]).into_iter().next().flatten()
     }
 
     /// Get multiple values from the XMP in a single pass
     ///
     /// More efficient than calling `get()` multiple times.
     pub fn get_many(&self, keys: &[&str]) -> Vec<Option<String>> {
-        get_keys(&self.data, keys)
+        get_keys_impl(&self.data, keys)
     }
 
     /// Set a value in the XMP, returning a new MiniXmp
     ///
     /// If the key exists, it will be updated. If not, it will be added.
     pub fn set(&self, key: &str, value: &str) -> Result<Self> {
-        add_key(&self.data, key, value).map(Self::new)
+        apply_updates_impl(&self.data, &[(key, Some(value))]).map(Self::new)
     }
 
     /// Remove a key from the XMP, returning a new MiniXmp
     pub fn remove(&self, key: &str) -> Result<Self> {
-        remove_key(&self.data, key).map(Self::new)
+        apply_updates_impl(&self.data, &[(key, None)]).map(Self::new)
     }
 
     /// Apply multiple updates at once, returning a new MiniXmp
@@ -170,7 +175,7 @@ impl MiniXmp {
     /// - `Some("value")` to set/add the key
     /// - `None` to remove the key
     pub fn apply_updates(&self, updates: &[(&str, Option<&str>)]) -> Result<Self> {
-        apply_updates(&self.data, updates).map(Self::new)
+        apply_updates_impl(&self.data, updates).map(Self::new)
     }
 
     /// Check if the XMP contains a key
@@ -214,7 +219,7 @@ impl AsRef<str> for MiniXmp {
 }
 
 // ============================================================================
-// Free Functions (kept for compatibility, delegate to implementation below)
+// Internal Implementation
 // ============================================================================
 
 /// Validate that a key is a reasonable XMP property name.
@@ -239,34 +244,8 @@ fn validate_key(key: &str) -> Result<()> {
     Ok(())
 }
 
-/// Get multiple values from XMP in a single pass.
-///
-/// Returns a Vec with the same length as `keys`, where each position
-/// corresponds to the key at that position. Missing keys return `None`.
-///
-/// This is much more efficient than calling [`get_key()`] multiple times,
-/// as it only parses the XMP once.
-///
-/// # Multiple `rdf:Description` Blocks
-///
-/// Adobe and other tools often split XMP across multiple `rdf:Description`
-/// blocks organized by namespace. This function processes **all blocks**
-/// to provide a complete view of the metadata. If a key appears in multiple
-/// blocks, the **last occurrence wins**.
-///
-/// # Example
-///
-/// ```
-/// use asset_io::xmp::get_keys;
-///
-/// let xmp = r#"<rdf:Description dc:title="Photo" dc:creator="John" />"#;
-/// let values = get_keys(xmp, &["dc:title", "dc:creator", "dc:format"]);
-///
-/// assert_eq!(values[0], Some("Photo".to_string()));
-/// assert_eq!(values[1], Some("John".to_string()));
-/// assert_eq!(values[2], None);  // Not found
-/// ```
-pub fn get_keys(xmp: &str, keys: &[&str]) -> Vec<Option<String>> {
+/// Get multiple values from XMP in a single pass (internal implementation).
+fn get_keys_impl(xmp: &str, keys: &[&str]) -> Vec<Option<String>> {
     use quick_xml::{events::Event, name::QName, Reader};
 
     let mut reader = Reader::from_str(xmp);
@@ -312,38 +291,8 @@ pub fn get_keys(xmp: &str, keys: &[&str]) -> Vec<Option<String>> {
     results
 }
 
-/// Apply multiple updates to XMP in a single pass.
-///
-/// Each update is a tuple of `(key, value)` where:
-/// - `Some(value)` = add or replace the key
-/// - `None` = remove the key
-///
-/// This is much more efficient than calling [`add_key()`] or [`remove_key()`]
-/// multiple times, as it only parses and rebuilds the XMP once.
-///
-/// # Multiple `rdf:Description` Blocks
-///
-/// This function modifies **only the first** `rdf:Description` block.
-/// Other blocks are preserved unchanged. This ensures predictable behavior
-/// and avoids accidentally duplicating properties across blocks.
-///
-/// If you need to modify properties in other blocks, consider extracting
-/// and rewriting the specific block you need.
-///
-/// # Example
-///
-/// ```
-/// use asset_io::xmp::apply_updates;
-///
-/// let xmp = r#"<rdf:Description dc:title="Old" dc:creator="John" />"#;
-/// let updates = [
-///     ("dc:title", Some("New")),
-///     ("dc:subject", Some("Landscape")),
-///     ("dc:creator", None),  // Remove
-/// ];
-/// let updated = apply_updates(xmp, &updates).unwrap();
-/// ```
-pub fn apply_updates(xmp: &str, updates: &[(&str, Option<&str>)]) -> Result<String> {
+/// Apply multiple updates to XMP in a single pass (internal implementation).
+fn apply_updates_impl(xmp: &str, updates: &[(&str, Option<&str>)]) -> Result<String> {
     use quick_xml::{
         events::{BytesStart, Event},
         name::QName,
@@ -474,57 +423,6 @@ pub fn apply_updates(xmp: &str, updates: &[(&str, Option<&str>)]) -> Result<Stri
     String::from_utf8(result).map_err(|e| crate::Error::InvalidFormat(e.to_string()))
 }
 
-/// Get a single value from XMP (convenience wrapper).
-///
-/// For getting multiple values, use [`get_keys()`] instead to parse only once.
-///
-/// # Example
-///
-/// ```
-/// use asset_io::xmp::get_key;
-///
-/// let xmp = r#"<rdf:Description dc:title="My Photo" />"#;
-/// assert_eq!(get_key(xmp, "dc:title"), Some("My Photo".to_string()));
-/// ```
-pub fn get_key(xmp: &str, key: &str) -> Option<String> {
-    get_keys(xmp, &[key]).into_iter().next().flatten()
-}
-
-/// Add or replace a single key in XMP (convenience wrapper).
-///
-/// For multiple updates, use [`apply_updates()`] instead to parse only once.
-///
-/// # Example
-///
-/// ```
-/// use asset_io::xmp::{add_key, get_key};
-///
-/// let xmp = r#"<?xpacket begin=""?><rdf:RDF><rdf:Description /></rdf:RDF><?xpacket end="w"?>"#;
-/// let updated = add_key(xmp, "dc:title", "My Photo").unwrap();
-/// assert!(updated.contains(r#"dc:title="My Photo""#));
-/// ```
-pub fn add_key(xmp: &str, key: &str, value: &str) -> Result<String> {
-    apply_updates(xmp, &[(key, Some(value))])
-}
-
-/// Remove a single key from XMP (convenience wrapper).
-///
-/// For multiple updates, use [`apply_updates()`] instead to parse only once.
-///
-/// # Example
-///
-/// ```
-/// use asset_io::xmp::{remove_key, get_key};
-///
-/// let xmp = r#"<rdf:Description dc:title="My Photo" dc:creator="John" />"#;
-/// let updated = remove_key(xmp, "dc:title").unwrap();
-/// assert_eq!(get_key(&updated, "dc:title"), None);
-/// assert_eq!(get_key(&updated, "dc:creator"), Some("John".to_string()));
-/// ```
-pub fn remove_key(xmp: &str, key: &str) -> Result<String> {
-    apply_updates(xmp, &[(key, None)])
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -544,52 +442,52 @@ mod tests {
 
     #[test]
     fn test_get_key() {
-        assert_eq!(
-            get_key(TEST_XMP, "dc:format"),
-            Some("image/jpeg".to_string())
-        );
-        assert_eq!(
-            get_key(TEST_XMP, "xmpMM:DocumentID"),
-            Some("xmp.did:1234".to_string())
-        );
-        assert_eq!(get_key(TEST_XMP, "nonexistent"), None);
+        let xmp = MiniXmp::new(TEST_XMP);
+        assert_eq!(xmp.get("dc:format"), Some("image/jpeg".to_string()));
+        assert_eq!(xmp.get("xmpMM:DocumentID"), Some("xmp.did:1234".to_string()));
+        assert_eq!(xmp.get("nonexistent"), None);
     }
 
     #[test]
     fn test_add_key() {
-        let xmp = add_key(TEST_XMP, "dc:title", "My Photo").unwrap();
-        assert_eq!(get_key(&xmp, "dc:title"), Some("My Photo".to_string()));
+        let xmp = MiniXmp::new(TEST_XMP);
+        let updated = xmp.set("dc:title", "My Photo").unwrap();
+        assert_eq!(updated.get("dc:title"), Some("My Photo".to_string()));
         // Original keys should still be there
-        assert_eq!(get_key(&xmp, "dc:format"), Some("image/jpeg".to_string()));
+        assert_eq!(updated.get("dc:format"), Some("image/jpeg".to_string()));
     }
 
     #[test]
     fn test_replace_key() {
-        let xmp = add_key(TEST_XMP, "dc:format", "image/png").unwrap();
-        assert_eq!(get_key(&xmp, "dc:format"), Some("image/png".to_string()));
+        let xmp = MiniXmp::new(TEST_XMP);
+        let updated = xmp.set("dc:format", "image/png").unwrap();
+        assert_eq!(updated.get("dc:format"), Some("image/png".to_string()));
     }
 
     #[test]
     fn test_remove_key() {
-        let xmp = remove_key(TEST_XMP, "dc:format").unwrap();
-        assert_eq!(get_key(&xmp, "dc:format"), None);
+        let xmp = MiniXmp::new(TEST_XMP);
+        let updated = xmp.remove("dc:format").unwrap();
+        assert_eq!(updated.get("dc:format"), None);
         // Other keys should still be there
         assert_eq!(
-            get_key(&xmp, "xmpMM:DocumentID"),
+            updated.get("xmpMM:DocumentID"),
             Some("xmp.did:1234".to_string())
         );
     }
 
     #[test]
     fn test_remove_nonexistent_key() {
-        let xmp = remove_key(TEST_XMP, "nonexistent").unwrap();
+        let xmp = MiniXmp::new(TEST_XMP);
+        let updated = xmp.remove("nonexistent").unwrap();
         // Should not error, just return unchanged XMP
-        assert_eq!(get_key(&xmp, "dc:format"), Some("image/jpeg".to_string()));
+        assert_eq!(updated.get("dc:format"), Some("image/jpeg".to_string()));
     }
 
     #[test]
     fn test_get_keys_batch() {
-        let values = get_keys(TEST_XMP, &["dc:format", "xmpMM:DocumentID", "nonexistent"]);
+        let xmp = MiniXmp::new(TEST_XMP);
+        let values = xmp.get_many(&["dc:format", "xmpMM:DocumentID", "nonexistent"]);
         assert_eq!(values.len(), 3);
         assert_eq!(values[0], Some("image/jpeg".to_string()));
         assert_eq!(values[1], Some("xmp.did:1234".to_string()));
@@ -598,75 +496,77 @@ mod tests {
 
     #[test]
     fn test_get_keys_empty() {
-        let values = get_keys(TEST_XMP, &[]);
+        let xmp = MiniXmp::new(TEST_XMP);
+        let values = xmp.get_many(&[]);
         assert_eq!(values.len(), 0);
     }
 
     #[test]
     fn test_apply_updates_add_and_replace() {
+        let xmp = MiniXmp::new(TEST_XMP);
         let updates = [
             ("dc:title", Some("My Photo")),
             ("dc:format", Some("image/png")),  // Replace existing
             ("dc:subject", Some("Landscape")), // Add new
         ];
-        let xmp = apply_updates(TEST_XMP, &updates).unwrap();
+        let updated = xmp.apply_updates(&updates).unwrap();
 
-        assert_eq!(get_key(&xmp, "dc:title"), Some("My Photo".to_string()));
-        assert_eq!(get_key(&xmp, "dc:format"), Some("image/png".to_string()));
-        assert_eq!(get_key(&xmp, "dc:subject"), Some("Landscape".to_string()));
+        assert_eq!(updated.get("dc:title"), Some("My Photo".to_string()));
+        assert_eq!(updated.get("dc:format"), Some("image/png".to_string()));
+        assert_eq!(updated.get("dc:subject"), Some("Landscape".to_string()));
         // Original key should still be there
         assert_eq!(
-            get_key(&xmp, "xmpMM:DocumentID"),
+            updated.get("xmpMM:DocumentID"),
             Some("xmp.did:1234".to_string())
         );
     }
 
     #[test]
     fn test_apply_updates_remove() {
+        let xmp = MiniXmp::new(TEST_XMP);
         let updates = [
             ("dc:format", None),       // Remove
             ("dc:title", Some("New")), // Add
         ];
-        let xmp = apply_updates(TEST_XMP, &updates).unwrap();
+        let updated = xmp.apply_updates(&updates).unwrap();
 
-        assert_eq!(get_key(&xmp, "dc:format"), None);
-        assert_eq!(get_key(&xmp, "dc:title"), Some("New".to_string()));
+        assert_eq!(updated.get("dc:format"), None);
+        assert_eq!(updated.get("dc:title"), Some("New".to_string()));
         assert_eq!(
-            get_key(&xmp, "xmpMM:DocumentID"),
+            updated.get("xmpMM:DocumentID"),
             Some("xmp.did:1234".to_string())
         );
     }
 
     #[test]
     fn test_apply_updates_mixed() {
+        let xmp = MiniXmp::new(TEST_XMP);
         let updates = [
             ("dc:format", Some("image/png")), // Replace
             ("dc:title", Some("Photo")),      // Add
             ("xmpMM:DocumentID", None),       // Remove
             ("dc:creator", Some("John")),     // Add
         ];
-        let xmp = apply_updates(TEST_XMP, &updates).unwrap();
+        let updated = xmp.apply_updates(&updates).unwrap();
 
-        assert_eq!(get_key(&xmp, "dc:format"), Some("image/png".to_string()));
-        assert_eq!(get_key(&xmp, "dc:title"), Some("Photo".to_string()));
-        assert_eq!(get_key(&xmp, "xmpMM:DocumentID"), None);
-        assert_eq!(get_key(&xmp, "dc:creator"), Some("John".to_string()));
+        assert_eq!(updated.get("dc:format"), Some("image/png".to_string()));
+        assert_eq!(updated.get("dc:title"), Some("Photo".to_string()));
+        assert_eq!(updated.get("xmpMM:DocumentID"), None);
+        assert_eq!(updated.get("dc:creator"), Some("John".to_string()));
     }
 
     #[test]
     fn test_batch_vs_single_consistency() {
+        let xmp = MiniXmp::new(TEST_XMP);
+
         // Batch operation
-        let updates = [("dc:title", Some("Test"))];
-        let batch_result = apply_updates(TEST_XMP, &updates).unwrap();
+        let batch_result = xmp.apply_updates(&[("dc:title", Some("Test"))]).unwrap();
 
         // Single operation
-        let single_result = add_key(TEST_XMP, "dc:title", "Test").unwrap();
+        let single_result = xmp.set("dc:title", "Test").unwrap();
 
         // Both should produce the same result
-        assert_eq!(
-            get_key(&batch_result, "dc:title"),
-            get_key(&single_result, "dc:title")
-        );
+        assert_eq!(batch_result.get("dc:title"), single_result.get("dc:title"));
     }
 
     #[test]
@@ -683,11 +583,11 @@ mod tests {
             ("Quote: \"test\"", "quoted text"),
         ];
 
-        let xmp = r#"<rdf:Description />"#;
+        let xmp = MiniXmp::new(r#"<rdf:Description />"#);
 
         for (input, description) in test_cases {
-            let xmp_with_value = add_key(xmp, "dc:title", input).unwrap();
-            let value = get_key(&xmp_with_value, "dc:title");
+            let updated = xmp.set("dc:title", input).unwrap();
+            let value = updated.get("dc:title");
             // Should round-trip correctly
             assert_eq!(
                 value,
@@ -701,38 +601,35 @@ mod tests {
 
     #[test]
     fn test_key_validation() {
-        let xmp = r#"<rdf:Description dc:title="Photo" />"#;
+        let xmp = MiniXmp::new(r#"<rdf:Description dc:title="Photo" />"#);
 
         // These should fail
-        assert!(add_key(xmp, "", "value").is_err(), "Empty key should fail");
+        assert!(xmp.set("", "value").is_err(), "Empty key should fail");
         assert!(
-            add_key(xmp, "dc:title with space", "value").is_err(),
+            xmp.set("dc:title with space", "value").is_err(),
             "Key with space should fail"
         );
         assert!(
-            add_key(xmp, "dc:title\"quote", "value").is_err(),
+            xmp.set("dc:title\"quote", "value").is_err(),
             "Key with quote should fail"
         );
         assert!(
-            add_key(xmp, "dc:title<tag", "value").is_err(),
+            xmp.set("dc:title<tag", "value").is_err(),
             "Key with < should fail"
         );
         assert!(
-            add_key(xmp, "dc:title>tag", "value").is_err(),
+            xmp.set("dc:title>tag", "value").is_err(),
             "Key with > should fail"
         );
 
         // These should succeed
+        assert!(xmp.set("dc:title", "value").is_ok(), "Normal key should work");
         assert!(
-            add_key(xmp, "dc:title", "value").is_ok(),
-            "Normal key should work"
-        );
-        assert!(
-            add_key(xmp, "dc:subject", "value").is_ok(),
+            xmp.set("dc:subject", "value").is_ok(),
             "Another normal key should work"
         );
         assert!(
-            add_key(xmp, "my_custom:field", "value").is_ok(),
+            xmp.set("my_custom:field", "value").is_ok(),
             "Underscore key should work"
         );
     }
@@ -740,7 +637,7 @@ mod tests {
     #[test]
     fn test_multiple_rdf_description_blocks() {
         // XMP with multiple rdf:Description blocks (common in Adobe files)
-        let xmp = r#"<?xml version="1.0"?>
+        let xmp_str = r#"<?xml version="1.0"?>
 <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
          xmlns:dc="http://purl.org/dc/elements/1.1/"
          xmlns:photoshop="http://ns.adobe.com/photoshop/1.0/">
@@ -757,16 +654,15 @@ mod tests {
   </rdf:Description>
 </rdf:RDF>"#;
 
+        let xmp = MiniXmp::new(xmp_str);
+
         // Test that we can read from all blocks
-        let values = get_keys(
-            xmp,
-            &[
-                "dc:title",
-                "dc:creator",
-                "photoshop:DateCreated",
-                "dc:subject",
-            ],
-        );
+        let values = xmp.get_many(&[
+            "dc:title",
+            "dc:creator",
+            "photoshop:DateCreated",
+            "dc:subject",
+        ]);
 
         // dc:title appears in both blocks - last one should win
         assert_eq!(
@@ -791,43 +687,58 @@ mod tests {
         );
 
         // Test single-key access too
-        assert_eq!(
-            get_key(xmp, "dc:title"),
-            Some("Second Block Title".to_string())
-        );
-        assert_eq!(get_key(xmp, "dc:creator"), Some("Alice".to_string()));
-        assert_eq!(
-            get_key(xmp, "photoshop:DateCreated"),
-            Some("2024-01-15".to_string())
-        );
+        assert_eq!(xmp.get("dc:title"), Some("Second Block Title".to_string()));
+        assert_eq!(xmp.get("dc:creator"), Some("Alice".to_string()));
+        assert_eq!(xmp.get("photoshop:DateCreated"), Some("2024-01-15".to_string()));
     }
 
     #[test]
     fn test_write_only_modifies_first_block() {
         // XMP with multiple blocks
-        let xmp = r#"<rdf:RDF>
+        let xmp = MiniXmp::new(r#"<rdf:RDF>
   <rdf:Description dc:title="First" dc:creator="Alice" />
   <rdf:Description photoshop:DateCreated="2024-01-15" />
-</rdf:RDF>"#;
+</rdf:RDF>"#);
 
         // Modify a key
-        let updated = apply_updates(xmp, &[("dc:title", Some("Modified"))]).unwrap();
+        let updated = xmp.apply_updates(&[("dc:title", Some("Modified"))]).unwrap();
 
         // First block should be modified
         assert!(
-            updated.contains("dc:title=\"Modified\""),
+            updated.as_ref().contains("dc:title=\"Modified\""),
             "First block should be updated"
         );
 
         // Second block should be unchanged
         assert!(
-            updated.contains("photoshop:DateCreated=\"2024-01-15\""),
+            updated.as_ref().contains("photoshop:DateCreated=\"2024-01-15\""),
             "Second block should be preserved"
         );
 
         // Verify we can still read from both blocks
-        let values = get_keys(&updated, &["dc:title", "photoshop:DateCreated"]);
+        let values = updated.get_many(&["dc:title", "photoshop:DateCreated"]);
         assert_eq!(values[0], Some("Modified".to_string()));
         assert_eq!(values[1], Some("2024-01-15".to_string()));
+    }
+
+    #[test]
+    fn test_contains() {
+        let xmp = MiniXmp::new(TEST_XMP);
+        assert!(xmp.contains("dc:format"));
+        assert!(!xmp.contains("nonexistent"));
+    }
+
+    #[test]
+    fn test_into_inner() {
+        let xmp = MiniXmp::new(TEST_XMP);
+        let inner: String = xmp.into_inner();
+        assert!(inner.contains("dc:format"));
+    }
+
+    #[test]
+    fn test_as_ref() {
+        let xmp = MiniXmp::new(TEST_XMP);
+        let s: &str = xmp.as_ref();
+        assert!(s.contains("dc:format"));
     }
 }

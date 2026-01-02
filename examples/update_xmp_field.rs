@@ -9,7 +9,7 @@
 //! Example:
 //!   cargo run --example update_xmp_field --features jpeg,xmp photo.jpg dc:title "My Photo"
 
-use asset_io::{xmp, Asset};
+use asset_io::{Asset, MiniXmp};
 use std::env;
 use std::fs::OpenOptions;
 
@@ -51,18 +51,19 @@ fn main() -> asset_io::Result<()> {
     println!("Current XMP size: {} bytes", xmp.len());
 
     // Convert to string for processing
-    let xmp_str = String::from_utf8_lossy(&xmp);
+    let xmp_str = String::from_utf8_lossy(&xmp).into_owned();
+    let mini_xmp = MiniXmp::new(&xmp_str);
 
     // Show current value if it exists
-    if let Some(current_value) = xmp::get_key(&xmp_str, xmp_key) {
+    if let Some(current_value) = mini_xmp.get(xmp_key) {
         println!("Current value of '{}': {}", xmp_key, current_value);
     } else {
         println!("Key '{}' not currently set", xmp_key);
     }
 
     // Update the field
-    let updated_xmp_str = xmp::add_key(&xmp_str, xmp_key, xmp_value)?;
-    let updated_xmp = updated_xmp_str.into_bytes();
+    let updated_mini_xmp = mini_xmp.set(xmp_key, xmp_value)?;
+    let updated_xmp = updated_mini_xmp.into_inner().into_bytes();
     println!("New XMP size: {} bytes", updated_xmp.len());
 
     // Check if updated XMP fits in existing space
@@ -89,9 +90,10 @@ fn main() -> asset_io::Result<()> {
     let verify_file = OpenOptions::new().read(true).open(input_path)?;
     let mut verify_asset = Asset::from_source(verify_file)?;
     let verify_xmp = verify_asset.xmp()?.expect("XMP should exist");
-    let verify_xmp_str = String::from_utf8_lossy(&verify_xmp);
+    let verify_xmp_str = String::from_utf8_lossy(&verify_xmp).into_owned();
+    let verify_mini_xmp = MiniXmp::new(&verify_xmp_str);
 
-    if let Some(new_value) = xmp::get_key(&verify_xmp_str, xmp_key) {
+    if let Some(new_value) = verify_mini_xmp.get(xmp_key) {
         println!("✓ Verified: '{}' = '{}'", xmp_key, new_value);
         if new_value == *xmp_value {
             println!("✓ Success! XMP field updated in-place.");

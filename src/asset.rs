@@ -835,12 +835,13 @@ impl<R: Read + Write + Seek> Asset<R> {
     ///
     /// // Modify XMP
     /// let xmp = asset.xmp()?.expect("No XMP found");
-    /// let xmp_str = String::from_utf8_lossy(&xmp);
-    /// let updated = xmp::add_key(&xmp_str, "dc:title", "Updated Title")?;
+    /// let xmp_str = String::from_utf8_lossy(&xmp).into_owned();
+    /// let mini_xmp = MiniXmp::new(&xmp_str);
+    /// let updated = mini_xmp.set("dc:title", "Updated Title")?;
     ///
     /// // Check if it fits
-    /// if updated.len() as u64 <= asset.xmp_capacity().unwrap_or(0) {
-    ///     asset.update_xmp_in_place(updated.into_bytes())?;  // Fast in-place update!
+    /// if updated.as_ref().len() as u64 <= asset.xmp_capacity().unwrap_or(0) {
+    ///     asset.update_xmp_in_place(updated.into_inner().into_bytes())?;  // Fast in-place update!
     /// }
     /// # Ok(())
     /// # }

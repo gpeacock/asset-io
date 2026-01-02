@@ -116,7 +116,8 @@ pub mod thumbnail;
 #[cfg(feature = "exif")]
 mod tiff;
 #[cfg(feature = "xmp")]
-pub mod xmp;
+#[cfg(feature = "xmp")]
+mod xmp;
 #[cfg(feature = "xmp")]
 pub use xmp::MiniXmp;
 
