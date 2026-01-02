@@ -73,10 +73,6 @@ name = "test_bmff_hash"
 required-features = ["bmff"]
 
 [[example]]
-name = "bmff_v3_hash"
-required-features = ["bmff"]
-
-[[example]]
 name = "bmff_c2pa_hash"
 required-features = ["bmff"]
 
@@ -86,10 +82,6 @@ name = "bench_hash_only"
 [[example]]
 name = "test_bmff"
 required-features = ["bmff"]
-
-[[example]]
-name = "test_bmff_write"
-required-features = ["bmff", "xmp"]
 
 [[example]]
 name = "c2pa_streaming"

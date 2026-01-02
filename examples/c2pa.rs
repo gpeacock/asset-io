@@ -2,7 +2,6 @@
 //!
 //! Demonstrates creating a C2PA manifest using the new streaming API that combines
 //! write and hash operations in a single pass for optimal performance.
-//! Uses SHA-512 for optimal performance on 64-bit systems (12-14% faster than SHA-256).
 //!
 //! ## Workflow (Streaming Approach)
 //!
@@ -17,7 +16,6 @@
 //! ## Performance Optimizations
 //!
 //! - **Streaming write-hash**: ~3x faster than traditional approach (write → close → reopen → hash)
-//! - **SHA-512**: 12-14% faster hashing than SHA-256 on 64-bit systems
 //! - **In-place update**: Only overwrites manifest bytes (99.995% I/O savings)
 //! - **No file reopening**: Stream stays open from write through update
 //!
@@ -36,15 +34,17 @@
 //!
 //! Result: ~3x faster for large files! 🚀
 //!
-//! ## Hash Algorithm Choice
+//! ## C2PA Data Hash Exclusion
 //!
-//! This example uses SHA-512 for creating new manifests because it's 12-14% faster
-//! than SHA-256 on 64-bit systems while being fully C2PA compliant.
+//! Per the C2PA specification, the data hash exclusion must:
+//! - **Include** container headers in the hash (JPEG APP11 marker/length/JPEG-XT fields,
+//!   PNG chunk length/type) to prevent insertion attacks
+//! - **Exclude** only the manifest data (and CRC for PNG) from the hash
 //!
-//! **Note**: When validating existing manifests, you must use whatever algorithm
-//! the manifest was originally signed with (C2PA manifests store this information).
+//! This example correctly implements this by toggling exclusion mode after writing
+//! the container-specific headers but before writing the manifest data.
 //!
-//! Run: `cargo run --example c2pa --features xmp,png,hashing tests/fixtures/sample1.png`
+//! Run: `cargo run --example c2pa --features xmp,png tests/fixtures/sample1.png`
 
 use asset_io::{update_segment_with_structure, Asset, SegmentKind, Updates};
 use c2pa::{
@@ -52,7 +52,7 @@ use c2pa::{
     settings::Settings,
     Builder, ClaimGeneratorInfo, HashRange, Reader,
 };
-use sha2::{Digest, Sha512};
+use sha2::{Digest, Sha256};
 use std::fs::OpenOptions;
 
 // BMFF support - uncomment when c2pa-rs adds bmff_hashed_placeholder/sign_bmff_hashed_embeddable APIs
@@ -189,8 +189,9 @@ mod bmff_support {
 /// This function creates a DataHash after write_with_processing has completed,
 /// using the structure information to identify JUMBF location.
 ///
-/// Uses SHA-512 for optimal performance on 64-bit systems (12-14% faster than SHA-256
-/// on Apple Silicon and modern CPUs while maintaining full C2PA compliance).
+/// Per C2PA specification, the exclusion range is calculated to:
+/// - Include container headers in the hash (to prevent insertion attacks)
+/// - Exclude only the manifest data (and CRC for PNG)
 ///
 /// # Arguments
 /// * `structure` - The destination structure (from write_with_processing)
@@ -208,14 +209,55 @@ fn generate_data_hash_from_structure(
         .ok_or("No C2PA JUMBF segment found in output structure")?;
     let manifest_segment = &structure.segments[manifest_segment_idx];
 
-    // Calculate manifest location and total size across all ranges
-    let manifest_offset = manifest_segment.ranges[0].offset;
-    let total_size: u64 = manifest_segment.ranges.iter().map(|r| r.size).sum();
+    // The segment stores the DATA offset and size, but the exclusion must cover
+    // the entire container wrapper that was excluded during hashing.
+    //
+    // For PNG: The excluded bytes are: length(4) + type(4) + data + CRC(4)
+    //   - Segment offset points to data start (after length + type)
+    //   - Exclusion start = offset - 8, size = data_size + 12
+    //
+    // For JPEG: The excluded bytes are all APP11 segments including markers and headers
+    //   - Segment offset already accounts for JPEG XT overhead in calculate_updated_structure
+    //   - Each segment has: marker(2) + length(2) + JPEG XT header(13) overhead
+    //   - For simplicity, use the segment ranges which are calculated to include proper offsets
 
-    // Create DataHash with exclusion (using SHA-512 for best performance on 64-bit)
-    let mut dh = DataHash::new("jumbf_manifest", "sha512");
-    let hr = HashRange::new(manifest_offset, total_size);
-    dh.add_exclusion(hr.clone());
+    let data_offset = manifest_segment.ranges[0].offset;
+    let data_size: u64 = manifest_segment.ranges.iter().map(|r| r.size).sum();
+
+    // Calculate exclusion range based on container type
+    let (exclusion_offset, exclusion_size) = match structure.container {
+        asset_io::Container::Png => {
+            // Per C2PA spec: Include headers in hash, exclude only data+CRC
+            // PNG caBX chunk structure: length(4) + type(4) + data(N) + CRC(4)
+            //
+            // The CRC is computed from type+data, so when manifest data changes,
+            // CRC also changes. Therefore CRC must be excluded along with data.
+            //
+            // Include in hash: length(4) + type(4) = 8 bytes (before data_offset)
+            // Exclude from hash: data(N) + CRC(4)
+            //
+            // Segment stores data_offset (after length+type) and data_size
+            (data_offset, data_size + 4) // +4 for CRC
+        }
+        asset_io::Container::Jpeg => {
+            // Per C2PA spec: Only exclude the manifest DATA, not the APP11 headers.
+            // The headers (marker, length, JPEG XT fields) must be included in the hash
+            // to prevent insertion attacks.
+            //
+            // The segment's data_offset already points to where the JUMBF data starts
+            // (after all headers), and data_size is just the JUMBF data size.
+            (data_offset, data_size)
+        }
+        _ => {
+            // Default: use segment as-is (may not be correct for all formats)
+            (data_offset, data_size)
+        }
+    };
+
+    // Create DataHash with exclusion
+    let mut dh = DataHash::new("jumbf_manifest", "sha256");
+    let hr = HashRange::new(exclusion_offset, exclusion_size);
+    dh.add_exclusion(hr);
     dh.set_hash(hash);
 
     Ok(dh)
@@ -267,7 +309,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // STREAMING WRITE-HASH-UPDATE: Write and hash in ONE PASS!
     // This is the key optimization - no file reopening needed
-    let mut hasher = Sha512::new();
+    let mut hasher = Sha256::new();
     let structure = asset.write_with_processing(
         &mut output_file,
         &updates,
@@ -285,6 +327,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Sign and create final manifest
     println!("🔏 Signing manifest...");
     let final_manifest = builder.sign_data_hashed_embeddable(&signer, &dh, "application/c2pa")?;
+
+    // Verify sizes match (required for in-place update)
+    assert_eq!(placeholder_manifest.len(), final_manifest.len(), "Manifest sizes must match!");
 
     // Update manifest in-place (file still open!)
     println!("✏️  Updating JUMBF in-place...");

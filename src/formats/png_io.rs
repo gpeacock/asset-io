@@ -402,6 +402,43 @@ impl PngIO {
         Ok(())
     }
 
+    /// Write a PNG chunk with proper C2PA exclusion handling for ProcessingWriter
+    ///
+    /// Per C2PA spec, only the manifest DATA (and CRC which depends on data)
+    /// should be excluded from hashing. The length and type fields must be
+    /// included in the hash to prevent insertion attacks.
+    fn write_chunk_with_exclusion<W: Write, F: FnMut(&[u8])>(
+        pw: &mut crate::processing_writer::ProcessingWriter<W, F>,
+        chunk_type: &[u8],
+        data: &[u8],
+        should_exclude: bool,
+    ) -> Result<()> {
+        // Write length (included in hash)
+        pw.write_u32::<BigEndian>(data.len() as u32)?;
+
+        // Write type (included in hash)
+        pw.write_all(chunk_type)?;
+
+        // Enable exclusion for data + CRC
+        if should_exclude {
+            pw.set_exclude_mode(true);
+        }
+
+        // Write data (excluded from hash)
+        pw.write_all(data)?;
+
+        // Calculate and write CRC (excluded from hash - it depends on data)
+        let crc = Self::calculate_crc(chunk_type, data);
+        pw.write_u32::<BigEndian>(crc)?;
+
+        // Disable exclusion
+        if should_exclude {
+            pw.set_exclude_mode(false);
+        }
+
+        Ok(())
+    }
+
     /// Write XMP as iTXt chunk
     fn write_xmp_chunk<W: Write>(writer: &mut W, xmp_data: &[u8]) -> Result<()> {
         // Build iTXt data: keyword + flags + language + translated keyword + XMP
@@ -609,6 +646,148 @@ impl ContainerIO for PngIO {
                         let location = source_seg.location();
                         source.seek(SeekFrom::Start(location.offset))?;
                         Self::copy_bytes(source, writer, location.size)?;
+                        other_index += 1;
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn write_with_processor<R: Read + Seek, W: Write, F: FnMut(&[u8])>(
+        &self,
+        structure: &Structure,
+        source: &mut R,
+        writer: &mut W,
+        updates: &Updates,
+        exclude_segments: &[SegmentKind],
+        mut processor: F,
+    ) -> Result<()> {
+        use crate::processing_writer::ProcessingWriter;
+
+        let mut pw = ProcessingWriter::new(writer, |data| processor(data));
+        let should_exclude_jumbf = exclude_segments.contains(&SegmentKind::Jumbf);
+
+        // Calculate the destination structure first
+        let dest_structure = self.calculate_updated_structure(structure, updates)?;
+
+        source.seek(SeekFrom::Start(0))?;
+
+        // Write PNG signature
+        pw.write_all(PNG_SIGNATURE)?;
+
+        // Collect source segments by type for ordered iteration
+        let source_idats: Vec<_> = structure
+            .segments
+            .iter()
+            .filter(|s| s.is_type(SegmentKind::ImageData))
+            .collect();
+        let mut idat_index = 0;
+
+        let source_others: Vec<_> = structure
+            .segments
+            .iter()
+            .filter(|s| s.kind == SegmentKind::Other)
+            .collect();
+        let mut other_index = 0;
+
+        // Iterate through destination structure and write each segment
+        for dest_segment in &dest_structure.segments {
+            match dest_segment {
+                seg if seg.is_type(SegmentKind::Header) => {
+                    continue;
+                }
+
+                seg if seg.is_xmp() => {
+                    match &updates.xmp {
+                        crate::MetadataUpdate::Set(new_xmp) => {
+                            Self::write_xmp_chunk(&mut pw, new_xmp)?;
+                        }
+                        crate::MetadataUpdate::Keep => {
+                            if let Some(source_seg) = structure.segments.iter().find(|s| s.is_xmp())
+                            {
+                                let location = source_seg.location();
+                                source.seek(SeekFrom::Start(location.offset))?;
+
+                                let mut xmp_data = vec![0u8; location.size as usize];
+                                source.read_exact(&mut xmp_data)?;
+
+                                Self::write_xmp_chunk(&mut pw, &xmp_data)?;
+                            }
+                        }
+                        crate::MetadataUpdate::Remove => {}
+                    }
+                }
+
+                seg if seg.is_jumbf() => {
+                    // Per C2PA spec: length+type are included in hash, data+CRC are excluded
+                    // Use the special helper that toggles exclusion at the right point
+                    match &updates.jumbf {
+                        crate::MetadataUpdate::Set(new_jumbf) => {
+                            Self::write_chunk_with_exclusion(
+                                &mut pw,
+                                C2PA,
+                                new_jumbf,
+                                should_exclude_jumbf,
+                            )?;
+                        }
+                        crate::MetadataUpdate::Keep => {
+                            if let Some(source_seg) =
+                                structure.segments.iter().find(|s| s.is_jumbf())
+                            {
+                                let location = source_seg.location();
+                                source.seek(SeekFrom::Start(location.offset))?;
+
+                                let mut jumbf_data = vec![0u8; location.size as usize];
+                                source.read_exact(&mut jumbf_data)?;
+
+                                Self::write_chunk_with_exclusion(
+                                    &mut pw,
+                                    C2PA,
+                                    &jumbf_data,
+                                    should_exclude_jumbf,
+                                )?;
+                            }
+                        }
+                        crate::MetadataUpdate::Remove => {}
+                    }
+                }
+
+                _seg if _seg.is_type(SegmentKind::ImageData) => {
+                    if idat_index < source_idats.len() {
+                        let source_seg = source_idats[idat_index];
+                        let location = source_seg.location();
+                        let chunk_start = location.offset - 8;
+                        let chunk_size = 8 + location.size + 4;
+
+                        source.seek(SeekFrom::Start(chunk_start))?;
+                        Self::copy_bytes(source, &mut pw, chunk_size)?;
+                        idat_index += 1;
+                    }
+                }
+
+                _seg if _seg.is_type(SegmentKind::Exif) => {
+                    if let Some(source_seg) = structure
+                        .segments
+                        .iter()
+                        .find(|s| s.is_type(SegmentKind::Exif))
+                    {
+                        let location = source_seg.location();
+                        let chunk_start = location.offset - 8;
+                        let chunk_size = 8 + location.size + 4;
+
+                        source.seek(SeekFrom::Start(chunk_start))?;
+                        Self::copy_bytes(source, &mut pw, chunk_size)?;
+                    }
+                }
+
+                _ => {
+                    if other_index < source_others.len() {
+                        let source_seg = source_others[other_index];
+                        let location = source_seg.location();
+                        source.seek(SeekFrom::Start(location.offset))?;
+                        Self::copy_bytes(source, &mut pw, location.size)?;
                         other_index += 1;
                     }
                 }

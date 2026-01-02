@@ -908,6 +908,193 @@ impl ContainerIO for JpegIO {
         Ok(())
     }
 
+    fn write_with_processor<R: Read + Seek, W: Write, F: FnMut(&[u8])>(
+        &self,
+        structure: &Structure,
+        source: &mut R,
+        writer: &mut W,
+        updates: &Updates,
+        exclude_segments: &[SegmentKind],
+        mut processor: F,
+    ) -> Result<()> {
+        use crate::processing_writer::ProcessingWriter;
+
+        let mut pw = ProcessingWriter::new(writer, |data| processor(data));
+        let should_exclude_jumbf = exclude_segments.contains(&SegmentKind::Jumbf);
+
+        // Calculate the destination structure first
+        let dest_structure = self.calculate_updated_structure(structure, updates)?;
+
+        source.seek(SeekFrom::Start(0))?;
+
+        // Write SOI
+        pw.write_u8(0xFF)?;
+        pw.write_u8(SOI)?;
+
+        // Iterate through destination structure and write each segment
+        for dest_segment in &dest_structure.segments {
+            match dest_segment {
+                seg if seg.is_type(SegmentKind::Header) => {
+                    continue;
+                }
+
+                seg if seg.is_xmp() => {
+                    match &updates.xmp {
+                        crate::MetadataUpdate::Set(new_xmp) => {
+                            write_xmp_segment(&mut pw, new_xmp)?;
+                        }
+                        crate::MetadataUpdate::Keep => {
+                            if let Some(source_seg) = structure.segments.iter().find(|s| s.is_xmp())
+                            {
+                                if let Some(meta) = &source_seg.metadata {
+                                    if let Some((guid, chunk_offsets, _total_size)) =
+                                        meta.as_jpeg_extended_xmp()
+                                    {
+                                        if !source_seg.ranges.is_empty() {
+                                            pw.write_u8(0xFF)?;
+                                            pw.write_u8(APP1)?;
+                                            pw.write_u16::<BigEndian>(
+                                                (source_seg.ranges[0].size
+                                                    + XMP_SIGNATURE.len() as u64
+                                                    + 2)
+                                                    as u16,
+                                            )?;
+                                            pw.write_all(XMP_SIGNATURE)?;
+
+                                            source.seek(SeekFrom::Start(
+                                                source_seg.ranges[0].offset,
+                                            ))?;
+                                            let mut limited =
+                                                source.take(source_seg.ranges[0].size);
+                                            copy(&mut limited, &mut pw)?;
+                                        }
+
+                                        for (i, range) in source_seg.ranges[1..].iter().enumerate()
+                                        {
+                                            let chunk_offset =
+                                                chunk_offsets.get(i).copied().unwrap_or(0);
+
+                                            pw.write_u8(0xFF)?;
+                                            pw.write_u8(APP1)?;
+
+                                            let seg_size = XMP_EXTENDED_SIGNATURE.len()
+                                                + 32
+                                                + 4
+                                                + 4
+                                                + range.size as usize
+                                                + 2;
+                                            pw.write_u16::<BigEndian>(seg_size as u16)?;
+
+                                            pw.write_all(XMP_EXTENDED_SIGNATURE)?;
+
+                                            let guid_bytes = guid.as_bytes();
+                                            pw.write_all(
+                                                &guid_bytes[..guid_bytes.len().min(32)],
+                                            )?;
+                                            for _ in guid_bytes.len()..32 {
+                                                pw.write_u8(0)?;
+                                            }
+
+                                            pw.write_u32::<BigEndian>(
+                                                source_seg.ranges[1..]
+                                                    .iter()
+                                                    .map(|r| r.size as u32)
+                                                    .sum(),
+                                            )?;
+                                            pw.write_u32::<BigEndian>(chunk_offset)?;
+
+                                            source.seek(SeekFrom::Start(range.offset))?;
+                                            let mut limited = source.take(range.size);
+                                            copy(&mut limited, &mut pw)?;
+                                        }
+                                        continue;
+                                    }
+                                }
+
+                                pw.write_u8(0xFF)?;
+                                pw.write_u8(APP1)?;
+                                pw.write_u16::<BigEndian>(
+                                    (source_seg.ranges[0].size + XMP_SIGNATURE.len() as u64 + 2)
+                                        as u16,
+                                )?;
+                                pw.write_all(XMP_SIGNATURE)?;
+
+                                source.seek(SeekFrom::Start(source_seg.ranges[0].offset))?;
+                                let mut limited = source.take(source_seg.ranges[0].size);
+                                copy(&mut limited, &mut pw)?;
+                            }
+                        }
+                        crate::MetadataUpdate::Remove => {}
+                    }
+                }
+
+                seg if seg.is_jumbf() => {
+                    // Per C2PA spec: Headers are included in hash, only DATA is excluded
+                    // Use the special helper that toggles exclusion at the right point
+                    match &updates.jumbf {
+                        crate::MetadataUpdate::Set(new_jumbf) => {
+                            write_jumbf_with_exclusion(&mut pw, new_jumbf, should_exclude_jumbf)?;
+                        }
+                        crate::MetadataUpdate::Keep => {
+                            if let Some(source_seg) =
+                                structure.segments.iter().find(|s| s.is_jumbf())
+                            {
+                                let total_size: u64 =
+                                    source_seg.ranges.iter().map(|r| r.size).sum();
+                                let mut jumbf_data = vec![0u8; total_size as usize];
+                                let mut offset = 0;
+
+                                for range in &source_seg.ranges {
+                                    source.seek(SeekFrom::Start(range.offset))?;
+                                    source.read_exact(
+                                        &mut jumbf_data[offset..offset + range.size as usize],
+                                    )?;
+                                    offset += range.size as usize;
+                                }
+
+                                write_jumbf_with_exclusion(&mut pw, &jumbf_data, should_exclude_jumbf)?;
+                            }
+                        }
+                        crate::MetadataUpdate::Remove => {}
+                    }
+                }
+
+                seg if seg.is_type(SegmentKind::ImageData) => {
+                    if let Some(source_seg) = structure
+                        .segments
+                        .iter()
+                        .find(|s| s.is_type(SegmentKind::ImageData))
+                    {
+                        let location = source_seg.location();
+                        source.seek(SeekFrom::Start(location.offset))?;
+                        let mut limited = source.take(location.size);
+                        copy(&mut limited, &mut pw)?;
+                    }
+                }
+
+                seg if seg.path.as_deref() == Some("EOI") => {
+                    pw.write_u8(0xFF)?;
+                    pw.write_u8(EOI)?;
+                }
+
+                _ => {
+                    if let Some(source_seg) = structure
+                        .segments
+                        .iter()
+                        .find(|s| s.kind == dest_segment.kind && s.path == dest_segment.path)
+                    {
+                        let location = source_seg.location();
+                        source.seek(SeekFrom::Start(location.offset))?;
+                        let mut limited = source.take(location.size);
+                        copy(&mut limited, &mut pw)?;
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     fn calculate_updated_structure(
         &self,
         source_structure: &Structure,
@@ -1399,6 +1586,101 @@ fn write_jumbf_segments<W: Write>(writer: &mut W, jumbf: &[u8]) -> Result<()> {
         }
 
         writer.write_all(chunk)?;
+    }
+
+    Ok(())
+}
+
+/// Write JUMBF data with proper C2PA exclusion handling for ProcessingWriter
+///
+/// Per C2PA spec, the APP11 headers must be included in the hash to prevent
+/// insertion attacks. Only the manifest DATA is excluded from hashing.
+///
+/// This function:
+/// 1. Writes headers (marker, length, JPEG XT fields) with processing ENABLED
+/// 2. Enables exclude mode
+/// 3. Writes the JUMBF data with processing DISABLED
+/// 4. Disables exclude mode
+fn write_jumbf_with_exclusion<W: Write, F: FnMut(&[u8])>(
+    pw: &mut crate::processing_writer::ProcessingWriter<W, F>,
+    jumbf: &[u8],
+    should_exclude: bool,
+) -> Result<()> {
+    // Check if already in APP11 format
+    let is_complete_app11 = jumbf.len() >= 2 && jumbf[0] == 0xFF && jumbf[1] == APP11;
+    if is_complete_app11 {
+        // For pre-formatted APP11 data, we can't easily separate headers from data
+        // This path shouldn't be used for C2PA (format should be "application/c2pa")
+        if should_exclude {
+            pw.set_exclude_mode(true);
+        }
+        pw.write_all(jumbf)?;
+        if should_exclude {
+            pw.set_exclude_mode(false);
+        }
+        return Ok(());
+    }
+
+    // Check if in JPEG XT payload format (starts with "JP")
+    let is_already_jpeg_xt = jumbf.len() >= 2 && &jumbf[0..2] == b"JP";
+    if is_already_jpeg_xt {
+        // Similar - can't easily separate
+        const MAX_SEGMENT_PAYLOAD: usize = MAX_MARKER_SIZE - 2;
+        for chunk in jumbf.chunks(MAX_SEGMENT_PAYLOAD) {
+            // Write marker + length (included in hash)
+            pw.write_u8(0xFF)?;
+            pw.write_u8(APP11)?;
+            let seg_size = 2 + chunk.len();
+            pw.write_u16::<BigEndian>(seg_size as u16)?;
+
+            // Exclude the JPEG XT payload
+            if should_exclude {
+                pw.set_exclude_mode(true);
+            }
+            pw.write_all(chunk)?;
+            if should_exclude {
+                pw.set_exclude_mode(false);
+            }
+        }
+        return Ok(());
+    }
+
+    // Raw JUMBF - wrap in JPEG XT format with proper exclusion
+    const JPEG_XT_HEADER: usize = 8; // JP + En + Z
+    const LBOX_TBOX_SIZE: usize = 8; // LBox + TBox repeated in continuations
+    const MAX_DATA_PER_SEGMENT: usize = MAX_MARKER_SIZE - JPEG_XT_HEADER - LBOX_TBOX_SIZE;
+
+    for (seg_num, chunk) in jumbf.chunks(MAX_DATA_PER_SEGMENT).enumerate() {
+        // Write marker (included in hash)
+        pw.write_u8(0xFF)?;
+        pw.write_u8(APP11)?;
+
+        // Write length field (included in hash)
+        let continuation_overhead = if seg_num > 0 { LBOX_TBOX_SIZE } else { 0 };
+        let seg_size = JPEG_XT_HEADER + continuation_overhead + chunk.len() + 2;
+        pw.write_u16::<BigEndian>(seg_size as u16)?;
+
+        // Write JPEG XT header (included in hash per C2PA spec)
+        pw.write_all(b"JP")?;
+        pw.write_u16::<BigEndian>(0x0211)?;
+        pw.write_u32::<BigEndian>((seg_num + 1) as u32)?;
+
+        // For continuation segments, LBox+TBox header is also included in hash
+        if seg_num > 0 && jumbf.len() >= 8 {
+            pw.write_all(&jumbf[0..8])?;
+        }
+
+        // NOW enable exclusion for the actual JUMBF data
+        if should_exclude {
+            pw.set_exclude_mode(true);
+        }
+
+        pw.write_all(chunk)?;
+
+        // Disable exclusion after data
+        if should_exclude {
+            pw.set_exclude_mode(false);
+        }
     }
 
     Ok(())
