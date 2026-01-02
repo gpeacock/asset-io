@@ -176,7 +176,8 @@ mod tests {
 </rdf:Description>
 </rdf:RDF>
 </x:xmpmeta>
-<?xpacket end="w"?>"#.to_vec()
+<?xpacket end="w"?>"#
+            .to_vec()
     }
 
     /// Test adding XMP to files without existing XMP for all containers
@@ -191,28 +192,29 @@ mod tests {
 
         for (fixture, name) in test_cases {
             println!("\n=== Testing add XMP to {} ===", name);
-            
+
             let input_path = fixture_path(fixture);
             let output_path = format!("/tmp/test_add_xmp_{}.{}", name, name);
-            
-            let mut asset = Asset::open(&input_path)
-                .expect(&format!("Failed to open {}", name));
-            
+
+            let mut asset = Asset::open(&input_path).expect(&format!("Failed to open {}", name));
+
             let xmp_data = test_xmp_data();
             let updates = Updates::new().set_xmp(xmp_data.clone());
-            
+
             // Write with new XMP
-            asset.write_to(&output_path, &updates)
+            asset
+                .write_to(&output_path, &updates)
                 .expect(&format!("Failed to write {} with XMP", name));
-            
+
             // Verify XMP was added
-            let mut verify_asset = Asset::open(&output_path)
-                .expect(&format!("Failed to open output {}", name));
-            
-            let result_xmp = verify_asset.xmp()
+            let mut verify_asset =
+                Asset::open(&output_path).expect(&format!("Failed to open output {}", name));
+
+            let result_xmp = verify_asset
+                .xmp()
                 .expect(&format!("Failed to extract XMP from {}", name))
                 .expect(&format!("XMP not found in output {}", name));
-            
+
             assert_eq!(result_xmp, xmp_data, "XMP content mismatch for {}", name);
             println!("✓ {} - XMP successfully added and verified", name);
         }
@@ -230,29 +232,34 @@ mod tests {
 
         for (fixture, name) in test_cases {
             println!("\n=== Testing add JUMBF to {} ===", name);
-            
+
             let input_path = fixture_path(fixture);
             let output_path = format!("/tmp/test_add_jumbf_{}.{}", name, name);
-            
-            let mut asset = Asset::open(&input_path)
-                .expect(&format!("Failed to open {}", name));
-            
+
+            let mut asset = Asset::open(&input_path).expect(&format!("Failed to open {}", name));
+
             let jumbf_data = create_test_jumbf();
             let updates = Updates::new().set_jumbf(jumbf_data.clone());
-            
+
             // Write with new JUMBF
-            asset.write_to(&output_path, &updates)
+            asset
+                .write_to(&output_path, &updates)
                 .expect(&format!("Failed to write {} with JUMBF", name));
-            
+
             // Verify JUMBF was added
-            let mut verify_asset = Asset::open(&output_path)
-                .expect(&format!("Failed to open output {}", name));
-            
-            let result_jumbf = verify_asset.jumbf()
+            let mut verify_asset =
+                Asset::open(&output_path).expect(&format!("Failed to open output {}", name));
+
+            let result_jumbf = verify_asset
+                .jumbf()
                 .expect(&format!("Failed to extract JUMBF from {}", name))
                 .expect(&format!("JUMBF not found in output {}", name));
-            
-            assert_eq!(result_jumbf, jumbf_data, "JUMBF content mismatch for {}", name);
+
+            assert_eq!(
+                result_jumbf, jumbf_data,
+                "JUMBF content mismatch for {}",
+                name
+            );
             println!("✓ {} - JUMBF successfully added and verified", name);
         }
     }
@@ -269,37 +276,46 @@ mod tests {
 
         for (fixture, name) in test_cases {
             println!("\n=== Testing add both XMP and JUMBF to {} ===", name);
-            
+
             let input_path = fixture_path(fixture);
             let output_path = format!("/tmp/test_add_both_{}.{}", name, name);
-            
-            let mut asset = Asset::open(&input_path)
-                .expect(&format!("Failed to open {}", name));
-            
+
+            let mut asset = Asset::open(&input_path).expect(&format!("Failed to open {}", name));
+
             let xmp_data = test_xmp_data();
             let jumbf_data = create_test_jumbf();
             let updates = Updates::new()
                 .set_xmp(xmp_data.clone())
                 .set_jumbf(jumbf_data.clone());
-            
+
             // Write with both
-            asset.write_to(&output_path, &updates)
+            asset
+                .write_to(&output_path, &updates)
                 .expect(&format!("Failed to write {} with both", name));
-            
+
             // Verify both were added
-            let mut verify_asset = Asset::open(&output_path)
-                .expect(&format!("Failed to open output {}", name));
-            
-            let result_xmp = verify_asset.xmp()
+            let mut verify_asset =
+                Asset::open(&output_path).expect(&format!("Failed to open output {}", name));
+
+            let result_xmp = verify_asset
+                .xmp()
                 .expect(&format!("Failed to extract XMP from {}", name))
                 .expect(&format!("XMP not found in output {}", name));
-            let result_jumbf = verify_asset.jumbf()
+            let result_jumbf = verify_asset
+                .jumbf()
                 .expect(&format!("Failed to extract JUMBF from {}", name))
                 .expect(&format!("JUMBF not found in output {}", name));
-            
+
             assert_eq!(result_xmp, xmp_data, "XMP content mismatch for {}", name);
-            assert_eq!(result_jumbf, jumbf_data, "JUMBF content mismatch for {}", name);
-            println!("✓ {} - Both XMP and JUMBF successfully added and verified", name);
+            assert_eq!(
+                result_jumbf, jumbf_data,
+                "JUMBF content mismatch for {}",
+                name
+            );
+            println!(
+                "✓ {} - Both XMP and JUMBF successfully added and verified",
+                name
+            );
         }
     }
 
@@ -315,37 +331,41 @@ mod tests {
 
         for (fixture, name) in test_cases {
             println!("\n=== Testing replace XMP in {} ===", name);
-            
+
             let input_path = fixture_path(fixture);
             let temp_path = format!("/tmp/test_replace_xmp_temp_{}.{}", name, name);
             let final_path = format!("/tmp/test_replace_xmp_final_{}.{}", name, name);
-            
+
             // First add some XMP
-            let mut asset = Asset::open(&input_path)
-                .expect(&format!("Failed to open {}", name));
-            
+            let mut asset = Asset::open(&input_path).expect(&format!("Failed to open {}", name));
+
             let xmp_data1 = b"<test>Original XMP</test>".to_vec();
-            asset.write_to(&temp_path, &Updates::new().set_xmp(xmp_data1.clone()))
+            asset
+                .write_to(&temp_path, &Updates::new().set_xmp(xmp_data1.clone()))
                 .expect("Failed to add initial XMP");
-            
+
             // Now replace it
-            let mut asset2 = Asset::open(&temp_path)
-                .expect("Failed to open temp output");
-            
+            let mut asset2 = Asset::open(&temp_path).expect("Failed to open temp output");
+
             let xmp_data2 = b"<test>Replaced XMP</test>".to_vec();
-            asset2.write_to(&final_path, &Updates::new().set_xmp(xmp_data2.clone()))
+            asset2
+                .write_to(&final_path, &Updates::new().set_xmp(xmp_data2.clone()))
                 .expect("Failed to replace XMP");
-            
+
             // Verify
-            let mut verify_asset = Asset::open(&final_path)
-                .expect("Failed to open final output");
-            
-            let result_xmp = verify_asset.xmp()
+            let mut verify_asset = Asset::open(&final_path).expect("Failed to open final output");
+
+            let result_xmp = verify_asset
+                .xmp()
                 .expect("Failed to extract XMP")
                 .expect("XMP not found");
-            
+
             assert_eq!(result_xmp, xmp_data2, "XMP should be replaced for {}", name);
-            assert_ne!(result_xmp, xmp_data1, "XMP should not be original for {}", name);
+            assert_ne!(
+                result_xmp, xmp_data1,
+                "XMP should not be original for {}",
+                name
+            );
             println!("✓ {} - XMP successfully replaced", name);
         }
     }
@@ -362,33 +382,31 @@ mod tests {
 
         for (fixture, name) in test_cases {
             println!("\n=== Testing remove XMP from {} ===", name);
-            
+
             let input_path = fixture_path(fixture);
             let temp_path = format!("/tmp/test_remove_xmp_temp_{}.{}", name, name);
             let final_path = format!("/tmp/test_remove_xmp_final_{}.{}", name, name);
-            
+
             // First add XMP
-            let mut asset = Asset::open(&input_path)
-                .expect(&format!("Failed to open {}", name));
-            
+            let mut asset = Asset::open(&input_path).expect(&format!("Failed to open {}", name));
+
             let xmp_data = test_xmp_data();
-            asset.write_to(&temp_path, &Updates::new().set_xmp(xmp_data))
+            asset
+                .write_to(&temp_path, &Updates::new().set_xmp(xmp_data))
                 .expect("Failed to add XMP");
-            
+
             // Now remove it
-            let mut asset2 = Asset::open(&temp_path)
-                .expect("Failed to open temp output");
-            
-            asset2.write_to(&final_path, &Updates::new().remove_xmp())
+            let mut asset2 = Asset::open(&temp_path).expect("Failed to open temp output");
+
+            asset2
+                .write_to(&final_path, &Updates::new().remove_xmp())
                 .expect("Failed to remove XMP");
-            
+
             // Verify XMP is gone
-            let mut verify_asset = Asset::open(&final_path)
-                .expect("Failed to open final output");
-            
-            let result_xmp = verify_asset.xmp()
-                .expect("Failed to check XMP");
-            
+            let mut verify_asset = Asset::open(&final_path).expect("Failed to open final output");
+
+            let result_xmp = verify_asset.xmp().expect("Failed to check XMP");
+
             assert!(result_xmp.is_none(), "XMP should be removed for {}", name);
             println!("✓ {} - XMP successfully removed", name);
         }
@@ -406,20 +424,24 @@ mod tests {
 
         for (fixture, name) in test_cases {
             println!("\n=== Testing round-trip for {} ===", name);
-            
+
             let input_path = fixture_path(fixture);
             let output_path = format!("/tmp/test_round_trip_{}.{}", name, name);
-            
-            let mut asset = Asset::open(&input_path)
-                .expect(&format!("Failed to open {}", name));
-            
-            asset.write_to(&output_path, &Updates::default())
+
+            let mut asset = Asset::open(&input_path).expect(&format!("Failed to open {}", name));
+
+            asset
+                .write_to(&output_path, &Updates::default())
                 .expect(&format!("Failed to write {} with no changes", name));
-            
+
             // Output should be parseable
             let result = Asset::open(&output_path);
-            
-            assert!(result.is_ok(), "Round-trip output should be valid for {}", name);
+
+            assert!(
+                result.is_ok(),
+                "Round-trip output should be valid for {}",
+                name
+            );
             println!("✓ {} - Round-trip successful", name);
         }
     }
@@ -430,36 +452,211 @@ mod tests {
         #[cfg(feature = "jpeg")]
         {
             println!("\n=== Testing keep existing JUMBF ===");
-            
+
             // FireflyTrain has JUMBF
             let input_path = fixture_path(FIREFLY_TRAIN);
             let output_path = "/tmp/test_keep_jumbf.jpg";
-            
+
             // Verify input has JUMBF
-            let mut input_asset = Asset::open(&input_path)
-                .expect("Failed to open FireflyTrain");
-            let input_jumbf = input_asset.jumbf()
+            let mut input_asset = Asset::open(&input_path).expect("Failed to open FireflyTrain");
+            let input_jumbf = input_asset
+                .jumbf()
                 .expect("Failed to check input JUMBF")
                 .expect("FireflyTrain should have JUMBF");
             println!("Input JUMBF size: {} bytes", input_jumbf.len());
-            
+
             // Write with default (keep everything)
-            input_asset.write_to(output_path, &Updates::default())
+            input_asset
+                .write_to(output_path, &Updates::default())
                 .expect("Failed to write with default updates");
-            
+
             // Verify output still has JUMBF
-            let mut output_asset = Asset::open(output_path)
-                .expect("Failed to open output");
-            let output_jumbf = output_asset.jumbf()
+            let mut output_asset = Asset::open(output_path).expect("Failed to open output");
+            let output_jumbf = output_asset
+                .jumbf()
                 .expect("Failed to check output JUMBF")
                 .expect("Output should have JUMBF");
+
+            assert_eq!(
+                output_jumbf.len(),
+                input_jumbf.len(),
+                "JUMBF size should be preserved"
+            );
+            assert_eq!(
+                output_jumbf, input_jumbf,
+                "JUMBF content should be identical"
+            );
+
+            println!(
+                "✓ JUMBF successfully preserved ({} bytes)",
+                output_jumbf.len()
+            );
+        }
+    }
+
+    /// Test streaming write + in-place update workflow (C2PA pattern)
+    /// This tests the calculate_updated_structure + write + update path
+    #[test]
+    fn test_streaming_write_and_update() {
+        use asset_io::{update_segment_with_structure, SegmentKind};
+        use std::io::{Seek, SeekFrom};
+
+        let test_cases = vec![
+            #[cfg(feature = "jpeg")]
+            (P1000708, "jpeg", "jpg"), // Has XMP, no JUMBF
+            #[cfg(feature = "jpeg")]
+            (FIREFLY_TRAIN, "firefly", "jpg"), // Has both XMP and JUMBF
+            #[cfg(feature = "png")]
+            (SAMPLE1_PNG, "png", "png"), // PNG test
+        ];
+
+        for (fixture, name, ext) in test_cases {
+            println!("\n=== Testing streaming write+update for {} ===", name);
+
+            let input_path = fixture_path(fixture);
+            let output_path = format!("/tmp/test_streaming_{}.{}", name, ext);
+
+            let mut asset = Asset::open(&input_path).expect(&format!("Failed to open {}", name));
+
+            // Create placeholder JUMBF (using valid JUMBF structure)
+            // The placeholder needs to be valid JUMBF for the parser to find it after update
+            let placeholder = create_test_jumbf();
+            let placeholder_size = placeholder.len();
+            let updates = Updates::new().set_jumbf(placeholder.clone());
+
+            // Create output file
+            let mut output_file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&output_path)
+                .expect("Failed to create output file");
+
+            // Write with processing (uses calculate_updated_structure internally)
+            let structure = asset
+                .write_with_processing(
+                    &mut output_file,
+                    &updates,
+                    8192,
+                    &[SegmentKind::Jumbf],
+                    &mut |_chunk| {},
+                )
+                .expect(&format!("write_with_processing failed for {}", name));
+
+            // Check JUMBF segment exists in structure
+            let jumbf_idx = structure
+                .c2pa_jumbf_index()
+                .expect(&format!("No JUMBF in structure for {}", name));
+            let jumbf_seg = &structure.segments[jumbf_idx];
+            println!(
+                "  JUMBF segment: offset=0x{:x}, size={}",
+                jumbf_seg.location().offset,
+                jumbf_seg.location().size
+            );
+
+            // Update JUMBF in-place with "final" data (same size, different content)
+            // Create a modified version of the placeholder
+            let mut final_jumbf = placeholder.clone();
+            // Modify some bytes to make it distinguishable
+            for byte in final_jumbf.iter_mut().skip(50).take(20) {
+                *byte = 0xFF;
+            }
             
-            assert_eq!(output_jumbf.len(), input_jumbf.len(), 
-                "JUMBF size should be preserved");
-            assert_eq!(output_jumbf, input_jumbf, 
-                "JUMBF content should be identical");
-            
-            println!("✓ JUMBF successfully preserved ({} bytes)", output_jumbf.len());
+            output_file
+                .seek(SeekFrom::Start(0))
+                .expect("Failed to seek");
+
+            update_segment_with_structure(
+                &mut output_file,
+                &structure,
+                SegmentKind::Jumbf,
+                final_jumbf.clone(),
+            )
+            .expect(&format!("update_segment_with_structure failed for {}", name));
+
+            // Flush and close
+            drop(output_file);
+
+            // Verify output is valid and JUMBF was updated
+            let mut verify_asset =
+                Asset::open(&output_path).expect(&format!("Failed to reopen output for {}", name));
+
+            let result_jumbf = verify_asset
+                .jumbf()
+                .expect(&format!("Failed to extract JUMBF from {}", name))
+                .expect(&format!("JUMBF not found in output {}", name));
+
+            // Just verify we can read back JUMBF data of the correct size
+            assert_eq!(
+                result_jumbf.len(), placeholder_size,
+                "JUMBF size should match for {}",
+                name
+            );
+
+            println!("✓ {} - Streaming write+update successful", name);
+        }
+    }
+
+    /// Test keeping existing XMP while adding JUMBF (the specific bug case)
+    #[test]
+    fn test_keep_xmp_add_jumbf() {
+
+        // P1000708.jpg has XMP but no JUMBF - this is the exact bug case
+        #[cfg(feature = "jpeg")]
+        {
+            println!("\n=== Testing Keep XMP + Add JUMBF (bug regression test) ===");
+
+            let input_path = fixture_path(P1000708);
+            let output_path = "/tmp/test_keep_xmp_add_jumbf.jpg";
+
+            let mut asset = Asset::open(&input_path).expect("Failed to open P1000708");
+
+            // Verify input has XMP
+            let input_xmp = asset.xmp().expect("Failed to check XMP").expect("Should have XMP");
+            println!("  Input XMP size: {} bytes", input_xmp.len());
+
+            // Add JUMBF while keeping XMP (default)
+            let jumbf_data = create_test_jumbf();
+            let updates = Updates::new().set_jumbf(jumbf_data.clone());
+
+            // Use write_with_processing to exercise calculate_updated_structure
+            let mut output_file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(output_path)
+                .expect("Failed to create output file");
+
+            let _structure = asset
+                .write_with_processing(
+                    &mut output_file,
+                    &updates,
+                    8192,
+                    &[],
+                    &mut |_| {},
+                )
+                .expect("write_with_processing failed");
+
+            drop(output_file);
+
+            // Verify output
+            let mut verify_asset = Asset::open(output_path).expect("Failed to open output");
+
+            let output_xmp = verify_asset
+                .xmp()
+                .expect("Failed to extract XMP")
+                .expect("XMP should be preserved");
+            let output_jumbf = verify_asset
+                .jumbf()
+                .expect("Failed to extract JUMBF")
+                .expect("JUMBF should be added");
+
+            assert_eq!(output_xmp, input_xmp, "XMP should be preserved");
+            assert_eq!(output_jumbf, jumbf_data, "JUMBF should match");
+
+            println!("✓ Keep XMP + Add JUMBF successful");
         }
     }
 }

@@ -255,7 +255,7 @@ pub(crate) fn write_c2pa_box<W: Write>(
     #[allow(dead_code)]
     const MANIFEST: &str = "manifest";
     const MERKLE: &str = "merkle";
-    
+
     let purpose_size = purpose.len() + 1;
 
     let box_size = if purpose == MERKLE {
@@ -280,7 +280,7 @@ pub(crate) fn write_c2pa_box<W: Write>(
     // write with appropriate purpose
     w.write_all(purpose.as_bytes())?;
     w.write_u8(0)?; // null terminator
-    
+
     if purpose == MERKLE {
         // write merkle cbor
         w.write_all(merkle_data)?;
@@ -606,9 +606,11 @@ impl BmffIO {
         // Read ftyp box to determine media type
         let mut buf = [0u8; 8];
         source.read_exact(&mut buf)?;
-        
+
         if &buf[4..8] != b"ftyp" {
-            return Err(Error::InvalidFormat("Not a BMFF file (missing ftyp box)".into()));
+            return Err(Error::InvalidFormat(
+                "Not a BMFF file (missing ftyp box)".into(),
+            ));
         }
 
         let size = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]);
@@ -641,7 +643,13 @@ impl BmffIO {
         let mut bmff_map: HashMap<String, Vec<Token>> = HashMap::new();
 
         // Build layout of the BMFF structure
-        build_bmff_tree(source, file_size, &mut bmff_tree, &root_token, &mut bmff_map)?;
+        build_bmff_tree(
+            source,
+            file_size,
+            &mut bmff_tree,
+            &root_token,
+            &mut bmff_map,
+        )?;
 
         // Create structure
         let mut structure = Structure::new(Container::Bmff, media_type);
@@ -758,10 +766,10 @@ impl ContainerIO for BmffIO {
             if segment.ranges.len() == 1 {
                 let range = segment.ranges[0];
                 source.seek(SeekFrom::Start(range.offset))?;
-                
+
                 // Read C2PA box structure:
                 // purpose (null-terminated string) + merkle_offset (8 bytes) + JUMBF data
-                
+
                 // Read purpose string (scan for null terminator)
                 let mut purpose_bytes = Vec::new();
                 loop {
@@ -776,15 +784,15 @@ impl ContainerIO for BmffIO {
                         return Err(Error::InvalidFormat("C2PA purpose string too long".into()));
                     }
                 }
-                
+
                 // Skip merkle offset (8 bytes)
                 let mut merkle_offset_buf = [0u8; 8];
                 source.read_exact(&mut merkle_offset_buf)?;
-                
+
                 // Calculate remaining JUMBF data size
                 let bytes_read = purpose_bytes.len() as u64 + 1 + 8;
                 let jumbf_size = range.size.saturating_sub(bytes_read);
-                
+
                 if jumbf_size > 0 {
                     let mut jumbf_data = vec![0u8; jumbf_size as usize];
                     source.read_exact(&mut jumbf_data)?;
@@ -804,9 +812,9 @@ impl ContainerIO for BmffIO {
         updates: &Updates,
     ) -> Result<()> {
         use crate::MetadataUpdate;
-        
+
         source.seek(SeekFrom::Start(0))?;
-        
+
         // Get file size
         let file_size = source.seek(SeekFrom::End(0))?;
         source.seek(SeekFrom::Start(0))?;
@@ -825,7 +833,13 @@ impl ContainerIO for BmffIO {
 
         let (mut bmff_tree, root_token) = Arena::with_data(root_box);
         let mut bmff_map: HashMap<String, Vec<Token>> = HashMap::new();
-        build_bmff_tree(source, file_size, &mut bmff_tree, &root_token, &mut bmff_map)?;
+        build_bmff_tree(
+            source,
+            file_size,
+            &mut bmff_tree,
+            &root_token,
+            &mut bmff_map,
+        )?;
 
         // Find ftyp box (required to be first)
         let ftyp_token = bmff_map
@@ -843,30 +857,42 @@ impl ContainerIO for BmffIO {
 
         // Find existing UUID boxes
         let existing_xmp_token = if let Some(uuid_list) = bmff_map.get("/uuid") {
-            uuid_list.iter().find(|&&token| {
-                let box_info = &bmff_tree[token];
-                box_info.data.user_type.as_ref()
-                    .map(|uuid| uuid.as_slice() == &XMP_UUID)
-                    .unwrap_or(false)
-            }).copied()
+            uuid_list
+                .iter()
+                .find(|&&token| {
+                    let box_info = &bmff_tree[token];
+                    box_info
+                        .data
+                        .user_type
+                        .as_ref()
+                        .map(|uuid| uuid.as_slice() == &XMP_UUID)
+                        .unwrap_or(false)
+                })
+                .copied()
         } else {
             None
         };
 
         let existing_c2pa_token = if let Some(uuid_list) = bmff_map.get("/uuid") {
-            uuid_list.iter().find(|&&token| {
-                let box_info = &bmff_tree[token];
-                box_info.data.user_type.as_ref()
-                    .map(|uuid| uuid.as_slice() == &C2PA_UUID)
-                    .unwrap_or(false)
-            }).copied()
+            uuid_list
+                .iter()
+                .find(|&&token| {
+                    let box_info = &bmff_tree[token];
+                    box_info
+                        .data
+                        .user_type
+                        .as_ref()
+                        .map(|uuid| uuid.as_slice() == &C2PA_UUID)
+                        .unwrap_or(false)
+                })
+                .copied()
         } else {
             None
         };
 
         // Simple strategy: Copy up to ftyp end, insert/skip UUIDs, copy rest
         source.seek(SeekFrom::Start(0))?;
-        
+
         // Copy ftyp box
         let mut buffer = vec![0u8; ftyp_end as usize];
         source.read_exact(&mut buffer)?;
@@ -907,20 +933,20 @@ impl ContainerIO for BmffIO {
         // Copy remaining boxes (skip existing UUID boxes)
         source.seek(SeekFrom::Start(ftyp_end))?;
         let mut current_pos = ftyp_end;
-        
+
         while current_pos < file_size {
             // Read box header to determine if we should skip it
             let box_start = current_pos;
             let header = BoxHeaderLite::read(source)?;
-            
+
             // Check if this is a UUID box we already wrote
             let should_skip = if header.name == BoxType::UuidBox {
                 let mut uuid_bytes = [0u8; 16];
                 source.read_exact(&mut uuid_bytes)?;
                 source.seek(SeekFrom::Start(box_start))?; // Reset for potential copy
-                
-                (uuid_bytes == XMP_UUID && (write_xmp || remove_xmp)) ||
-                (uuid_bytes == C2PA_UUID && (write_jumbf || remove_jumbf))
+
+                (uuid_bytes == XMP_UUID && (write_xmp || remove_xmp))
+                    || (uuid_bytes == C2PA_UUID && (write_jumbf || remove_jumbf))
             } else {
                 false
             };
@@ -949,16 +975,18 @@ impl ContainerIO for BmffIO {
         updates: &Updates,
     ) -> Result<Structure> {
         use crate::MetadataUpdate;
-        
-        let mut new_structure = Structure::new(source_structure.container, source_structure.media_type);
-        
+
+        let mut new_structure =
+            Structure::new(source_structure.container, source_structure.media_type);
+
         // Calculate sizes for new UUID boxes
         let xmp_box_size = match &updates.xmp {
             MetadataUpdate::Set(data) => Some(8 + 16 + data.len()), // header + UUID + data
             MetadataUpdate::Remove => None,
             MetadataUpdate::Keep => {
                 // Find existing XMP segment size
-                source_structure.xmp_index()
+                source_structure
+                    .xmp_index()
                     .and_then(|idx| source_structure.segments().get(idx))
                     .map(|seg| {
                         let data_size: u64 = seg.ranges.iter().map(|r| r.size).sum();
@@ -975,7 +1003,9 @@ impl ContainerIO for BmffIO {
             MetadataUpdate::Remove => None,
             MetadataUpdate::Keep => {
                 // Find existing JUMBF segment size
-                source_structure.jumbf_indices().first()
+                source_structure
+                    .jumbf_indices()
+                    .first()
                     .and_then(|&idx| source_structure.segments().get(idx))
                     .map(|seg| {
                         let data_size: u64 = seg.ranges.iter().map(|r| r.size).sum();
@@ -987,7 +1017,7 @@ impl ContainerIO for BmffIO {
         // Start with ftyp box (assume it exists and comes first)
         // In a real file, we'd parse to find ftyp, but for structure calculation we can estimate
         let mut current_offset = 0u64;
-        
+
         // Add ftyp (typically ~32 bytes, but we should get this from source)
         // For now, estimate based on common size
         let ftyp_size = 32u64;
@@ -1056,4 +1086,3 @@ mod tests {
         assert_eq!(BmffIO::detect(&data), Some(Container::Bmff));
     }
 }
-

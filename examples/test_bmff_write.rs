@@ -23,8 +23,14 @@ fn main() -> asset_io::Result<()> {
 
     let original_xmp = asset.xmp()?;
     let original_jumbf = asset.jumbf()?;
-    println!("  Original XMP: {} bytes", original_xmp.as_ref().map(|x| x.len()).unwrap_or(0));
-    println!("  Original JUMBF: {} bytes", original_jumbf.as_ref().map(|j| j.len()).unwrap_or(0));
+    println!(
+        "  Original XMP: {} bytes",
+        original_xmp.as_ref().map(|x| x.len()).unwrap_or(0)
+    );
+    println!(
+        "  Original JUMBF: {} bytes",
+        original_jumbf.as_ref().map(|j| j.len()).unwrap_or(0)
+    );
 
     // Test 2: Write with no changes (keep everything)
     println!("\n✏️  Test 1: Write with no changes");
@@ -37,8 +43,14 @@ fn main() -> asset_io::Result<()> {
     let mut verify_asset = Asset::open(output1)?;
     let verify_xmp = verify_asset.xmp()?;
     let verify_jumbf = verify_asset.jumbf()?;
-    println!("  Verified XMP: {} bytes", verify_xmp.as_ref().map(|x| x.len()).unwrap_or(0));
-    println!("  Verified JUMBF: {} bytes", verify_jumbf.as_ref().map(|j| j.len()).unwrap_or(0));
+    println!(
+        "  Verified XMP: {} bytes",
+        verify_xmp.as_ref().map(|x| x.len()).unwrap_or(0)
+    );
+    println!(
+        "  Verified JUMBF: {} bytes",
+        verify_jumbf.as_ref().map(|j| j.len()).unwrap_or(0)
+    );
 
     // Test 3: Remove XMP, keep JUMBF
     println!("\n✏️  Test 2: Remove XMP, keep JUMBF");
@@ -51,8 +63,14 @@ fn main() -> asset_io::Result<()> {
     let mut verify_asset2 = Asset::open(output2)?;
     let verify_xmp2 = verify_asset2.xmp()?;
     let verify_jumbf2 = verify_asset2.jumbf()?;
-    println!("  Verified XMP: {} bytes", verify_xmp2.as_ref().map(|x| x.len()).unwrap_or(0));
-    println!("  Verified JUMBF: {} bytes", verify_jumbf2.as_ref().map(|j| j.len()).unwrap_or(0));
+    println!(
+        "  Verified XMP: {} bytes",
+        verify_xmp2.as_ref().map(|x| x.len()).unwrap_or(0)
+    );
+    println!(
+        "  Verified JUMBF: {} bytes",
+        verify_jumbf2.as_ref().map(|j| j.len()).unwrap_or(0)
+    );
 
     // Test 4: Set new XMP
     println!("\n✏️  Test 3: Set new XMP");
@@ -65,7 +83,10 @@ fn main() -> asset_io::Result<()> {
 
     let mut verify_asset3 = Asset::open(output3)?;
     let verify_xmp3 = verify_asset3.xmp()?;
-    println!("  Verified new XMP: {} bytes", verify_xmp3.as_ref().map(|x| x.len()).unwrap_or(0));
+    println!(
+        "  Verified new XMP: {} bytes",
+        verify_xmp3.as_ref().map(|x| x.len()).unwrap_or(0)
+    );
     if let Some(xmp) = verify_xmp3 {
         if xmp == new_xmp {
             println!("  ✓ XMP matches!");
@@ -79,4 +100,3 @@ fn main() -> asset_io::Result<()> {
 
     Ok(())
 }
-

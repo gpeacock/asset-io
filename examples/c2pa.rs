@@ -46,7 +46,7 @@
 //!
 //! Run: `cargo run --example c2pa --features xmp,png,hashing tests/fixtures/sample1.png`
 
-use asset_io::{Asset, SegmentKind, Updates, update_segment_with_structure};
+use asset_io::{update_segment_with_structure, Asset, SegmentKind, Updates};
 use c2pa::{
     assertions::{c2pa_action, Action, DataHash, DigitalSourceType},
     settings::Settings,
@@ -54,6 +54,137 @@ use c2pa::{
 };
 use sha2::{Digest, Sha512};
 use std::fs::OpenOptions;
+
+// BMFF support - uncomment when c2pa-rs adds bmff_hashed_placeholder/sign_bmff_hashed_embeddable APIs
+// Note: Will also need to add `serde_bytes` dependency for ByteBuf construction
+#[allow(dead_code, unused_variables)]
+mod bmff_support {
+    use c2pa::assertions::{BmffHash, DataMap, ExclusionsMap, MerkleMap, SubsetMap, VecByteBuf};
+    use sha2::{Digest, Sha256};
+    use std::io::{Read, Seek, SeekFrom};
+
+    /// Generate a BmffHash from structure information for BMFF containers (MOV, MP4, etc.)
+    ///
+    /// This creates a BmffHash with mandatory exclusions and optional Merkle tree
+    /// for large files (>50MB). Uses SHA-256 as required by C2PA BMFF specification.
+    ///
+    /// # Note
+    /// This function is ready to use once c2pa-rs adds:
+    /// - `Builder::bmff_hashed_placeholder()`
+    /// - `Builder::sign_bmff_hashed_embeddable()`
+    ///
+    /// # Arguments
+    /// * `source_path` - Path to source file for Merkle hashing
+    /// * `structure` - The destination structure (from write_with_processing)
+    /// * `hash` - The hash computed during write_with_processing
+    ///
+    /// # Returns
+    /// A BmffHash containing the hash, exclusions, and optional Merkle tree
+    pub fn generate_bmff_hash_from_structure(
+        source_path: &str,
+        structure: &asset_io::Structure,
+        hash: Vec<u8>,
+    ) -> Result<BmffHash, Box<dyn std::error::Error>> {
+        // Create BmffHash with mandatory exclusions
+        let mut bmff_hash = BmffHash::new("jumbf manifest", "sha256", None);
+
+        // Add mandatory exclusions per C2PA spec
+        let exclusions = bmff_hash.exclusions_mut();
+
+        // 1. Exclude C2PA UUID boxes
+        let mut uuid = ExclusionsMap::new("/uuid".to_owned());
+        uuid.data = Some(vec![DataMap {
+            offset: 8,
+            value: vec![
+                0xd8, 0xfe, 0xc3, 0xd6, 0x1b, 0x0e, 0x48, 0x3c, 0x92, 0x97, 0x58, 0x28, 0x87, 0x7e,
+                0xc4, 0x81,
+            ], // C2PA UUID identifier
+        }]);
+        exclusions.push(uuid);
+
+        // 2. Exclude ftyp box
+        exclusions.push(ExclusionsMap::new("/ftyp".to_owned()));
+
+        // 3. Exclude mfra box (movie fragment random access)
+        exclusions.push(ExclusionsMap::new("/mfra".to_owned()));
+
+        // For large files (>50MB), use Merkle tree
+        let use_merkle = structure.total_size > 50 * 1024 * 1024;
+
+        if use_merkle {
+            println!("  📊 File > 50MB, creating Merkle tree...");
+
+            let merkle_chunk_size = 1024 * 1024; // 1MB chunks
+
+            // Add mdat exclusion when using Merkle
+            let mut mdat = ExclusionsMap::new("/mdat".to_owned());
+            mdat.subset = Some(vec![SubsetMap {
+                offset: 16,
+                length: 0,
+            }]);
+            exclusions.push(mdat);
+
+            // Find mdat boxes and create Merkle maps
+            let mut merkle_maps = Vec::new();
+            let mut source = std::fs::File::open(source_path)?;
+
+            for (segment_idx, segment) in structure.segments().iter().enumerate() {
+                if segment.path.as_ref().map(|s| s.as_str()) == Some("mdat") {
+                    let mdat_size: u64 = segment.ranges.iter().map(|r| r.size).sum();
+                    let num_chunks = (mdat_size + merkle_chunk_size - 1) / merkle_chunk_size;
+
+                    println!(
+                        "  📦 mdat box: {:.2} MB → {} chunks",
+                        mdat_size as f64 / 1024.0 / 1024.0,
+                        num_chunks
+                    );
+
+                    let mut hashes = Vec::new();
+                    for chunk_idx in 0..num_chunks {
+                        let chunk_offset =
+                            segment.ranges[0].offset + (chunk_idx * merkle_chunk_size);
+                        let chunk_len = std::cmp::min(
+                            merkle_chunk_size,
+                            mdat_size - (chunk_idx * merkle_chunk_size),
+                        );
+
+                        source.seek(SeekFrom::Start(chunk_offset))?;
+                        let mut buffer = vec![0u8; chunk_len as usize];
+                        source.read_exact(&mut buffer)?;
+
+                        let mut hasher = Sha256::new();
+                        hasher.update(&buffer);
+                        // When uncommenting, add: use serde_bytes::ByteBuf;
+                        // and replace line below with: hashes.push(ByteBuf::from(hasher.finalize().to_vec()));
+                        hashes.push(panic!("Need serde_bytes::ByteBuf"));
+                    }
+
+                    merkle_maps.push(MerkleMap {
+                        unique_id: 0,
+                        local_id: segment_idx,
+                        count: hashes.len(),
+                        alg: Some("sha256".to_string()),
+                        fixed_block_size: Some(merkle_chunk_size),
+                        variable_block_sizes: None,
+                        init_hash: None,
+                        hashes: VecByteBuf(hashes),
+                    });
+                }
+            }
+
+            if !merkle_maps.is_empty() {
+                let count = merkle_maps.len();
+                bmff_hash.set_merkle(merkle_maps);
+                println!("  ✅ Merkle tree created with {} map(s)", count);
+            }
+        }
+
+        // Set the hash
+        bmff_hash.set_hash(hash);
+
+        Ok(bmff_hash)
+    }
+}
 
 /// Generate a DataHash from structure information (post-write)
 ///
@@ -124,7 +255,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create placeholder manifest and prepare updates
     let placeholder_manifest =
         builder.data_hashed_placeholder(signer.reserve_size(), "application/c2pa")?;
-    
+
     let updates = Updates::new().set_jumbf(placeholder_manifest.clone());
 
     // Open output file with write+seek (no read needed with true single-pass!)
@@ -135,18 +266,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .open(&output_path)?;
 
     println!("⚡ Writing and hashing in single pass (true single-pass - no re-read!)...");
-    
+
     // STREAMING WRITE-HASH-UPDATE: Write and hash in ONE PASS!
     // This is the key optimization - no file reopening needed
     let mut hasher = Sha512::new();
     let structure = asset.write_with_processing(
         &mut output_file,
         &updates,
-        8192,  // 8KB chunks
-        &[SegmentKind::Jumbf],  // Exclude JUMBF from hash
+        8192,                  // 8KB chunks
+        &[SegmentKind::Jumbf], // Exclude JUMBF from hash
         &mut |chunk| hasher.update(chunk),
     )?;
-    
+
     let hash = hasher.finalize().to_vec();
     println!("✅ Write complete! Hash computed.");
 
@@ -165,7 +296,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         SegmentKind::Jumbf,
         final_manifest,
     )?;
-    
+
+    // IMPORTANT: Flush to ensure all bytes are written to disk before verification
+    use std::io::Write;
+    output_file.flush()?;
+
     // File will be flushed on drop
     drop(output_file);
     println!("💾 File saved: {}", output_path);

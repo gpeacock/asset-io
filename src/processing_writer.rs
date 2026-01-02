@@ -74,31 +74,31 @@ impl<W: Write, F: FnMut(&[u8])> ProcessingWriter<W, F> {
     /// # Arguments
     ///
     /// * `exclude` - If true, temporarily disable processing. If false, re-enable.
-    #[allow(dead_code)]  // Used by container handlers when they override write_with_processor
+    #[allow(dead_code)] // Used by container handlers when they override write_with_processor
     pub fn set_exclude_mode(&mut self, exclude: bool) {
         self.exclude_mode = exclude;
     }
 
     /// Check if exclude mode is currently active
-    #[allow(dead_code)]  // Provided for completeness
+    #[allow(dead_code)] // Provided for completeness
     pub fn is_exclude_mode(&self) -> bool {
         self.exclude_mode
     }
 
     /// Consume the wrapper and return the underlying writer
-    #[allow(dead_code)]  // Provided for completeness
+    #[allow(dead_code)] // Provided for completeness
     pub fn into_inner(self) -> W {
         self.writer
     }
 
     /// Get a reference to the underlying writer
-    #[allow(dead_code)]  // Provided for completeness
+    #[allow(dead_code)] // Provided for completeness
     pub fn get_ref(&self) -> &W {
         &self.writer
     }
 
     /// Get a mutable reference to the underlying writer
-    #[allow(dead_code)]  // Provided for completeness
+    #[allow(dead_code)] // Provided for completeness
     pub fn get_mut(&mut self) -> &mut W {
         &mut self.writer
     }

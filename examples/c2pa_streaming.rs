@@ -11,7 +11,7 @@
 //!
 //! Run with: cargo run --features jpeg,xmp,hashing --example c2pa_streaming
 
-use asset_io::{Asset, SegmentKind, Updates, update_segment_with_structure};
+use asset_io::{update_segment_with_structure, Asset, SegmentKind, Updates};
 use sha2::{Digest, Sha256};
 use std::fs::OpenOptions;
 
@@ -69,12 +69,8 @@ fn main() -> asset_io::Result<()> {
 
     // Step 7: Update JUMBF in-place (file still open!)
     println!("\n✏️  Updating JUMBF in-place...");
-    let bytes_written = update_segment_with_structure(
-        &mut output,
-        &structure,
-        SegmentKind::Jumbf,
-        final_manifest,
-    )?;
+    let bytes_written =
+        update_segment_with_structure(&mut output, &structure, SegmentKind::Jumbf, final_manifest)?;
     println!("✅ Updated {} bytes", bytes_written);
 
     // Step 8: Close output (automatic on drop)
@@ -119,24 +115,24 @@ fn create_mock_c2pa_manifest(hash: &[u8]) -> Vec<u8> {
 
     // Create a minimal JUMBF structure that will be recognized by the parser
     // JUMBF box: 'jumb' type with description box
-    
+
     // JUMBF super box header
     let jumbf_size: u32 = 200; // Will be padded to 20000
     manifest.extend_from_slice(&jumbf_size.to_be_bytes());
     manifest.extend_from_slice(b"jumb");
-    
+
     // JUMBF Description Box
     let desc_size: u32 = 50;
     manifest.extend_from_slice(&desc_size.to_be_bytes());
     manifest.extend_from_slice(b"jumd");
     manifest.extend_from_slice(&[0x00]); // UUID toggle (0 = no UUID)
     manifest.extend_from_slice(b"c2pa.assertions\0"); // Label (null-terminated)
-    
+
     // Mock C2PA data box
     let data_size: u32 = 100;
     manifest.extend_from_slice(&data_size.to_be_bytes());
     manifest.extend_from_slice(b"json");
-    
+
     // Mock C2PA claim with hash
     manifest.extend_from_slice(b"{");
     manifest.extend_from_slice(b"\"alg\":\"sha256\",");

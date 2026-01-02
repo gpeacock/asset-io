@@ -71,6 +71,70 @@ required-features = ["xmp", "memory-mapped", "hashing"]
 name = "mmap_comparison"
 required-features = ["xmp", "memory-mapped", "hashing"]
 
+[[example]]
+name = "test_bmff_hash"
+required-features = ["bmff", "hashing"]
+
+[[example]]
+name = "bmff_v3_hash"
+required-features = ["bmff", "hashing"]
+
+[[example]]
+name = "bmff_c2pa_hash"
+required-features = ["bmff", "hashing"]
+
+[[example]]
+name = "bench_hash_only"
+required-features = ["hashing"]
+
+[[example]]
+name = "test_bmff"
+required-features = ["bmff"]
+
+[[example]]
+name = "test_bmff_write"
+required-features = ["bmff", "xmp"]
+
+[[example]]
+name = "c2pa_streaming"
+required-features = ["xmp", "hashing"]
+
+[[example]]
+name = "update_jumbf"
+required-features = ["jpeg", "xmp"]
+
+[[example]]
+name = "test_large_164mb"
+required-features = ["bmff", "hashing"]
+
+[[example]]
+name = "update_xmp_field"
+required-features = ["jpeg", "xmp"]
+
+[[example]]
+name = "test_processing_writer_png"
+required-features = ["png", "hashing"]
+
+[[example]]
+name = "test_png_jumbf_write"
+required-features = ["png"]
+
+[[example]]
+name = "test_all_combinations"
+required-features = ["jpeg", "xmp"]
+
+[[example]]
+name = "test_xmp_extended"
+required-features = ["jpeg", "xmp"]
+
+[[example]]
+name = "test_png_exif"
+required-features = ["png", "exif"]
+
+[[example]]
+name = "test_fixtures"
+required-features = ["jpeg", "xmp"]
+
 [profile.release]
 opt-level = 3
 lto = true

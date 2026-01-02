@@ -74,6 +74,8 @@ define_fixtures!(
     DESIGNER => ("Designer.jpeg", "image/jpeg"),           // 127KB - JUMBF only
     FIREFLY_TRAIN => ("FireflyTrain.jpg", "image/jpeg"),  // 161KB - XMP + JUMBF
     P1000708 => ("P1000708.jpg", "image/jpeg"),            // 810KB - XMP only
+    SAMPLE1_PNG => ("sample1.png", "image/png"),           // PNG test fixture
+    GREEN_CAT_PNG => ("GreenCat.png", "image/png"),        // PNG with JUMBF
 );
 
 /// Get path to a fixture file
@@ -212,7 +214,9 @@ mod tests {
         assert!(fixtures.contains(&"FireflyTrain.jpg"));
         assert!(fixtures.contains(&"Designer.jpeg"));
         assert!(fixtures.contains(&"P1000708.jpg"));
-        assert_eq!(fixtures.len(), 3);
+        assert!(fixtures.contains(&"sample1.png"));
+        assert!(fixtures.contains(&"GreenCat.png"));
+        assert_eq!(fixtures.len(), 5);
     }
 
     #[cfg(feature = "embed-fixtures")]

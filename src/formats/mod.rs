@@ -121,7 +121,7 @@ pub trait ContainerIO: Send + Sync {
         processor: F,
     ) -> Result<()> {
         use crate::processing_writer::ProcessingWriter;
-        
+
         // Default implementation: wrap writer and process everything
         // This doesn't intelligently exclude segments, but handlers can override
         let mut processing_writer = ProcessingWriter::new(writer, processor);

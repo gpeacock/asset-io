@@ -90,12 +90,12 @@ mod fixture_tests {
             "Should have fixtures in tests/fixtures"
         );
 
-        // All should be JPEGs
+        // All should be supported image formats (JPEG or PNG)
         for fixture in &fixtures {
             let lower = fixture.to_lowercase();
             assert!(
-                lower.ends_with(".jpg") || lower.ends_with(".jpeg"),
-                "Fixture {} should be a JPEG",
+                lower.ends_with(".jpg") || lower.ends_with(".jpeg") || lower.ends_with(".png"),
+                "Fixture {} should be a supported format (JPEG or PNG)",
                 fixture
             );
         }

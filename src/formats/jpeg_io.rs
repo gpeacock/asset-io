@@ -543,7 +543,7 @@ impl JpegIO {
                     let is_jpeg_xt = bytes_to_read >= 8 && &header[0..2] == b"JP";
                     let has_jumb_box_after_xt = bytes_to_read >= 16 && &header[12..16] == b"jumb";
                     let has_c2pa_after_xt = bytes_to_read >= 32 && &header[28..32] == C2PA_MARKER;
-                    
+
                     // Check if this is raw JUMBF (no JPEG XT wrapper)
                     let has_jumb_box_direct = bytes_to_read >= 8 && &header[4..8] == b"jumb";
                     let has_c2pa_direct = bytes_to_read >= 24 && &header[20..24] == C2PA_MARKER;
@@ -560,26 +560,26 @@ impl JpegIO {
                         let (jumbf_data_offset, jumbf_data_size) = if is_jpeg_xt {
                             const JPEG_XT_HEADER_SIZE: u64 = 8;
                             const REPEATED_LBOX_TBOX_SIZE: u64 = 8;
-                            
+
                             // Extract sequence number to detect continuation
                             let seq_num = if bytes_to_read >= 8 {
                                 u32::from_be_bytes([header[4], header[5], header[6], header[7]])
                             } else {
                                 1
                             };
-                            
+
                             // Continuation segments have extra overhead
                             let overhead = if seq_num > 1 {
                                 JPEG_XT_HEADER_SIZE + REPEATED_LBOX_TBOX_SIZE
                             } else {
                                 JPEG_XT_HEADER_SIZE
                             };
-                            
+
                             (data_start + overhead, data_size - overhead)
                         } else {
                             (data_start, data_size)
                         };
-                        
+
                         // Extract sequence number (only for JPEG XT format)
                         let seq_num = if is_jpeg_xt && bytes_to_read >= 8 {
                             u32::from_be_bytes([header[4], header[5], header[6], header[7]])
@@ -718,7 +718,7 @@ impl ContainerIO for JpegIO {
     ) -> Result<()> {
         // Calculate the destination structure first - this tells us exactly what to write
         let dest_structure = self.calculate_updated_structure(structure, updates)?;
-        
+
         source.seek(SeekFrom::Start(0))?;
 
         // Write SOI
@@ -741,7 +741,8 @@ impl ContainerIO for JpegIO {
                         }
                         crate::MetadataUpdate::Keep => {
                             // Find corresponding source segment and copy it
-                            if let Some(source_seg) = structure.segments.iter().find(|s| s.is_xmp()) {
+                            if let Some(source_seg) = structure.segments.iter().find(|s| s.is_xmp())
+                            {
                                 // Handle extended XMP if present
                                 if let Some(meta) = &source_seg.metadata {
                                     if let Some((guid, chunk_offsets, _total_size)) =
@@ -754,36 +755,52 @@ impl ContainerIO for JpegIO {
                                             writer.write_u16::<BigEndian>(
                                                 (source_seg.ranges[0].size
                                                     + XMP_SIGNATURE.len() as u64
-                                                    + 2) as u16,
+                                                    + 2)
+                                                    as u16,
                                             )?;
                                             writer.write_all(XMP_SIGNATURE)?;
 
-                                            source.seek(SeekFrom::Start(source_seg.ranges[0].offset))?;
-                                            let mut limited = source.take(source_seg.ranges[0].size);
+                                            source.seek(SeekFrom::Start(
+                                                source_seg.ranges[0].offset,
+                                            ))?;
+                                            let mut limited =
+                                                source.take(source_seg.ranges[0].size);
                                             copy(&mut limited, writer)?;
                                         }
 
                                         // Write extended XMP segments
-                                        for (i, range) in source_seg.ranges[1..].iter().enumerate() {
-                                            let chunk_offset = chunk_offsets.get(i).copied().unwrap_or(0);
+                                        for (i, range) in source_seg.ranges[1..].iter().enumerate()
+                                        {
+                                            let chunk_offset =
+                                                chunk_offsets.get(i).copied().unwrap_or(0);
 
                                             writer.write_u8(0xFF)?;
                                             writer.write_u8(APP1)?;
 
                                             let seg_size = XMP_EXTENDED_SIGNATURE.len()
-                                                + 32 + 4 + 4 + range.size as usize + 2;
+                                                + 32
+                                                + 4
+                                                + 4
+                                                + range.size as usize
+                                                + 2;
                                             writer.write_u16::<BigEndian>(seg_size as u16)?;
 
                                             writer.write_all(XMP_EXTENDED_SIGNATURE)?;
 
                                             let guid_bytes = guid.as_bytes();
-                                            writer.write_all(&guid_bytes[..guid_bytes.len().min(32)])?;
+                                            writer.write_all(
+                                                &guid_bytes[..guid_bytes.len().min(32)],
+                                            )?;
                                             for _ in guid_bytes.len()..32 {
                                                 writer.write_u8(0)?;
                                             }
 
-                                            writer.write_u32::<BigEndian>(source_seg.ranges[1..].iter()
-                                                .map(|r| r.size as u32).sum())?;
+                                            writer.write_u32::<BigEndian>(
+                                                source_seg.ranges[1..]
+                                                    .iter()
+                                                    .map(|r| r.size as u32)
+                                                    .sum(),
+                                            )?;
                                             writer.write_u32::<BigEndian>(chunk_offset)?;
 
                                             source.seek(SeekFrom::Start(range.offset))?;
@@ -793,12 +810,13 @@ impl ContainerIO for JpegIO {
                                         continue;
                                     }
                                 }
-                                
+
                                 // Simple XMP - just copy
                                 writer.write_u8(0xFF)?;
                                 writer.write_u8(APP1)?;
                                 writer.write_u16::<BigEndian>(
-                                    (source_seg.ranges[0].size + XMP_SIGNATURE.len() as u64 + 2) as u16,
+                                    (source_seg.ranges[0].size + XMP_SIGNATURE.len() as u64 + 2)
+                                        as u16,
                                 )?;
                                 writer.write_all(XMP_SIGNATURE)?;
 
@@ -822,15 +840,20 @@ impl ContainerIO for JpegIO {
                         crate::MetadataUpdate::Keep => {
                             // Read existing JUMBF data and re-write it
                             // (This ensures consistent JPEG XT formatting)
-                            if let Some(source_seg) = structure.segments.iter().find(|s| s.is_jumbf()) {
+                            if let Some(source_seg) =
+                                structure.segments.iter().find(|s| s.is_jumbf())
+                            {
                                 // Read the JUMBF data (without JPEG XT headers)
-                                let total_size: u64 = source_seg.ranges.iter().map(|r| r.size).sum();
+                                let total_size: u64 =
+                                    source_seg.ranges.iter().map(|r| r.size).sum();
                                 let mut jumbf_data = vec![0u8; total_size as usize];
                                 let mut offset = 0;
 
                                 for range in &source_seg.ranges {
                                     source.seek(SeekFrom::Start(range.offset))?;
-                                    source.read_exact(&mut jumbf_data[offset..offset + range.size as usize])?;
+                                    source.read_exact(
+                                        &mut jumbf_data[offset..offset + range.size as usize],
+                                    )?;
                                     offset += range.size as usize;
                                 }
 
@@ -846,7 +869,11 @@ impl ContainerIO for JpegIO {
 
                 seg if seg.is_type(SegmentKind::ImageData) => {
                     // Find corresponding source segment
-                    if let Some(source_seg) = structure.segments.iter().find(|s| s.is_type(SegmentKind::ImageData)) {
+                    if let Some(source_seg) = structure
+                        .segments
+                        .iter()
+                        .find(|s| s.is_type(SegmentKind::ImageData))
+                    {
                         // Copy SOS marker + image data + any RST markers + EOI
                         let location = source_seg.location();
                         source.seek(SeekFrom::Start(location.offset))?;
@@ -864,7 +891,9 @@ impl ContainerIO for JpegIO {
                 _ => {
                     // Copy other segments from source
                     // Find corresponding source segment by kind and path
-                    if let Some(source_seg) = structure.segments.iter()
+                    if let Some(source_seg) = structure
+                        .segments
+                        .iter()
                         .find(|s| s.kind == dest_segment.kind && s.path == dest_segment.path)
                     {
                         let location = source_seg.location();
@@ -910,14 +939,17 @@ impl ContainerIO for JpegIO {
                     match &updates.xmp {
                         MetadataUpdate::Keep => {
                             // Keep existing XMP - add segment at current offset
+                            // XMP stored in segment is just XMP data (after signature)
+                            // But we write: marker(2) + length(2) + signature(29) + data
                             let location = segment.location();
+                            let segment_size = 2 + 2 + XMP_SIGNATURE.len() as u64 + location.size;
                             dest_structure.add_segment(Segment::new(
-                                current_offset,
+                                current_offset + 4 + XMP_SIGNATURE.len() as u64,
                                 location.size,
                                 SegmentKind::Xmp,
                                 segment.path.clone(),
                             ));
-                            current_offset += location.size;
+                            current_offset += segment_size;
                             xmp_written = true;
                         }
                         MetadataUpdate::Set(new_xmp) if !xmp_written => {
@@ -945,15 +977,15 @@ impl ContainerIO for JpegIO {
                             // Keep existing JUMBF - calculate all APP11 segments
                             // IMPORTANT: Use total size from ALL ranges, not just first one!
                             let jumbf_data_size: u64 = segment.ranges.iter().map(|r| r.size).sum();
-                            
+
                             // Calculate how many APP11 segments needed
                             let mut remaining = jumbf_data_size;
                             let mut ranges = Vec::new();
-                            
+
                             const JPEG_XT_FIRST_OVERHEAD: usize = 8;
                             const JPEG_XT_CONT_OVERHEAD: usize = 16;
                             const MAX_DATA: usize = MAX_MARKER_SIZE - JPEG_XT_CONT_OVERHEAD;
-                            
+
                             let mut seg_num = 0;
                             while remaining > 0 {
                                 let data_in_segment = remaining.min(MAX_DATA as u64);
@@ -963,7 +995,7 @@ impl ContainerIO for JpegIO {
                                     JPEG_XT_CONT_OVERHEAD
                                 };
                                 let segment_size = 2 + 2 + overhead as u64 + data_in_segment; // FF EB + length + overhead + data
-                                
+
                                 ranges.push(ByteRange::new(
                                     current_offset + 4 + overhead as u64,
                                     data_in_segment,
@@ -972,7 +1004,7 @@ impl ContainerIO for JpegIO {
                                 remaining -= data_in_segment;
                                 seg_num += 1;
                             }
-                            
+
                             dest_structure.add_segment_with_ranges(
                                 SegmentKind::Jumbf,
                                 ranges,
@@ -985,11 +1017,11 @@ impl ContainerIO for JpegIO {
                             let jumbf_size = new_jumbf.len() as u64;
                             let mut remaining = jumbf_size;
                             let mut ranges = Vec::new();
-                            
+
                             const JPEG_XT_FIRST_OVERHEAD: usize = 8;
                             const JPEG_XT_CONT_OVERHEAD: usize = 16;
                             const MAX_DATA: usize = MAX_MARKER_SIZE - JPEG_XT_CONT_OVERHEAD;
-                            
+
                             let mut seg_num = 0;
                             while remaining > 0 {
                                 let data_in_segment = remaining.min(MAX_DATA as u64);
@@ -999,7 +1031,7 @@ impl ContainerIO for JpegIO {
                                     JPEG_XT_CONT_OVERHEAD
                                 };
                                 let segment_size = 2 + 2 + overhead as u64 + data_in_segment;
-                                
+
                                 ranges.push(ByteRange::new(
                                     current_offset + 4 + overhead as u64,
                                     data_in_segment,
@@ -1008,7 +1040,7 @@ impl ContainerIO for JpegIO {
                                 remaining -= data_in_segment;
                                 seg_num += 1;
                             }
-                            
+
                             dest_structure.add_segment_with_ranges(
                                 SegmentKind::Jumbf,
                                 ranges,
@@ -1035,7 +1067,10 @@ impl ContainerIO for JpegIO {
                     current_offset += segment_size;
                 }
 
-                segment if segment.is_type(SegmentKind::Other) && segment.path.as_deref() == Some("EOI") => {
+                segment
+                    if segment.is_type(SegmentKind::Other)
+                        && segment.path.as_deref() == Some("EOI") =>
+                {
                     // EOI marker
                     dest_structure.add_segment(Segment::new(
                         current_offset,
@@ -1050,10 +1085,17 @@ impl ContainerIO for JpegIO {
                     // Before copying "Other" segments, check if this is the transition point
                     // from APP markers to frame markers (DQT/SOF/etc)
                     // If so, insert new XMP/JUMBF here
-                    let is_frame_marker = segment.path.as_deref().map(|p| {
-                        p.starts_with("DQT") || p.starts_with("SOF") || p.starts_with("DHT") || p.starts_with("DRI")
-                    }).unwrap_or(false);
-                    
+                    let is_frame_marker = segment
+                        .path
+                        .as_deref()
+                        .map(|p| {
+                            p.starts_with("DQT")
+                                || p.starts_with("SOF")
+                                || p.starts_with("DHT")
+                                || p.starts_with("DRI")
+                        })
+                        .unwrap_or(false);
+
                     if is_frame_marker {
                         // This is a frame marker - insert any pending new metadata before it
                         if !xmp_written && !has_xmp {
@@ -1075,8 +1117,10 @@ impl ContainerIO for JpegIO {
                             if let MetadataUpdate::Set(new_jumbf) = &updates.jumbf {
                                 // For c2pa-provided data (already in APP11 format), write directly
                                 // Otherwise wrap in JPEG XT format
-                                let is_already_app11 = new_jumbf.len() >= 2 && new_jumbf[0] == 0xFF && new_jumbf[1] == APP11;
-                                
+                                let is_already_app11 = new_jumbf.len() >= 2
+                                    && new_jumbf[0] == 0xFF
+                                    && new_jumbf[1] == APP11;
+
                                 if is_already_app11 {
                                     // Data already has APP11 markers - treat as opaque blob
                                     // The write function will handle it correctly
@@ -1093,11 +1137,13 @@ impl ContainerIO for JpegIO {
                                     let jumbf_size = new_jumbf.len() as u64;
                                     let mut remaining = jumbf_size;
                                     let mut ranges = Vec::new();
-                                    
+
                                     const JPEG_XT_FIRST_OVERHEAD: usize = 8;
                                     const JPEG_XT_CONT_OVERHEAD: usize = 16;
-                                    const MAX_DATA: usize = MAX_MARKER_SIZE - JPEG_XT_FIRST_OVERHEAD - JPEG_XT_CONT_OVERHEAD;
-                                    
+                                    const MAX_DATA: usize = MAX_MARKER_SIZE
+                                        - JPEG_XT_FIRST_OVERHEAD
+                                        - JPEG_XT_CONT_OVERHEAD;
+
                                     let mut seg_num = 0;
                                     while remaining > 0 {
                                         let data_in_segment = remaining.min(MAX_DATA as u64);
@@ -1106,8 +1152,9 @@ impl ContainerIO for JpegIO {
                                         } else {
                                             JPEG_XT_CONT_OVERHEAD
                                         };
-                                        let segment_size = 2 + 2 + overhead as u64 + data_in_segment;
-                                        
+                                        let segment_size =
+                                            2 + 2 + overhead as u64 + data_in_segment;
+
                                         ranges.push(ByteRange::new(
                                             current_offset + 4 + overhead as u64,
                                             data_in_segment,
@@ -1116,7 +1163,7 @@ impl ContainerIO for JpegIO {
                                         remaining -= data_in_segment;
                                         seg_num += 1;
                                     }
-                                    
+
                                     dest_structure.add_segment_with_ranges(
                                         SegmentKind::Jumbf,
                                         ranges,
@@ -1127,7 +1174,7 @@ impl ContainerIO for JpegIO {
                             }
                         }
                     }
-                    
+
                     // Copy other segments as-is
                     let location = segment.location();
                     dest_structure.add_segment(Segment::new(
@@ -1292,19 +1339,19 @@ fn write_jumbf_segments<W: Write>(writer: &mut W, jumbf: &[u8]) -> Result<()> {
     // Check if the JUMBF data is already in APP11 segment format (complete with FF EB marker)
     // (This happens when c2pa crate returns complete APP11 segments)
     let is_complete_app11 = jumbf.len() >= 2 && jumbf[0] == 0xFF && jumbf[1] == APP11;
-    
+
     if is_complete_app11 {
         // Data is already in APP11 format with FF EB marker, write directly
         writer.write_all(jumbf)?;
         return Ok(());
     }
-    
+
     // Check if the JUMBF data is already in JPEG XT format (starts with "JP")
     // (This can happen with some JUMBF sources, but note that when Keeping existing JUMBF,
     // we now copy the complete APP11 segments directly in the write() function instead of
     // going through this function, so this path is mainly for completeness)
     let is_already_jpeg_xt = jumbf.len() >= 2 && &jumbf[0..2] == b"JP";
-    
+
     if is_already_jpeg_xt {
         // Data is in JPEG XT format payload, just needs APP11 marker + length wrapper
         const MAX_SEGMENT_PAYLOAD: usize = MAX_MARKER_SIZE - 2; // Minus the 2-byte length field
@@ -1316,14 +1363,14 @@ fn write_jumbf_segments<W: Write>(writer: &mut W, jumbf: &[u8]) -> Result<()> {
             // Length includes the 2-byte length field itself plus the chunk
             let seg_size = 2 + chunk.len();
             writer.write_u16::<BigEndian>(seg_size as u16)?;
-            
+
             // Write the JPEG XT formatted chunk as-is
             writer.write_all(chunk)?;
         }
-        
+
         return Ok(());
     }
-    
+
     // Otherwise, wrap raw JUMBF boxes in JPEG XT format
     // JPEG XT header for first segment: JP (2) + En (2) + Z (4) = 8 bytes
     // For continuation segments, we also repeat LBox (4) + TBox (4) = 8 more bytes

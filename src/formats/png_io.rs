@@ -488,12 +488,30 @@ impl ContainerIO for PngIO {
         updates: &Updates,
     ) -> Result<()> {
         // Calculate the destination structure first - this tells us exactly what to write
+        // This is the SAME structure that will be returned for updates
         let dest_structure = self.calculate_updated_structure(structure, updates)?;
 
         source.seek(SeekFrom::Start(0))?;
 
         // Write PNG signature
         writer.write_all(PNG_SIGNATURE)?;
+
+        // Collect source segments by type for ordered iteration
+        let source_idats: Vec<_> = structure
+            .segments
+            .iter()
+            .filter(|s| s.is_type(SegmentKind::ImageData))
+            .collect();
+        let mut idat_index = 0;
+
+        // For "Other" segments, we need to track which ones we've used
+        // since multiple chunks can have the same path (e.g., multiple tEXt)
+        let source_others: Vec<_> = structure
+            .segments
+            .iter()
+            .filter(|s| s.kind == SegmentKind::Other)
+            .collect();
+        let mut other_index = 0;
 
         // Iterate through destination structure and write each segment
         for dest_segment in &dest_structure.segments {
@@ -510,7 +528,7 @@ impl ContainerIO for PngIO {
                             Self::write_xmp_chunk(writer, new_xmp)?;
                         }
                         crate::MetadataUpdate::Keep => {
-                            // Find corresponding source segment and copy it
+                            // Find corresponding source segment and copy XMP data
                             if let Some(source_seg) = structure.segments.iter().find(|s| s.is_xmp())
                             {
                                 let location = source_seg.location();
@@ -554,24 +572,22 @@ impl ContainerIO for PngIO {
                     }
                 }
 
-                seg if seg.is_type(SegmentKind::ImageData) => {
-                    // Find corresponding source segment and copy IDAT chunk
-                    if let Some(source_seg) = structure
-                        .segments
-                        .iter()
-                        .find(|s| s.is_type(SegmentKind::ImageData))
-                    {
+                _seg if _seg.is_type(SegmentKind::ImageData) => {
+                    // Use ordered iteration through source IDAT segments
+                    if idat_index < source_idats.len() {
+                        let source_seg = source_idats[idat_index];
                         let location = source_seg.location();
                         let chunk_start = location.offset - 8; // Back to length field
                         let chunk_size = 8 + location.size + 4;
 
                         source.seek(SeekFrom::Start(chunk_start))?;
                         Self::copy_bytes(source, writer, chunk_size)?;
+                        idat_index += 1;
                     }
                 }
 
-                seg if seg.is_type(SegmentKind::Exif) => {
-                    // Find corresponding source segment and copy EXIF chunk
+                _seg if _seg.is_type(SegmentKind::Exif) => {
+                    // Find corresponding source segment (typically only one EXIF)
                     if let Some(source_seg) = structure
                         .segments
                         .iter()
@@ -587,16 +603,13 @@ impl ContainerIO for PngIO {
                 }
 
                 _ => {
-                    // Copy other chunks from source
-                    // Find corresponding source segment by kind and path
-                    if let Some(source_seg) = structure
-                        .segments
-                        .iter()
-                        .find(|s| s.kind == dest_segment.kind && s.path == dest_segment.path)
-                    {
+                    // Copy other chunks from source in order
+                    if other_index < source_others.len() {
+                        let source_seg = source_others[other_index];
                         let location = source_seg.location();
                         source.seek(SeekFrom::Start(location.offset))?;
                         Self::copy_bytes(source, writer, location.size)?;
+                        other_index += 1;
                     }
                 }
             }

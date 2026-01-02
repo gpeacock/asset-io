@@ -17,19 +17,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let source_path = &args[1];
-    
+
     println!("=== C2PA Hash Algorithm Benchmark ===\n");
     println!("File: {}", source_path);
-    
+
     // Get file size
     let metadata = std::fs::metadata(source_path)?;
-    println!("Size: {:.2} MB ({} bytes)\n", 
-             metadata.len() as f64 / 1_000_000.0,
-             metadata.len());
+    println!(
+        "Size: {:.2} MB ({} bytes)\n",
+        metadata.len() as f64 / 1_000_000.0,
+        metadata.len()
+    );
 
     // Open with memory mapping for zero-copy
     let mut asset = unsafe { Asset::open_with_mmap(source_path)? };
-    
+
     println!("Segments: {}", asset.structure().segments.len());
     println!("Total size: {} bytes\n", asset.structure().total_size);
 
@@ -45,12 +47,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     for (name, _alg) in algorithms {
         print!("{}: ", name);
-        
+
         let mut times = Vec::new();
-        
+
         for _ in 0..runs {
             let start = Instant::now();
-            
+
             // Hash the entire file (simulating C2PA workflow without exclusions for simplicity)
             match name {
                 "SHA-256" => {
@@ -68,25 +70,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     asset.hash_excluding_segments(&[], &mut hasher)?;
                     let _hash = hasher.finalize();
                 }
-                _ => unreachable!()
+                _ => unreachable!(),
             }
-            
+
             let elapsed = start.elapsed();
             times.push(elapsed);
             print!(".");
             std::io::Write::flush(&mut std::io::stdout())?;
         }
-        
+
         println!();
-        
+
         // Calculate statistics
         let total: std::time::Duration = times.iter().sum();
         let avg = total / runs as u32;
         let min = times.iter().min().unwrap();
         let max = times.iter().max().unwrap();
-        
+
         let throughput = metadata.len() as f64 / avg.as_secs_f64() / 1_000_000.0;
-        
+
         println!("  Min:        {:>6.0}ms", min.as_millis());
         println!("  Max:        {:>6.0}ms", max.as_millis());
         println!("  Avg:        {:>6.0}ms", avg.as_millis());
@@ -96,4 +98,3 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
-

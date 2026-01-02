@@ -42,7 +42,6 @@ pub enum MediaType {
     #[cfg(feature = "bmff")]
     /// QuickTime MOV video
     QuickTime,
-
     // Future media types (commented out until container handlers implemented)
     //
     // RIFF container variants
