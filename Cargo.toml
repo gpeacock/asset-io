@@ -130,6 +130,13 @@ required-features = ["png", "exif"]
 name = "test_fixtures"
 required-features = ["jpeg", "xmp", "test-utils"]
 
+[[test]]
+name = "integration_test"
+required-features = ["test-utils"]
+
+[[test]]
+name = "safety_test"
+
 [profile.release]
 opt-level = 3
 lto = true
