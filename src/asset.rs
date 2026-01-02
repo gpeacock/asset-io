@@ -360,6 +360,7 @@ impl<R: Read + Seek> Asset<R> {
 
         // Parse based on container format
         let exif_data: &[u8] = match self.container() {
+            #[cfg(feature = "jpeg")]
             crate::Container::Jpeg => {
                 // JPEG: segment includes marker(2) + length(2) + "Exif\0\0"(6) + TIFF data
                 // Skip: FF E1 + length(2) + Exif\0\0(6) = 10 bytes
@@ -372,6 +373,7 @@ impl<R: Read + Seek> Asset<R> {
                     return Ok(None);
                 }
             }
+            #[cfg(feature = "png")]
             crate::Container::Png => {
                 // PNG eXIf chunk: just raw TIFF data (no Exif\0\0 prefix)
                 &data
@@ -823,7 +825,7 @@ impl<R: Read + Write + Seek> Asset<R> {
     ///
     /// # Example
     /// ```no_run
-    /// use asset_io::{Asset, xmp};
+    /// use asset_io::{Asset, MiniXmp};
     /// use std::fs::OpenOptions;
     ///
     /// # fn main() -> asset_io::Result<()> {
@@ -834,8 +836,8 @@ impl<R: Read + Write + Seek> Asset<R> {
     /// let mut asset = Asset::from_source(file)?;
     ///
     /// // Modify XMP
-    /// let xmp = asset.xmp()?.expect("No XMP found");
-    /// let xmp_str = String::from_utf8_lossy(&xmp).into_owned();
+    /// let xmp_data = asset.xmp()?.expect("No XMP found");
+    /// let xmp_str = String::from_utf8_lossy(&xmp_data).into_owned();
     /// let mini_xmp = MiniXmp::new(&xmp_str);
     /// let updated = mini_xmp.set("dc:title", "Updated Title")?;
     ///

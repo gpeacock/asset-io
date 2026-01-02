@@ -246,7 +246,7 @@ asset.update_jumbf_in_place(new_jumbf)?
 - [x] MiniXmp parser
 - [x] EXIF parsing and thumbnail extraction
 - [x] Streaming processing callbacks
-- [ ] BMFF thumbnail extraction
+- [x] BMFF thumbnail extraction
 - [ ] Memory-mapped I/O option
 - [ ] Async I/O support
 

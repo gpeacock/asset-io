@@ -1060,10 +1060,374 @@ impl ContainerIO for BmffIO {
     fn extract_embedded_thumbnail_info<R: Read + Seek>(
         &self,
         _structure: &Structure,
-        _source: &mut R,
+        source: &mut R,
     ) -> Result<Option<crate::thumbnail::EmbeddedThumbnailInfo>> {
-        // TODO: Implement BMFF thumbnail extraction
-        Ok(None)
+        // HEIF/HEIC thumbnail extraction
+        // Thumbnails are stored as separate items with 'thmb' reference to the primary item
+        extract_heif_thumbnail_info(source)
+    }
+}
+
+// ============================================================================
+// HEIF Thumbnail Extraction
+// ============================================================================
+
+/// Extract thumbnail info from a HEIF/HEIC file
+#[cfg(feature = "exif")]
+fn extract_heif_thumbnail_info<R: Read + Seek>(
+    source: &mut R,
+) -> Result<Option<crate::thumbnail::EmbeddedThumbnailInfo>> {
+    use crate::thumbnail::{EmbeddedThumbnailInfo, ThumbnailFormat};
+
+    source.seek(SeekFrom::Start(0))?;
+    let file_size = source.seek(SeekFrom::End(0))?;
+    source.seek(SeekFrom::Start(0))?;
+
+    // Find and parse the meta box
+    let meta_info = find_meta_box(source, file_size)?;
+    let Some((meta_offset, meta_size)) = meta_info else {
+        return Ok(None);
+    };
+
+    // Parse pitm (primary item ID)
+    let primary_item_id = parse_pitm(source, meta_offset, meta_size)?;
+    let Some(primary_id) = primary_item_id else {
+        return Ok(None);
+    };
+
+    // Parse iref to find thumbnail items
+    let thumbnail_item_ids = parse_iref_for_thumbnails(source, meta_offset, meta_size, primary_id)?;
+    if thumbnail_item_ids.is_empty() {
+        return Ok(None);
+    }
+
+    // Parse iloc to get thumbnail location
+    let iloc_entries = parse_iloc(source, meta_offset, meta_size)?;
+
+    // Find the first thumbnail's location
+    for thumb_id in thumbnail_item_ids {
+        if let Some((offset, size)) = iloc_entries.get(&thumb_id) {
+            // Try to detect format from first bytes
+            source.seek(SeekFrom::Start(*offset))?;
+            let mut magic = [0u8; 4];
+            if source.read_exact(&mut magic).is_ok() {
+                let format = if magic[0..2] == [0xFF, 0xD8] {
+                    ThumbnailFormat::Jpeg
+                } else {
+                    ThumbnailFormat::Other
+                };
+
+                return Ok(Some(EmbeddedThumbnailInfo {
+                    offset: *offset,
+                    size: *size,
+                    format,
+                    width: None,
+                    height: None,
+                }));
+            }
+        }
+    }
+
+    Ok(None)
+}
+
+/// Find the meta box offset and size
+#[cfg(feature = "exif")]
+fn find_meta_box<R: Read + Seek>(source: &mut R, file_size: u64) -> Result<Option<(u64, u64)>> {
+    source.seek(SeekFrom::Start(0))?;
+
+    let mut pos = 0u64;
+    while pos < file_size {
+        source.seek(SeekFrom::Start(pos))?;
+
+        let mut buf = [0u8; 8];
+        if source.read_exact(&mut buf).is_err() {
+            break;
+        }
+
+        let size = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as u64;
+        let box_type = &buf[4..8];
+
+        let actual_size = if size == 1 {
+            // Extended size
+            let mut ext = [0u8; 8];
+            source.read_exact(&mut ext)?;
+            u64::from_be_bytes(ext)
+        } else if size == 0 {
+            file_size - pos
+        } else {
+            size
+        };
+
+        if box_type == b"meta" {
+            return Ok(Some((pos, actual_size)));
+        }
+
+        if actual_size == 0 {
+            break;
+        }
+        pos += actual_size;
+    }
+
+    Ok(None)
+}
+
+/// Parse pitm box to get primary item ID
+#[cfg(feature = "exif")]
+fn parse_pitm<R: Read + Seek>(
+    source: &mut R,
+    meta_offset: u64,
+    meta_size: u64,
+) -> Result<Option<u32>> {
+    let meta_end = meta_offset + meta_size;
+
+    // Skip meta box header (8 bytes) + version/flags (4 bytes)
+    source.seek(SeekFrom::Start(meta_offset + 12))?;
+
+    while source.stream_position()? < meta_end {
+        let box_start = source.stream_position()?;
+
+        let mut buf = [0u8; 8];
+        if source.read_exact(&mut buf).is_err() {
+            break;
+        }
+
+        let size = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as u64;
+        let box_type = &buf[4..8];
+
+        if size == 0 {
+            break;
+        }
+
+        if box_type == b"pitm" {
+            // pitm: version (1) + flags (3) + item_id (2 or 4 depending on version)
+            let version = source.read_u8()?;
+            source.read_u24::<BigEndian>()?; // flags
+
+            let item_id = if version == 0 {
+                source.read_u16::<BigEndian>()? as u32
+            } else {
+                source.read_u32::<BigEndian>()?
+            };
+
+            return Ok(Some(item_id));
+        }
+
+        source.seek(SeekFrom::Start(box_start + size))?;
+    }
+
+    Ok(None)
+}
+
+/// Parse iref box to find items with 'thmb' reference to the primary item
+#[cfg(feature = "exif")]
+fn parse_iref_for_thumbnails<R: Read + Seek>(
+    source: &mut R,
+    meta_offset: u64,
+    meta_size: u64,
+    primary_id: u32,
+) -> Result<Vec<u32>> {
+    let meta_end = meta_offset + meta_size;
+    let mut thumbnail_ids = Vec::new();
+
+    // Skip meta box header (8 bytes) + version/flags (4 bytes)
+    source.seek(SeekFrom::Start(meta_offset + 12))?;
+
+    while source.stream_position()? < meta_end {
+        let box_start = source.stream_position()?;
+
+        let mut buf = [0u8; 8];
+        if source.read_exact(&mut buf).is_err() {
+            break;
+        }
+
+        let size = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as u64;
+        let box_type = &buf[4..8];
+
+        if size == 0 {
+            break;
+        }
+
+        if box_type == b"iref" {
+            let iref_end = box_start + size;
+
+            // version (1) + flags (3)
+            let version = source.read_u8()?;
+            source.read_u24::<BigEndian>()?; // flags
+
+            // Parse reference entries
+            while source.stream_position()? < iref_end {
+                let entry_start = source.stream_position()?;
+
+                let mut entry_buf = [0u8; 8];
+                if source.read_exact(&mut entry_buf).is_err() {
+                    break;
+                }
+
+                let entry_size = u32::from_be_bytes([entry_buf[0], entry_buf[1], entry_buf[2], entry_buf[3]]) as u64;
+                let ref_type = &entry_buf[4..8];
+
+                if entry_size == 0 {
+                    break;
+                }
+
+                if ref_type == b"thmb" {
+                    // This is a thumbnail reference
+                    // from_item_ID (2 or 4 bytes) + reference_count (2) + to_item_IDs
+                    let from_item_id = if version == 0 {
+                        source.read_u16::<BigEndian>()? as u32
+                    } else {
+                        source.read_u32::<BigEndian>()?
+                    };
+
+                    let ref_count = source.read_u16::<BigEndian>()?;
+
+                    for _ in 0..ref_count {
+                        let to_item_id = if version == 0 {
+                            source.read_u16::<BigEndian>()? as u32
+                        } else {
+                            source.read_u32::<BigEndian>()?
+                        };
+
+                        // If this thumbnail points to the primary item, record the thumbnail ID
+                        if to_item_id == primary_id {
+                            thumbnail_ids.push(from_item_id);
+                        }
+                    }
+                }
+
+                source.seek(SeekFrom::Start(entry_start + entry_size))?;
+            }
+
+            return Ok(thumbnail_ids);
+        }
+
+        source.seek(SeekFrom::Start(box_start + size))?;
+    }
+
+    Ok(thumbnail_ids)
+}
+
+/// Parse iloc box to get item locations
+/// Returns a map of item_id -> (offset, size)
+#[cfg(feature = "exif")]
+fn parse_iloc<R: Read + Seek>(
+    source: &mut R,
+    meta_offset: u64,
+    meta_size: u64,
+) -> Result<std::collections::HashMap<u32, (u64, u64)>> {
+    let meta_end = meta_offset + meta_size;
+    let mut locations = std::collections::HashMap::new();
+
+    // Skip meta box header (8 bytes) + version/flags (4 bytes)
+    source.seek(SeekFrom::Start(meta_offset + 12))?;
+
+    while source.stream_position()? < meta_end {
+        let box_start = source.stream_position()?;
+
+        let mut buf = [0u8; 8];
+        if source.read_exact(&mut buf).is_err() {
+            break;
+        }
+
+        let size = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as u64;
+        let box_type = &buf[4..8];
+
+        if size == 0 {
+            break;
+        }
+
+        if box_type == b"iloc" {
+            // version (1) + flags (3)
+            let version = source.read_u8()?;
+            source.read_u24::<BigEndian>()?; // flags
+
+            // offset_size (4 bits) + length_size (4 bits) + base_offset_size (4 bits) + index_size/reserved (4 bits)
+            let sizes1 = source.read_u8()?;
+            let sizes2 = source.read_u8()?;
+
+            let offset_size = (sizes1 >> 4) & 0x0F;
+            let length_size = sizes1 & 0x0F;
+            let base_offset_size = (sizes2 >> 4) & 0x0F;
+            let _index_size = if version >= 1 { sizes2 & 0x0F } else { 0 };
+
+            // item_count
+            let item_count = if version < 2 {
+                source.read_u16::<BigEndian>()? as u32
+            } else {
+                source.read_u32::<BigEndian>()?
+            };
+
+            for _ in 0..item_count {
+                // item_ID
+                let item_id = if version < 2 {
+                    source.read_u16::<BigEndian>()? as u32
+                } else {
+                    source.read_u32::<BigEndian>()?
+                };
+
+                // construction_method (version >= 1)
+                if version >= 1 {
+                    source.read_u16::<BigEndian>()?; // construction_method + reserved
+                }
+
+                // data_reference_index
+                source.read_u16::<BigEndian>()?;
+
+                // base_offset
+                let base_offset = read_variable_int(source, base_offset_size)?;
+
+                // extent_count
+                let extent_count = source.read_u16::<BigEndian>()?;
+
+                let mut total_size = 0u64;
+                let mut first_offset = 0u64;
+
+                for i in 0..extent_count {
+                    // extent_index (version >= 1 and index_size > 0) - skip for simplicity
+                    if version >= 1 && _index_size > 0 {
+                        read_variable_int(source, _index_size)?;
+                    }
+
+                    // extent_offset
+                    let extent_offset = read_variable_int(source, offset_size)?;
+
+                    // extent_length
+                    let extent_length = read_variable_int(source, length_size)?;
+
+                    if i == 0 {
+                        first_offset = base_offset + extent_offset;
+                    }
+                    total_size += extent_length;
+                }
+
+                if extent_count > 0 {
+                    locations.insert(item_id, (first_offset, total_size));
+                }
+            }
+
+            return Ok(locations);
+        }
+
+        source.seek(SeekFrom::Start(box_start + size))?;
+    }
+
+    Ok(locations)
+}
+
+/// Read a variable-length integer based on size specifier
+#[cfg(feature = "exif")]
+fn read_variable_int<R: Read>(source: &mut R, size: u8) -> Result<u64> {
+    match size {
+        0 => Ok(0),
+        1 => Ok(source.read_u8()? as u64),
+        2 => Ok(source.read_u16::<BigEndian>()? as u64),
+        4 => Ok(source.read_u32::<BigEndian>()? as u64),
+        8 => Ok(source.read_u64::<BigEndian>()?),
+        _ => Err(Error::InvalidFormat(format!(
+            "Invalid iloc size specifier: {}",
+            size
+        ))),
     }
 }
 
