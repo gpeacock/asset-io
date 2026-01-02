@@ -89,6 +89,8 @@ pub use segment::{
 };
 pub use structure::Structure;
 pub use thumbnail::{EmbeddedThumbnail, ThumbnailFormat, ThumbnailGenerator, ThumbnailOptions};
+#[cfg(feature = "exif")]
+pub use tiff::ExifInfo;
 
 // Container and handlers are exported by the register_containers! macro below
 

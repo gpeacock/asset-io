@@ -48,6 +48,31 @@ fn main() -> asset_io::Result<()> {
         None => println!("\n✗ No JUMBF data found"),
     }
 
+    // Check for EXIF metadata
+    match asset.exif_info()? {
+        Some(info) => {
+            println!("\n✓ Found EXIF metadata");
+            println!("  Preview: {}", info);
+            // Show individual fields if present
+            if let Some(ref make) = info.make {
+                println!("  Make: {}", make);
+            }
+            if let Some(ref model) = info.model {
+                println!("  Model: {}", model);
+            }
+            if let Some(ref dt) = info.date_time_original.or(info.date_time) {
+                println!("  DateTime: {}", dt);
+            }
+            if let Some(ref software) = info.software {
+                println!("  Software: {}", software);
+            }
+            if let Some(orientation) = info.orientation {
+                println!("  Orientation: {}", orientation);
+            }
+        }
+        None => println!("\n✗ No EXIF metadata found"),
+    }
+
     // Check for embedded thumbnail (from EXIF)
     match asset.embedded_thumbnail()? {
         Some(thumb) => {
