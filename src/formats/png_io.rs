@@ -128,8 +128,20 @@ impl PngIO {
             if segment.is_jumbf() {
                 // PNG stores JUMBF directly in caBX chunks - no format-specific headers to strip
                 let location = segment.location();
+                
+                // Validate size to prevent memory exhaustion attacks
+                if location.size > crate::segment::MAX_SEGMENT_SIZE {
+                    return Err(Error::InvalidSegment {
+                        offset: location.offset,
+                        reason: format!(
+                            "JUMBF segment too large: {} bytes (max {} MB)",
+                            location.size,
+                            crate::segment::MAX_SEGMENT_SIZE / (1024 * 1024)
+                        ),
+                    });
+                }
+                
                 source.seek(SeekFrom::Start(location.offset))?;
-
                 let mut buf = vec![0u8; location.size as usize];
                 source.read_exact(&mut buf)?;
                 result.extend_from_slice(&buf);

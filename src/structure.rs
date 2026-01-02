@@ -2,7 +2,7 @@
 
 use crate::{
     error::Result,
-    segment::{ByteRange, ChunkedSegmentReader, Location, Segment, SegmentKind},
+    segment::{ByteRange, ChunkedSegmentReader, Location, Segment, SegmentKind, DEFAULT_CHUNK_SIZE, MAX_SEGMENT_SIZE},
     Container, MediaType,
 };
 use std::io::{Read, Seek, SeekFrom, Take};
@@ -156,7 +156,7 @@ impl Structure {
 
             // Stream through segment in chunks
             let mut remaining = location.size;
-            let mut buffer = vec![0u8; 8192];
+            let mut buffer = vec![0u8; DEFAULT_CHUNK_SIZE];
 
             while remaining > 0 {
                 let to_read = remaining.min(buffer.len() as u64) as usize;
@@ -176,7 +176,21 @@ impl Structure {
     /// Read a specific byte range from the file
     ///
     /// This is useful for data hash models that need to hash arbitrary ranges.
+    /// Returns an error if the range exceeds MAX_SEGMENT_SIZE (256MB).
+    /// Use `read_range_chunked` for streaming access to larger ranges.
     pub fn read_range<R: Read + Seek>(&self, source: &mut R, range: ByteRange) -> Result<Vec<u8>> {
+        // Validate size to prevent memory exhaustion attacks
+        if range.size > MAX_SEGMENT_SIZE {
+            return Err(crate::Error::InvalidSegment {
+                offset: range.offset,
+                reason: format!(
+                    "Range too large: {} bytes (max {} MB). Use read_range_chunked for large ranges.",
+                    range.size,
+                    MAX_SEGMENT_SIZE / (1024 * 1024)
+                ),
+            });
+        }
+        
         source.seek(SeekFrom::Start(range.offset))?;
         let mut buffer = vec![0u8; range.size as usize];
         source.read_exact(&mut buffer)?;
@@ -407,7 +421,7 @@ impl Structure {
         source.seek(SeekFrom::Start(range.offset))?;
 
         let mut remaining = range.size;
-        let mut buffer = vec![0u8; 8192];
+        let mut buffer = vec![0u8; DEFAULT_CHUNK_SIZE];
 
         while remaining > 0 {
             let to_read = remaining.min(buffer.len() as u64) as usize;

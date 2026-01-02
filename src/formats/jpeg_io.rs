@@ -221,6 +221,18 @@ impl JpegIO {
             }
 
             for range in &segment.ranges {
+                // Validate size to prevent memory exhaustion attacks
+                if range.size > crate::segment::MAX_SEGMENT_SIZE {
+                    return Err(crate::Error::InvalidSegment {
+                        offset: range.offset,
+                        reason: format!(
+                            "JUMBF range too large: {} bytes (max {} MB)",
+                            range.size,
+                            crate::segment::MAX_SEGMENT_SIZE / (1024 * 1024)
+                        ),
+                    });
+                }
+                
                 source.seek(SeekFrom::Start(range.offset))?;
                 let mut buf = vec![0u8; range.size as usize];
                 source.read_exact(&mut buf)?;
