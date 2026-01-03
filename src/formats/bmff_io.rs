@@ -746,7 +746,7 @@ impl ContainerIO for BmffIO {
         self.parse_impl(source)
     }
 
-    fn extract_xmp<R: Read + Seek>(
+    fn read_xmp<R: Read + Seek>(
         &self,
         _structure: &Structure,
         source: &mut R,
@@ -772,7 +772,7 @@ impl ContainerIO for BmffIO {
         Ok(None)
     }
 
-    fn extract_jumbf<R: Read + Seek>(
+    fn read_jumbf<R: Read + Seek>(
         &self,
         structure: &Structure,
         source: &mut R,
@@ -1083,7 +1083,7 @@ impl ContainerIO for BmffIO {
     }
 
     #[cfg(feature = "exif")]
-    fn extract_embedded_thumbnail_info<R: Read + Seek>(
+    fn read_embedded_thumbnail_info<R: Read + Seek>(
         &self,
         _structure: &Structure,
         source: &mut R,
@@ -1094,7 +1094,7 @@ impl ContainerIO for BmffIO {
     }
 
     #[cfg(feature = "exif")]
-    fn extract_exif_info<R: Read + Seek>(
+    fn read_exif_info<R: Read + Seek>(
         &self,
         structure: &Structure,
         source: &mut R,

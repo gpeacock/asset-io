@@ -87,7 +87,7 @@ impl PngIO {
     }
 
     /// Extract XMP data from PNG file (simple iTXt chunk, no extended XMP)
-    pub fn extract_xmp_impl<R: Read + Seek>(
+    pub fn read_xmp_impl<R: Read + Seek>(
         structure: &crate::structure::Structure,
         source: &mut R,
     ) -> Result<Option<Vec<u8>>> {
@@ -111,7 +111,7 @@ impl PngIO {
     }
 
     /// Extract JUMBF data from PNG file (direct data from caBX chunks, no headers to strip)
-    pub fn extract_jumbf_impl<R: Read + Seek>(
+    pub fn read_jumbf_impl<R: Read + Seek>(
         structure: &crate::structure::Structure,
         source: &mut R,
     ) -> Result<Option<Vec<u8>>> {
@@ -513,20 +513,20 @@ impl ContainerIO for PngIO {
         self.parse_impl(source)
     }
 
-    fn extract_xmp<R: Read + Seek>(
+    fn read_xmp<R: Read + Seek>(
         &self,
         structure: &Structure,
         source: &mut R,
     ) -> Result<Option<Vec<u8>>> {
-        Self::extract_xmp_impl(structure, source)
+        Self::read_xmp_impl(structure, source)
     }
 
-    fn extract_jumbf<R: Read + Seek>(
+    fn read_jumbf<R: Read + Seek>(
         &self,
         structure: &Structure,
         source: &mut R,
     ) -> Result<Option<Vec<u8>>> {
-        Self::extract_jumbf_impl(structure, source)
+        Self::read_jumbf_impl(structure, source)
     }
 
     fn write<R: Read + Seek, W: Write>(
@@ -1017,7 +1017,7 @@ impl ContainerIO for PngIO {
     }
 
     #[cfg(feature = "exif")]
-    fn extract_embedded_thumbnail_info<R: Read + Seek>(
+    fn read_embedded_thumbnail_info<R: Read + Seek>(
         &self,
         structure: &Structure,
         _source: &mut R,
@@ -1034,7 +1034,7 @@ impl ContainerIO for PngIO {
     }
 
     #[cfg(feature = "exif")]
-    fn extract_exif_info<R: Read + Seek>(
+    fn read_exif_info<R: Read + Seek>(
         &self,
         structure: &Structure,
         source: &mut R,

@@ -157,27 +157,27 @@ pub trait ContainerIO: Send + Sync {
         updates: &Updates,
     ) -> Result<Structure>;
 
-    /// Extract XMP data from file (container-specific)
+    /// Read XMP data from file (container-specific)
     ///
     /// This handles container-specific details like JPEG's extended XMP
     /// with multi-segment assembly, or PNG's simple iTXt chunks.
-    fn extract_xmp<R: Read + Seek>(
+    fn read_xmp<R: Read + Seek>(
         &self,
         structure: &Structure,
         source: &mut R,
     ) -> Result<Option<Vec<u8>>>;
 
-    /// Extract JUMBF data from file (container-specific)
+    /// Read JUMBF data from file (container-specific)
     ///
     /// This handles container-specific details like JPEG XT headers,
     /// multi-segment assembly, etc.
-    fn extract_jumbf<R: Read + Seek>(
+    fn read_jumbf<R: Read + Seek>(
         &self,
         structure: &Structure,
         source: &mut R,
     ) -> Result<Option<Vec<u8>>>;
 
-    /// Extract embedded thumbnail from container-specific metadata
+    /// Read embedded thumbnail location from container-specific metadata
     ///
     /// Some containers embed pre-rendered thumbnails in their metadata:
     /// - JPEG: EXIF IFD1 thumbnail (typically ~160x120)
@@ -188,13 +188,13 @@ pub trait ContainerIO: Send + Sync {
     /// This is the fastest thumbnail path - no decoding needed!
     /// Returns location info; use Asset::read_embedded_thumbnail() to get actual bytes.
     #[cfg(feature = "exif")]
-    fn extract_embedded_thumbnail_info<R: Read + Seek>(
+    fn read_embedded_thumbnail_info<R: Read + Seek>(
         &self,
         structure: &Structure,
         source: &mut R,
     ) -> Result<Option<crate::thumbnail::EmbeddedThumbnailInfo>>;
 
-    /// Extract EXIF metadata as parsed info (container-specific)
+    /// Read EXIF metadata as parsed info (container-specific)
     ///
     /// Handles container-specific EXIF storage formats:
     /// - JPEG: APP1 segment with "Exif\0\0" prefix
@@ -203,7 +203,7 @@ pub trait ContainerIO: Send + Sync {
     ///
     /// Returns parsed EXIF info (Make, Model, DateTime, etc.) or None if not present.
     #[cfg(feature = "exif")]
-    fn extract_exif_info<R: Read + Seek>(
+    fn read_exif_info<R: Read + Seek>(
         &self,
         structure: &Structure,
         source: &mut R,
@@ -320,7 +320,7 @@ macro_rules! register_containers {
             }
 
             #[allow(unreachable_patterns)]
-            pub(crate) fn extract_xmp<R: std::io::Read + std::io::Seek>(
+            pub(crate) fn read_xmp<R: std::io::Read + std::io::Seek>(
                 &self,
                 structure: &$crate::Structure,
                 source: &mut R,
@@ -328,13 +328,13 @@ macro_rules! register_containers {
                 match self {
                     $(
                         $(#[$meta])*
-                        Handler::$variant(h) => h.extract_xmp(structure, source),
+                        Handler::$variant(h) => h.read_xmp(structure, source),
                     )*
                 }
             }
 
             #[allow(unreachable_patterns)]
-            pub(crate) fn extract_jumbf<R: std::io::Read + std::io::Seek>(
+            pub(crate) fn read_jumbf<R: std::io::Read + std::io::Seek>(
                 &self,
                 structure: &$crate::Structure,
                 source: &mut R,
@@ -342,14 +342,14 @@ macro_rules! register_containers {
                 match self {
                     $(
                         $(#[$meta])*
-                        Handler::$variant(h) => h.extract_jumbf(structure, source),
+                        Handler::$variant(h) => h.read_jumbf(structure, source),
                     )*
                 }
             }
 
             #[cfg(feature = "exif")]
             #[allow(unreachable_patterns)]
-            pub(crate) fn extract_embedded_thumbnail_info<R: std::io::Read + std::io::Seek>(
+            pub(crate) fn read_embedded_thumbnail_info<R: std::io::Read + std::io::Seek>(
                 &self,
                 structure: &$crate::Structure,
                 source: &mut R,
@@ -357,14 +357,14 @@ macro_rules! register_containers {
                 match self {
                     $(
                         $(#[$meta])*
-                        Handler::$variant(h) => h.extract_embedded_thumbnail_info(structure, source),
+                        Handler::$variant(h) => h.read_embedded_thumbnail_info(structure, source),
                     )*
                 }
             }
 
             #[cfg(feature = "exif")]
             #[allow(unreachable_patterns)]
-            pub(crate) fn extract_exif_info<R: std::io::Read + std::io::Seek>(
+            pub(crate) fn read_exif_info<R: std::io::Read + std::io::Seek>(
                 &self,
                 structure: &$crate::Structure,
                 source: &mut R,
@@ -372,7 +372,7 @@ macro_rules! register_containers {
                 match self {
                     $(
                         $(#[$meta])*
-                        Handler::$variant(h) => h.extract_exif_info(structure, source),
+                        Handler::$variant(h) => h.read_exif_info(structure, source),
                     )*
                 }
             }

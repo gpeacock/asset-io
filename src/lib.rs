@@ -54,7 +54,7 @@
 //! let structure = handler.parse(&mut file)?;
 //!
 //! // Access XMP data (loaded lazily via handler)
-//! if let Some(xmp) = handler.extract_xmp(&structure, &mut file)? {
+//! if let Some(xmp) = handler.read_xmp(&structure, &mut file)? {
 //!     println!("Found XMP: {} bytes", xmp.len());
 //! }
 //!
@@ -198,10 +198,6 @@ impl ProcessingOptions {
         self.chunk_size.unwrap_or(DEFAULT_CHUNK_SIZE)
     }
 }
-
-/// Type alias for backwards compatibility
-#[deprecated(since = "0.2.0", note = "Use ProcessingOptions instead")]
-pub type WriteOptions = ProcessingOptions;
 
 /// Metadata update strategy
 ///

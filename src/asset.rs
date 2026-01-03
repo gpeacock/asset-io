@@ -242,13 +242,13 @@ impl<R: Read + Seek> Asset<R> {
 
     /// Get XMP metadata (loads lazily, assembles extended parts if present)
     pub fn xmp(&mut self) -> Result<Option<Vec<u8>>> {
-        self.handler.extract_xmp(&self.structure, &mut self.source)
+        self.handler.read_xmp(&self.structure, &mut self.source)
     }
 
     /// Get JUMBF data (loads and assembles lazily)
     pub fn jumbf(&mut self) -> Result<Option<Vec<u8>>> {
         self.handler
-            .extract_jumbf(&self.structure, &mut self.source)
+            .read_jumbf(&self.structure, &mut self.source)
     }
 
     /// Extract an embedded thumbnail if available
@@ -290,7 +290,7 @@ impl<R: Read + Seek> Asset<R> {
             
             // Get thumbnail location info
             let info = self.handler
-                .extract_embedded_thumbnail_info(&self.structure, &mut self.source)?;
+                .read_embedded_thumbnail_info(&self.structure, &mut self.source)?;
             
             match info {
                 Some(info) => {
@@ -338,7 +338,7 @@ impl<R: Read + Seek> Asset<R> {
     #[cfg(feature = "exif")]
     pub fn exif_info(&mut self) -> Result<Option<crate::tiff::ExifInfo>> {
         // Delegate to container-specific handler
-        self.handler.extract_exif_info(&self.structure, &mut self.source)
+        self.handler.read_exif_info(&self.structure, &mut self.source)
     }
 
     /// Get the file structure
