@@ -240,7 +240,7 @@ pub(crate) mod jpeg_io;
 pub(crate) mod png_io;
 
 #[cfg(feature = "bmff")]
-pub(crate) mod bmff_io;
+pub mod bmff_io;
 
 // ============================================================================
 // ContainerKind Registration Macro

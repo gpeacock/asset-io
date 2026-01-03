@@ -545,6 +545,135 @@ fn detect_media_type_from_ftyp(major_brand: &[u8]) -> MediaType {
     }
 }
 
+/// Fragment information for fragmented BMFF files (fMP4/CMAF)
+///
+/// Fragmented BMFF files consist of:
+/// - An initialization segment (moov) containing codec configuration
+/// - Multiple media segments, each containing a moof (fragment header) + mdat (data)
+///
+/// This struct represents a single fragment (moof + mdat pair).
+///
+/// # Use Cases
+///
+/// - **Parallel hashing**: Each fragment can be hashed independently
+/// - **Streaming**: Fragments can be processed incrementally
+/// - **C2PA**: Hash boundaries should align with fragment boundaries
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BmffFragment {
+    /// Fragment index (0-based)
+    pub index: usize,
+    /// Offset of moof box (fragment header)
+    pub moof_offset: u64,
+    /// Size of moof box
+    pub moof_size: u64,
+    /// Offset of mdat box (includes 8-byte header)
+    pub mdat_offset: u64,
+    /// Size of mdat box (header + data)
+    pub mdat_size: u64,
+}
+
+impl BmffFragment {
+    /// Create a new fragment
+    pub fn new(
+        index: usize,
+        moof_offset: u64,
+        moof_size: u64,
+        mdat_offset: u64,
+        mdat_size: u64,
+    ) -> Self {
+        Self {
+            index,
+            moof_offset,
+            moof_size,
+            mdat_offset,
+            mdat_size,
+        }
+    }
+
+    /// Get the offset where media data starts (after mdat header)
+    pub fn data_offset(&self) -> u64 {
+        // mdat header is 8 bytes (or 16 for large size)
+        // We assume standard 8-byte header; large size would need detection
+        self.mdat_offset + 8
+    }
+
+    /// Get the size of media data (excluding mdat header)
+    pub fn data_size(&self) -> u64 {
+        if self.mdat_size >= 8 {
+            self.mdat_size - 8
+        } else {
+            0
+        }
+    }
+
+    /// Get the total size of this fragment (moof + mdat)
+    pub fn total_size(&self) -> u64 {
+        self.moof_size + self.mdat_size
+    }
+
+    /// Get the byte range of the media data
+    pub fn data_range(&self) -> ByteRange {
+        ByteRange::new(self.data_offset(), self.data_size())
+    }
+
+    /// Get the byte range of the entire fragment (moof + mdat)
+    pub fn full_range(&self) -> ByteRange {
+        ByteRange::new(self.moof_offset, self.total_size())
+    }
+}
+
+/// Collect fragment information from parsed BMFF tree
+///
+/// In fragmented BMFF, each fragment consists of a moof (movie fragment header)
+/// followed by an mdat (media data). We scan for moof boxes and find their
+/// corresponding mdat boxes.
+fn collect_fragments<R: Read + Seek>(
+    source: &mut R,
+    bmff_tree: &Arena<BoxInfo>,
+    moof_tokens: &[Token],
+) -> Result<Vec<BmffFragment>> {
+    
+    let mut fragments = Vec::with_capacity(moof_tokens.len());
+    
+    // Collect moof positions
+    let mut moof_infos: Vec<(u64, u64)> = moof_tokens
+        .iter()
+        .map(|token| {
+            let info = &bmff_tree[*token].data;
+            (info.offset, info.size)
+        })
+        .collect();
+    
+    // Sort by offset to ensure correct ordering
+    moof_infos.sort_by_key(|(offset, _)| *offset);
+    
+    // For each moof, find the following mdat
+    for (index, (moof_offset, moof_size)) in moof_infos.iter().enumerate() {
+        // Seek to right after moof to find mdat
+        let after_moof = moof_offset + moof_size;
+        source.seek(SeekFrom::Start(after_moof))?;
+        
+        // Read the next box header
+        if let Ok(header) = BoxHeaderLite::read(source) {
+            if header.name == BoxType::MdatBox {
+                let mdat_offset = after_moof;
+                let mdat_size = header.size;
+                
+                fragments.push(BmffFragment::new(
+                    index,
+                    *moof_offset,
+                    *moof_size,
+                    mdat_offset,
+                    mdat_size,
+                ));
+            }
+            // If it's not mdat, skip (some fragments might have sidx or other boxes)
+        }
+    }
+    
+    Ok(fragments)
+}
+
 /// BMFF container I/O implementation
 pub struct BmffIO;
 
@@ -596,6 +725,75 @@ impl BmffIO {
             }
         }
         None
+    }
+
+    /// Get fragment information for fragmented BMFF files (fMP4/CMAF)
+    ///
+    /// Returns a list of fragments if the file is fragmented, or an empty
+    /// list if it's a non-fragmented BMFF file.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use asset_io::containers::bmff_io::{BmffIO, BmffFragment};
+    /// use std::fs::File;
+    ///
+    /// let mut file = File::open("fragmented.mp4")?;
+    /// let fragments = BmffIO::fragments(&mut file)?;
+    /// if !fragments.is_empty() {
+    ///     println!("File has {} fragments", fragments.len());
+    ///     for frag in &fragments {
+    ///         println!("Fragment {}: {} bytes", frag.index, frag.data_size());
+    ///     }
+    /// }
+    /// ```
+    pub fn fragments<R: Read + Seek>(source: &mut R) -> Result<Vec<BmffFragment>> {
+        source.seek(SeekFrom::Start(0))?;
+
+        // Get file size
+        let file_size = source.seek(SeekFrom::End(0))?;
+        source.seek(SeekFrom::Start(0))?;
+
+        // Check for ftyp box
+        let mut buf = [0u8; 8];
+        source.read_exact(&mut buf)?;
+        if &buf[4..8] != b"ftyp" {
+            return Err(Error::InvalidFormat("Not a BMFF file".into()));
+        }
+
+        // Reset and build tree
+        source.seek(SeekFrom::Start(0))?;
+        
+        let root_box = BoxInfo {
+            path: "".to_string(),
+            offset: 0,
+            size: file_size,
+            box_type: BoxType::Empty,
+            parent: None,
+            user_type: None,
+            version: None,
+            flags: None,
+        };
+
+        let (mut bmff_tree, root_token) = Arena::with_data(root_box);
+        let mut bmff_map: HashMap<String, Vec<Token>> = HashMap::new();
+
+        build_bmff_tree(
+            source,
+            file_size,
+            &mut bmff_tree,
+            &root_token,
+            &mut bmff_map,
+        )?;
+
+        // Look for moof boxes
+        if let Some(moof_list) = bmff_map.get("/moof") {
+            if !moof_list.is_empty() {
+                return collect_fragments(source, &bmff_tree, moof_list);
+            }
+        }
+
+        Ok(Vec::new())
     }
 
     fn parse_impl<R: Read + Seek>(&self, source: &mut R) -> Result<Structure> {

@@ -97,6 +97,8 @@ pub use asset::{Asset, AssetBuilder};
 pub use containers::ContainerKind;
 pub use error::{Error, Result};
 pub use segment::{ByteRange, ChunkSpec, ExclusionMode, ProcessingChunk, Segment, SegmentKind};
+#[cfg(feature = "bmff")]
+pub use containers::bmff_io::{BmffFragment, BmffIO};
 pub use structure::Structure;
 pub use thumbnail::{Thumbnail, ThumbnailKind};
 pub use updates::Updates;

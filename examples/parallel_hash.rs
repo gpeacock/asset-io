@@ -32,6 +32,46 @@ fn main() -> asset_io::Result<()> {
         structure.total_size as f64 / 1_073_741_824.0
     );
     println!("Segments: {}", structure.segments.len());
+    
+    // Show fragment info for BMFF files
+    #[cfg(feature = "bmff")]
+    if structure.container == asset_io::ContainerKind::Bmff {
+        // Re-open to get fragments (BMFF-specific)
+        if let Ok(mut file) = std::fs::File::open(&input) {
+            if let Ok(fragments) = asset_io::BmffIO::fragments(&mut file) {
+                if !fragments.is_empty() {
+                    println!("Fragments: {} (fragmented BMFF)", fragments.len());
+                    if fragments.len() <= 5 {
+                        for frag in &fragments {
+                            println!(
+                                "  Fragment {}: moof@{} ({}), mdat@{} ({} data)",
+                                frag.index,
+                                frag.moof_offset,
+                                frag.moof_size,
+                                frag.mdat_offset,
+                                frag.data_size()
+                            );
+                        }
+                    } else {
+                        let first = &fragments[0];
+                        let last = &fragments[fragments.len() - 1];
+                        println!(
+                            "  First: moof@{}, mdat {} bytes",
+                            first.moof_offset,
+                            first.data_size()
+                        );
+                        println!(
+                            "  Last:  moof@{}, mdat {} bytes",
+                            last.moof_offset,
+                            last.data_size()
+                        );
+                    }
+                } else {
+                    println!("Fragments: none (not fragmented)");
+                }
+            }
+        }
+    }
     println!();
 
     // Configure updates with 1MB chunks
