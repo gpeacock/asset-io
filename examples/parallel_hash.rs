@@ -41,6 +41,7 @@ fn main() -> asset_io::Result<()> {
 
     // Sequential hash using read_with_processing
     println!("--- Sequential Hash (read_with_processing) ---");
+    let sequential_time;
     {
         let start = Instant::now();
         let mut hasher = sha2::Sha256::new();
@@ -53,6 +54,7 @@ fn main() -> asset_io::Result<()> {
 
         let hash = sha2::Digest::finalize(hasher);
         let elapsed = start.elapsed();
+        sequential_time = elapsed;
 
         println!("  Hash: {:x}", hash);
         println!("  Bytes: {} ({:.2} GB)", bytes, bytes as f64 / 1_073_741_824.0);
@@ -61,6 +63,41 @@ fn main() -> asset_io::Result<()> {
             "  Throughput: {:.2} GB/s",
             (bytes as f64 / 1_073_741_824.0) / elapsed.as_secs_f64()
         );
+    }
+    
+    // Overlapped I/O hash using read_with_processing_overlapped
+    println!("\n--- Overlapped I/O Hash (read_with_processing_overlapped) ---");
+    {
+        use std::sync::{Arc, Mutex};
+        
+        let mut asset = Asset::open(&input)?;
+        let start = Instant::now();
+        let hasher = Arc::new(Mutex::new(sha2::Sha256::new()));
+        let bytes = Arc::new(Mutex::new(0u64));
+        
+        let hasher_clone = hasher.clone();
+        let bytes_clone = bytes.clone();
+        
+        asset.read_with_processing_overlapped(&updates, move |chunk| {
+            let mut h = hasher_clone.lock().unwrap();
+            sha2::Digest::update(&mut *h, chunk);
+            *bytes_clone.lock().unwrap() += chunk.len() as u64;
+        })?;
+
+        let hash = sha2::Digest::finalize(Arc::try_unwrap(hasher).unwrap().into_inner().unwrap());
+        let elapsed = start.elapsed();
+        let total_bytes = *bytes.lock().unwrap();
+
+        println!("  Hash: {:x}", hash);
+        println!("  Bytes: {} ({:.2} GB)", total_bytes, total_bytes as f64 / 1_073_741_824.0);
+        println!("  Time: {:?}", elapsed);
+        println!(
+            "  Throughput: {:.2} GB/s",
+            (total_bytes as f64 / 1_073_741_824.0) / elapsed.as_secs_f64()
+        );
+        
+        let speedup = sequential_time.as_secs_f64() / elapsed.as_secs_f64();
+        println!("  Speedup: {:.2}x vs sequential", speedup);
     }
 
     // Parallel hash using read_chunks + rayon
