@@ -455,6 +455,147 @@ impl<R: Read + Seek> Asset<R> {
         Ok(())
     }
 
+    /// Read the file as chunks suitable for parallel processing
+    ///
+    /// This returns a vector of [`ProcessingChunk`](crate::ProcessingChunk)s that can be
+    /// processed in parallel using libraries like `rayon`. Each chunk contains its index,
+    /// offset, data, and whether it overlaps with an exclusion range.
+    ///
+    /// Unlike `read_with_processing()` which streams sequentially, this method buffers
+    /// the chunks so they can be processed in parallel. This trades memory for parallelism.
+    ///
+    /// # Example with rayon
+    ///
+    /// ```ignore
+    /// use rayon::prelude::*;
+    /// use sha2::{Sha256, Digest};
+    /// use asset_io::{Asset, Updates, SegmentKind, ExclusionMode};
+    ///
+    /// let mut asset = Asset::open("large_video.mov")?;
+    /// let updates = Updates::new()
+    ///     .with_chunk_size(1024 * 1024)  // 1MB chunks
+    ///     .exclude_from_processing(vec![SegmentKind::Jumbf], ExclusionMode::DataOnly);
+    ///
+    /// // Read all chunks (I/O is sequential)
+    /// let chunks = asset.read_chunks(&updates)?;
+    ///
+    /// // Hash in parallel (CPU-bound, parallelizable)
+    /// let chunk_hashes: Vec<[u8; 32]> = chunks
+    ///     .par_iter()
+    ///     .filter(|c| !c.excluded)
+    ///     .map(|c| {
+    ///         let mut h = Sha256::new();
+    ///         h.update(&c.data);
+    ///         h.finalize().into()
+    ///     })
+    ///     .collect();
+    /// ```
+    pub fn read_chunks(&mut self, updates: &Updates) -> Result<Vec<crate::ProcessingChunk>> {
+        use crate::segment::{ByteRange, ProcessingChunk, DEFAULT_CHUNK_SIZE};
+        
+        let chunk_size = updates.processing.effective_chunk_size().max(DEFAULT_CHUNK_SIZE);
+        let exclude_segments = &updates.processing.exclude_segments;
+        let exclusion_mode = updates.processing.exclusion_mode;
+        
+        // Calculate exclusion ranges
+        let exclusion_ranges: Vec<ByteRange> = exclude_segments
+            .iter()
+            .filter_map(|kind| {
+                self.structure.segments.iter().find(|s| s.is_type(*kind))
+            })
+            .map(|segment| {
+                let loc = segment.location();
+                if exclusion_mode == crate::ExclusionMode::DataOnly {
+                    // For DataOnly, use the data portion
+                    loc
+                } else {
+                    // For EntireSegment, use the full segment
+                    loc
+                }
+            })
+            .collect();
+        
+        // Read all chunks
+        let mut chunks = Vec::new();
+        let mut offset = 0u64;
+        let mut index = 0usize;
+        
+        self.source.seek(SeekFrom::Start(0))?;
+        
+        while offset < self.structure.total_size {
+            let remaining = self.structure.total_size - offset;
+            let read_size = chunk_size.min(remaining as usize);
+            
+            let mut buffer = vec![0u8; read_size];
+            self.source.read_exact(&mut buffer)?;
+            
+            // Check if this chunk overlaps with any exclusion range
+            let chunk_range = ByteRange::new(offset, read_size as u64);
+            let excluded = exclusion_ranges.iter().any(|excl| {
+                let chunk_end = chunk_range.offset + chunk_range.size;
+                let excl_end = excl.offset + excl.size;
+                chunk_range.offset < excl_end && chunk_end > excl.offset
+            });
+            
+            chunks.push(ProcessingChunk::new(index, offset, buffer, excluded));
+            
+            offset += read_size as u64;
+            index += 1;
+        }
+        
+        Ok(chunks)
+    }
+
+    /// Hash the file in parallel using rayon
+    ///
+    /// This is a convenience method that reads the file as chunks, hashes them
+    /// in parallel, and returns the individual chunk hashes. You can then combine
+    /// these into a Merkle tree root using [`merkle_root()`](crate::merkle_root).
+    ///
+    /// Requires the `parallel` feature.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use asset_io::{Asset, Updates, SegmentKind, ExclusionMode, merkle_root};
+    /// use sha2::Sha256;
+    ///
+    /// let mut asset = Asset::open("large_video.mov")?;
+    /// let updates = Updates::new()
+    ///     .with_chunk_size(1024 * 1024)
+    ///     .exclude_from_processing(vec![SegmentKind::Jumbf], ExclusionMode::DataOnly);
+    ///
+    /// let chunk_hashes = asset.parallel_hash::<Sha256>(&updates)?;
+    /// let root = merkle_root::<Sha256>(&chunk_hashes);
+    /// ```
+    #[cfg(feature = "parallel")]
+    pub fn parallel_hash<H>(&mut self, updates: &Updates) -> Result<Vec<[u8; 32]>>
+    where
+        H: sha2::Digest + Clone + Send + Sync + Default,
+    {
+        use rayon::prelude::*;
+        
+        let chunks = self.read_chunks(updates)?;
+        
+        let mut hashes: Vec<(usize, [u8; 32])> = chunks
+            .par_iter()
+            .filter(|c| !c.excluded)
+            .map(|c| {
+                let mut hasher = H::new();
+                hasher.update(&c.data);
+                let result = hasher.finalize();
+                let mut hash = [0u8; 32];
+                hash.copy_from_slice(&result[..32]);
+                (c.index, hash)
+            })
+            .collect();
+        
+        // Sort by index to maintain order
+        hashes.sort_by_key(|(idx, _)| *idx);
+        
+        Ok(hashes.into_iter().map(|(_, h)| h).collect())
+    }
+
     /// Hash the asset excluding specified segments (zero-copy with mmap)
     ///
     /// **Deprecated**: Use `read_with_processing()` instead for a unified API.

@@ -7,3 +7,4 @@
 tests/fixtures/huge_test.png
 tests/fixtures/large_test.png
 tests/fixtures/massive_test.png
+*.mov

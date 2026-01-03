@@ -96,7 +96,7 @@ mod xmp;
 pub use asset::{Asset, AssetBuilder};
 pub use containers::ContainerKind;
 pub use error::{Error, Result};
-pub use segment::{ByteRange, ExclusionMode, Segment, SegmentKind};
+pub use segment::{ByteRange, ExclusionMode, ProcessingChunk, Segment, SegmentKind};
 pub use structure::Structure;
 pub use thumbnail::{Thumbnail, ThumbnailKind};
 pub use updates::Updates;
@@ -104,6 +104,8 @@ pub use updates::Updates;
 pub use tiff::ExifInfo;
 #[cfg(feature = "xmp")]
 pub use xmp::MiniXmp;
+#[cfg(feature = "parallel")]
+pub use segment::merkle_root;
 
 // Internal re-exports
 pub(crate) use containers::{detect_container, get_handler, Handler};
