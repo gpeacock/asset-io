@@ -674,13 +674,58 @@ impl BmffIO {
                         ));
                     } else if uuid.as_slice() == C2PA_UUID {
                         // C2PA UUID box found (contains JUMBF)
-                        // C2PA boxes DO have version/flags + purpose string
-                        let data_offset = box_info.data.offset + HEADER_SIZE + 16 + 4;
-                        let data_size = box_info.data.size - HEADER_SIZE - 16 - 4;
+                        // Structure: header(8) + uuid(16) + version/flags(4) + purpose(var+\0) + merkle_offset(8) + data
+                        //
+                        // We need to:
+                        // 1. Skip past version/flags (4 bytes after UUID)
+                        // 2. Read purpose string (scan for null terminator)
+                        // 3. Skip merkle offset (8 bytes)
+                        // 4. Remaining bytes are the JUMBF data
+
+                        let box_offset = box_info.data.offset;
+                        let box_size = box_info.data.size;
+
+                        let version_flags_offset = box_offset + HEADER_SIZE + 16;
+                        source.seek(SeekFrom::Start(version_flags_offset + 4))?; // Skip version/flags
+
+                        // Read purpose string (null-terminated)
+                        let mut purpose_bytes = Vec::new();
+                        loop {
+                            let mut byte = [0u8; 1];
+                            if source.read_exact(&mut byte).is_err() {
+                                break;
+                            }
+                            if byte[0] == 0 {
+                                break; // Found null terminator
+                            }
+                            purpose_bytes.push(byte[0]);
+                            // Sanity check: purpose string shouldn't be longer than 256 bytes
+                            if purpose_bytes.len() > 256 {
+                                break;
+                            }
+                        }
+
+                        // Skip merkle offset (8 bytes)
+                        source.seek(SeekFrom::Current(8))?;
+
+                        // Current position is start of JUMBF data
+                        let data_offset = source.stream_position()?;
+                        let header_overhead = (data_offset - box_offset) as u64;
+                        let data_size = box_size.saturating_sub(header_overhead);
+
+                        // Store two ranges:
+                        // - ranges[0]: JUMBF data location (for reading/writing manifest)
+                        // - ranges[1]: Full box location (for EntireSegment exclusion mode)
                         structure.add_segment(Segment::with_ranges(
-                            vec![ByteRange::new(data_offset, data_size)],
+                            vec![
+                                ByteRange::new(data_offset, data_size),
+                                ByteRange::new(box_offset, box_size),
+                            ],
                             SegmentKind::Jumbf,
-                            Some("uuid/c2pa".to_string()),
+                            Some(format!(
+                                "uuid/c2pa/{}",
+                                String::from_utf8_lossy(&purpose_bytes)
+                            )),
                         ));
                     }
                 }
@@ -1153,24 +1198,24 @@ impl ContainerIO for BmffIO {
             _ => None,
         }?;
 
-        let location = segment.location();
-
         match mode {
             ExclusionMode::DataOnly => {
                 // Only exclude the manifest/XMP data portion
-                // Box headers are included in hash
+                // ranges[0] is the data location
+                let location = segment.location();
                 Some((location.offset, location.size))
             }
             ExclusionMode::EntireSegment => {
-                // For BMFF with Merkle trees, exclude the entire C2PA UUID box
-                // including the wrapper (purpose box, merkle box, manifest box)
-                // The segment offset points to data start; we need to back up to box start
-                // UUID box structure: size(4) + 'uuid'(4) + uuid_bytes(16) + data
-                // So box starts 24 bytes before data
-                let box_header_size = 24u64; // size(4) + type(4) + uuid(16)
-                let box_start = location.offset.saturating_sub(box_header_size);
-                let total_size = location.size + box_header_size;
-                Some((box_start, total_size))
+                // For BMFF, exclude the entire C2PA UUID box
+                // ranges[1] is the full box location (if available)
+                if segment.ranges.len() > 1 {
+                    let box_range = &segment.ranges[1];
+                    Some((box_range.offset, box_range.size))
+                } else {
+                    // Fallback: just use data range if box range not available
+                    let location = segment.location();
+                    Some((location.offset, location.size))
+                }
             }
         }
     }
