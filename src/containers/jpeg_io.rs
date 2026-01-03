@@ -1474,6 +1474,25 @@ impl ContainerIO for JpegIO {
 
         crate::tiff::parse_exif_info(exif_data)
     }
+
+    fn exclusion_range_for_segment(
+        structure: &Structure,
+        kind: SegmentKind,
+    ) -> Option<(u64, u64)> {
+        let segment = match kind {
+            SegmentKind::Jumbf => structure
+                .c2pa_jumbf_index()
+                .map(|i| &structure.segments()[i]),
+            SegmentKind::Xmp => structure.xmp_index().map(|i| &structure.segments()[i]),
+            _ => None,
+        }?;
+
+        let location = segment.location();
+        // JPEG: Only exclude the JUMBF/XMP data portion
+        // Headers (marker, length, JPEG XT header) are included in hash
+        // Segment offset already points to data start
+        Some((location.offset, location.size))
+    }
 }
 
 // Helper functions

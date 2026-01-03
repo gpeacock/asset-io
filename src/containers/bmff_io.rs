@@ -1137,6 +1137,24 @@ impl ContainerIO for BmffIO {
 
         crate::tiff::parse_exif_info(exif_data)
     }
+
+    fn exclusion_range_for_segment(
+        structure: &Structure,
+        kind: SegmentKind,
+    ) -> Option<(u64, u64)> {
+        let segment = match kind {
+            SegmentKind::Jumbf => structure
+                .c2pa_jumbf_index()
+                .map(|i| &structure.segments()[i]),
+            SegmentKind::Xmp => structure.xmp_index().map(|i| &structure.segments()[i]),
+            _ => None,
+        }?;
+
+        let location = segment.location();
+        // BMFF: Only exclude the manifest/XMP data portion
+        // Box headers are included in hash
+        Some((location.offset, location.size))
+    }
 }
 
 // ============================================================================

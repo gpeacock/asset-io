@@ -94,7 +94,7 @@ mod xmp;
 
 // Public exports
 pub use asset::{Asset, AssetBuilder};
-pub use containers::ContainerKind;
+pub use containers::{exclusion_range_for_segment, ContainerKind};
 pub use error::{Error, Result};
 pub use segment::{ByteRange, ExclusionMode, Segment, SegmentKind};
 pub use structure::Structure;
