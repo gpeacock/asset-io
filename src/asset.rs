@@ -359,6 +359,7 @@ impl<R: Read + Seek> Asset<R> {
         self.source.read_exact(&mut data)?;
 
         // Parse based on container format
+        #[allow(unreachable_patterns)]
         let exif_data: &[u8] = match self.container() {
             #[cfg(feature = "jpeg")]
             crate::Container::Jpeg => {
@@ -377,6 +378,23 @@ impl<R: Read + Seek> Asset<R> {
             crate::Container::Png => {
                 // PNG eXIf chunk: just raw TIFF data (no Exif\0\0 prefix)
                 &data
+            }
+            #[cfg(feature = "bmff")]
+            crate::Container::Bmff => {
+                // HEIF: Exif item has 4-byte tiff_header_offset prefix, then "Exif\0\0", then TIFF
+                // The 4 bytes are typically 0x00000006 (offset to TIFF data from start of Exif block)
+                if data.len() > 10 && &data[4..10] == b"Exif\0\0" {
+                    &data[10..]
+                } else if data.len() > 4 {
+                    // Some files may have different structure, try to find TIFF header
+                    if data[4..].starts_with(b"II") || data[4..].starts_with(b"MM") {
+                        &data[4..]
+                    } else {
+                        &data
+                    }
+                } else {
+                    return Ok(None);
+                }
             }
             _ => {
                 // Try to detect format

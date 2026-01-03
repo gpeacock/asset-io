@@ -685,6 +685,32 @@ impl BmffIO {
             }
         }
 
+        // Find EXIF items in HEIF structure (if exif feature enabled)
+        #[cfg(feature = "exif")]
+        {
+            if let Ok(Some((meta_offset, meta_size))) = find_meta_box(source, file_size) {
+                // Parse iinf to find Exif items
+                if let Ok(exif_item_ids) = parse_iinf_for_exif(source, meta_offset, meta_size) {
+                    if !exif_item_ids.is_empty() {
+                        // Parse iloc to get locations
+                        if let Ok(locations) = parse_iloc(source, meta_offset, meta_size) {
+                            for exif_id in exif_item_ids {
+                                if let Some((offset, size)) = locations.get(&exif_id) {
+                                    // HEIF EXIF has a 4-byte header before TIFF data
+                                    // We store the raw item location; exif_info() will handle the header
+                                    structure.add_segment(Segment::with_ranges(
+                                        vec![ByteRange::new(*offset, *size)],
+                                        SegmentKind::Exif,
+                                        Some("meta/Exif".to_string()),
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         Ok(structure)
     }
 }
@@ -1306,6 +1332,105 @@ fn parse_iref_for_thumbnails<R: Read + Seek>(
     }
 
     Ok(thumbnail_ids)
+}
+
+/// Parse iinf box to find items with type "Exif"
+#[cfg(feature = "exif")]
+fn parse_iinf_for_exif<R: Read + Seek>(
+    source: &mut R,
+    meta_offset: u64,
+    meta_size: u64,
+) -> Result<Vec<u32>> {
+    let meta_end = meta_offset + meta_size;
+    let mut exif_item_ids = Vec::new();
+
+    // Skip meta box header (8 bytes) + version/flags (4 bytes)
+    source.seek(SeekFrom::Start(meta_offset + 12))?;
+
+    while source.stream_position()? < meta_end {
+        let box_start = source.stream_position()?;
+
+        let mut buf = [0u8; 8];
+        if source.read_exact(&mut buf).is_err() {
+            break;
+        }
+
+        let size = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as u64;
+        let box_type = &buf[4..8];
+
+        if size == 0 {
+            break;
+        }
+
+        if box_type == b"iinf" {
+            let iinf_end = box_start + size;
+
+            // version (1) + flags (3)
+            let version = source.read_u8()?;
+            source.read_u24::<BigEndian>()?; // flags
+
+            // entry_count
+            let entry_count = if version == 0 {
+                source.read_u16::<BigEndian>()? as u32
+            } else {
+                source.read_u32::<BigEndian>()?
+            };
+
+            // Parse infe entries
+            for _ in 0..entry_count {
+                if source.stream_position()? >= iinf_end {
+                    break;
+                }
+
+                let infe_start = source.stream_position()?;
+
+                let mut infe_buf = [0u8; 8];
+                if source.read_exact(&mut infe_buf).is_err() {
+                    break;
+                }
+
+                let infe_size = u32::from_be_bytes([infe_buf[0], infe_buf[1], infe_buf[2], infe_buf[3]]) as u64;
+                let infe_type = &infe_buf[4..8];
+
+                if infe_size == 0 || infe_type != b"infe" {
+                    source.seek(SeekFrom::Start(infe_start + infe_size.max(8)))?;
+                    continue;
+                }
+
+                // infe: version (1) + flags (3)
+                let infe_version = source.read_u8()?;
+                source.read_u24::<BigEndian>()?; // flags
+
+                if infe_version >= 2 {
+                    // item_ID
+                    let item_id = if infe_version == 2 {
+                        source.read_u16::<BigEndian>()? as u32
+                    } else {
+                        source.read_u32::<BigEndian>()?
+                    };
+
+                    // item_protection_index (2 bytes)
+                    source.read_u16::<BigEndian>()?;
+
+                    // item_type (4 bytes) - this is what we're looking for!
+                    let mut item_type = [0u8; 4];
+                    source.read_exact(&mut item_type)?;
+
+                    if &item_type == b"Exif" {
+                        exif_item_ids.push(item_id);
+                    }
+                }
+
+                source.seek(SeekFrom::Start(infe_start + infe_size))?;
+            }
+
+            return Ok(exif_item_ids);
+        }
+
+        source.seek(SeekFrom::Start(box_start + size))?;
+    }
+
+    Ok(exif_item_ids)
 }
 
 /// Parse iloc box to get item locations
