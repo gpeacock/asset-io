@@ -1032,6 +1032,35 @@ impl ContainerIO for PngIO {
         }
         Ok(None)
     }
+
+    #[cfg(feature = "exif")]
+    fn extract_exif_info<R: Read + Seek>(
+        &self,
+        structure: &Structure,
+        source: &mut R,
+    ) -> Result<Option<crate::tiff::ExifInfo>> {
+        use std::io::SeekFrom;
+
+        // Find EXIF segment
+        let exif_segment = structure
+            .segments()
+            .iter()
+            .find(|s| s.is_type(SegmentKind::Exif));
+
+        let segment = match exif_segment {
+            Some(s) => s,
+            None => return Ok(None),
+        };
+
+        // Read the EXIF data
+        let location = segment.location();
+        source.seek(SeekFrom::Start(location.offset))?;
+        let mut data = vec![0u8; location.size as usize];
+        source.read_exact(&mut data)?;
+
+        // PNG eXIf chunk: just raw TIFF data (no Exif\0\0 prefix)
+        crate::tiff::parse_exif_info(&data)
+    }
 }
 
 /// Update a PNG segment in-place with proper CRC recalculation

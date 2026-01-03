@@ -337,76 +337,8 @@ impl<R: Read + Seek> Asset<R> {
     /// ```
     #[cfg(feature = "exif")]
     pub fn exif_info(&mut self) -> Result<Option<crate::tiff::ExifInfo>> {
-        use crate::segment::SegmentKind;
-        use std::io::SeekFrom;
-
-        // Find EXIF segment
-        let exif_segment = self
-            .structure
-            .segments
-            .iter()
-            .find(|s| s.is_type(SegmentKind::Exif));
-
-        let segment = match exif_segment {
-            Some(s) => s,
-            None => return Ok(None),
-        };
-
-        // Read the EXIF data
-        let location = segment.location();
-        self.source.seek(SeekFrom::Start(location.offset))?;
-        let mut data = vec![0u8; location.size as usize];
-        self.source.read_exact(&mut data)?;
-
-        // Parse based on container format
-        #[allow(unreachable_patterns)]
-        let exif_data: &[u8] = match self.container() {
-            #[cfg(feature = "jpeg")]
-            crate::Container::Jpeg => {
-                // JPEG: segment includes marker(2) + length(2) + "Exif\0\0"(6) + TIFF data
-                // Skip: FF E1 + length(2) + Exif\0\0(6) = 10 bytes
-                if data.len() > 10 && &data[4..10] == b"Exif\0\0" {
-                    &data[10..]
-                } else if data.len() > 4 {
-                    // Maybe just marker + length, data starts at offset 4
-                    &data[4..]
-                } else {
-                    return Ok(None);
-                }
-            }
-            #[cfg(feature = "png")]
-            crate::Container::Png => {
-                // PNG eXIf chunk: just raw TIFF data (no Exif\0\0 prefix)
-                &data
-            }
-            #[cfg(feature = "bmff")]
-            crate::Container::Bmff => {
-                // HEIF: Exif item has 4-byte tiff_header_offset prefix, then "Exif\0\0", then TIFF
-                // The 4 bytes are typically 0x00000006 (offset to TIFF data from start of Exif block)
-                if data.len() > 10 && &data[4..10] == b"Exif\0\0" {
-                    &data[10..]
-                } else if data.len() > 4 {
-                    // Some files may have different structure, try to find TIFF header
-                    if data[4..].starts_with(b"II") || data[4..].starts_with(b"MM") {
-                        &data[4..]
-                    } else {
-                        &data
-                    }
-                } else {
-                    return Ok(None);
-                }
-            }
-            _ => {
-                // Try to detect format
-                if data.starts_with(b"Exif\0\0") {
-                    &data[6..]
-                } else {
-                    &data
-                }
-            }
-        };
-
-        crate::tiff::parse_exif_info(exif_data)
+        // Delegate to container-specific handler
+        self.handler.extract_exif_info(&self.structure, &mut self.source)
     }
 
     /// Get the file structure

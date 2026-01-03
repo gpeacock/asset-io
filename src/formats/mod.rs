@@ -193,6 +193,21 @@ pub trait ContainerIO: Send + Sync {
         structure: &Structure,
         source: &mut R,
     ) -> Result<Option<crate::thumbnail::EmbeddedThumbnailInfo>>;
+
+    /// Extract EXIF metadata as parsed info (container-specific)
+    ///
+    /// Handles container-specific EXIF storage formats:
+    /// - JPEG: APP1 segment with "Exif\0\0" prefix
+    /// - HEIF/HEIC: Exif item in meta box with 4-byte offset prefix
+    /// - PNG: eXIf chunk (raw TIFF data)
+    ///
+    /// Returns parsed EXIF info (Make, Model, DateTime, etc.) or None if not present.
+    #[cfg(feature = "exif")]
+    fn extract_exif_info<R: Read + Seek>(
+        &self,
+        structure: &Structure,
+        source: &mut R,
+    ) -> Result<Option<crate::tiff::ExifInfo>>;
 }
 
 // Container I/O modules - pub(crate) so register_containers! macro can access them
@@ -343,6 +358,21 @@ macro_rules! register_containers {
                     $(
                         $(#[$meta])*
                         Handler::$variant(h) => h.extract_embedded_thumbnail_info(structure, source),
+                    )*
+                }
+            }
+
+            #[cfg(feature = "exif")]
+            #[allow(unreachable_patterns)]
+            pub(crate) fn extract_exif_info<R: std::io::Read + std::io::Seek>(
+                &self,
+                structure: &$crate::Structure,
+                source: &mut R,
+            ) -> $crate::Result<Option<$crate::tiff::ExifInfo>> {
+                match self {
+                    $(
+                        $(#[$meta])*
+                        Handler::$variant(h) => h.extract_exif_info(structure, source),
                     )*
                 }
             }
