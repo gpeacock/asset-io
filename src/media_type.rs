@@ -2,11 +2,11 @@
 //!
 //! This module defines specific media types that can be stored in various container formats.
 
-use crate::Container;
+use crate::containers::ContainerKind;
 
 /// Specific media type - what the content represents
 ///
-/// While a `Container` defines how a file is structured (JPEG, PNG, etc.),
+/// While a `ContainerKind` defines how a file is structured (JPEG, PNG, etc.),
 /// a `MediaType` defines what the content actually is (JPEG image, PNG image, etc.).
 ///
 /// Some containers like BMFF can hold many different media types (HEIC, AVIF, MP4, MOV),
@@ -108,22 +108,22 @@ impl MediaType {
     /// use asset_io::MediaType;
     ///
     /// let media = MediaType::Jpeg;
-    /// assert_eq!(media.container(), asset_io::Container::Jpeg);
+    /// assert_eq!(media.container(), asset_io::ContainerKind::Jpeg);
     /// # }
     /// ```
-    pub fn container(&self) -> Container {
+    pub fn container(&self) -> ContainerKind {
         match self {
             #[cfg(feature = "jpeg")]
-            MediaType::Jpeg => Container::Jpeg,
+            MediaType::Jpeg => ContainerKind::Jpeg,
             #[cfg(feature = "png")]
-            MediaType::Png => Container::Png,
+            MediaType::Png => ContainerKind::Png,
             #[cfg(feature = "bmff")]
             MediaType::Heic
             | MediaType::Heif
             | MediaType::Avif
             | MediaType::Mp4Video
             | MediaType::Mp4Audio
-            | MediaType::QuickTime => Container::Bmff,
+            | MediaType::QuickTime => ContainerKind::Bmff,
         }
     }
 

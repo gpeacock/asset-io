@@ -12,7 +12,7 @@ fn main() -> asset_io::Result<()> {
 
     // Open the BMFF file
     let mut asset = Asset::open(input_path)?;
-    println!("  Container: {:?}", asset.container());
+    println!("  ContainerKind: {:?}", asset.container());
     println!("  Media Type: {:?}", asset.media_type());
     println!("  Total size: {} bytes", asset.structure().total_size);
     println!("  Segments: {}", asset.structure().segments().len());

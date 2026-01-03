@@ -1,10 +1,11 @@
 //! JPEG container I/O implementation
 
+use super::{ContainerIO, ContainerKind};
 use crate::{
     error::{Error, Result},
     segment::{ByteRange, Segment, SegmentKind},
     structure::Structure,
-    Container, ContainerIO, Updates,
+    Updates,
 };
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use std::io::{copy, Read, Seek, SeekFrom, Write};
@@ -67,8 +68,8 @@ impl JpegIO {
     }
 
     /// Formats this handler supports
-    pub fn container_type() -> Container {
-        Container::Jpeg
+    pub fn container_type() -> ContainerKind {
+        ContainerKind::Jpeg
     }
 
     /// Media types this handler supports
@@ -87,10 +88,10 @@ impl JpegIO {
     }
 
     /// Detect if this is a JPEG file from header
-    pub fn detect(header: &[u8]) -> Option<crate::Container> {
+    pub fn detect(header: &[u8]) -> Option<crate::ContainerKind> {
         // JPEG magic bytes: FF D8
         if header.len() >= 2 && header[0] == 0xFF && header[1] == 0xD8 {
-            Some(Container::Jpeg)
+            Some(ContainerKind::Jpeg)
         } else {
             None
         }
@@ -249,7 +250,7 @@ impl JpegIO {
 
     /// Fast single-pass parser
     fn parse_impl<R: Read + Seek>(&self, source: &mut R) -> Result<Structure> {
-        let mut structure = Structure::new(Container::Jpeg, crate::MediaType::Jpeg);
+        let mut structure = Structure::new(ContainerKind::Jpeg, crate::MediaType::Jpeg);
 
         // Check SOI marker
         if source.read_u8()? != 0xFF || source.read_u8()? != SOI {
@@ -470,7 +471,7 @@ impl JpegIO {
                                         Some(crate::thumbnail::EmbeddedThumbnailInfo::new(
                                             thumb_offset,
                                             thumb_info.size as u64,
-                                            crate::thumbnail::ThumbnailFormat::Jpeg,
+                                            crate::thumbnail::ThumbnailKind::Jpeg,
                                             thumb_info.width,
                                             thumb_info.height,
                                         ))
@@ -677,8 +678,8 @@ impl Default for JpegIO {
 }
 
 impl ContainerIO for JpegIO {
-    fn container_type() -> Container {
-        Container::Jpeg
+    fn container_type() -> ContainerKind {
+        ContainerKind::Jpeg
     }
 
     fn supported_media_types() -> &'static [crate::MediaType] {
@@ -693,9 +694,9 @@ impl ContainerIO for JpegIO {
         &["image/jpeg", "image/jpg"]
     }
 
-    fn detect(header: &[u8]) -> Option<crate::Container> {
+    fn detect(header: &[u8]) -> Option<crate::ContainerKind> {
         if header.len() >= 2 && header[0] == 0xFF && header[1] == 0xD8 {
-            Some(Container::Jpeg)
+            Some(ContainerKind::Jpeg)
         } else {
             None
         }
@@ -1143,7 +1144,7 @@ impl ContainerIO for JpegIO {
         // The segment iteration and decision logic mirrors write() exactly
         use crate::MetadataUpdate;
 
-        let mut dest_structure = Structure::new(Container::Jpeg, source_structure.media_type);
+        let mut dest_structure = Structure::new(ContainerKind::Jpeg, source_structure.media_type);
         let mut current_offset = 2u64; // Start after SOI marker
 
         let mut xmp_written = false;
@@ -1777,7 +1778,7 @@ mod tests {
         let handler = JpegIO::new();
         let structure = handler.parse(&mut source).unwrap();
 
-        assert_eq!(structure.container, Container::Jpeg);
+        assert_eq!(structure.container, ContainerKind::Jpeg);
         assert_eq!(structure.total_size, 4);
         assert_eq!(structure.segments.len(), 2); // Header + EOI
     }

@@ -243,18 +243,15 @@ mod fixture_tests {
 
 #[cfg(test)]
 mod thumbnail_tests {
-    use asset_io::{test_utils, ContainerIO, JpegIO};
-    use std::fs::File;
+    use asset_io::{test_utils, Asset};
 
     #[test]
     fn test_image_data_range() {
         println!("\n=== Testing image_data_range() ===");
 
         let path = test_utils::fixture_path(test_utils::P1000708);
-        let mut file = File::open(&path).expect("Failed to open file");
-
-        let handler = JpegIO::new();
-        let structure = handler.parse(&mut file).expect("Failed to parse");
+        let asset = Asset::open(&path).expect("Failed to open file");
+        let structure = asset.structure();
 
         // Should find image data
         let range = structure
@@ -355,19 +352,19 @@ mod thumbnail_tests {
     fn test_thumbnail_creation() {
         println!("\n=== Testing Thumbnail creation ===");
 
-        use asset_io::{Thumbnail, ThumbnailFormat};
+        use asset_io::{Thumbnail, ThumbnailKind};
 
         // Test with_dimensions
-        let thumb = Thumbnail::with_dimensions(vec![0u8; 100], ThumbnailFormat::Jpeg, 160, 120);
+        let thumb = Thumbnail::with_dimensions(vec![0u8; 100], ThumbnailKind::Jpeg, 160, 120);
         assert_eq!(thumb.data.len(), 100);
-        assert_eq!(thumb.format, ThumbnailFormat::Jpeg);
+        assert_eq!(thumb.format, ThumbnailKind::Jpeg);
         assert_eq!(thumb.width, Some(160));
         assert_eq!(thumb.height, Some(120));
 
         // Test new (without dimensions)
-        let thumb_no_dims = Thumbnail::new(vec![0u8; 50], ThumbnailFormat::Png);
+        let thumb_no_dims = Thumbnail::new(vec![0u8; 50], ThumbnailKind::Png);
         assert_eq!(thumb_no_dims.data.len(), 50);
-        assert_eq!(thumb_no_dims.format, ThumbnailFormat::Png);
+        assert_eq!(thumb_no_dims.format, ThumbnailKind::Png);
         assert_eq!(thumb_no_dims.width, None);
         assert_eq!(thumb_no_dims.height, None);
 
@@ -377,39 +374,29 @@ mod thumbnail_tests {
 
 #[cfg(all(test, feature = "png"))]
 mod png_tests {
-    use asset_io::{Asset, Container, ContainerIO, MediaType, PngIO, Updates};
+    use asset_io::{Asset, ContainerKind, Updates};
     use std::io::Cursor;
 
     #[test]
     fn test_png_parse_real_file() {
-        use std::fs::File;
+        let asset = Asset::open("tests/fixtures/GreenCat.png").unwrap();
 
-        let mut file = File::open("tests/fixtures/GreenCat.png").unwrap();
-        let handler = PngIO::new();
-        let structure = handler.parse(&mut file).unwrap();
-
-        assert_eq!(structure.container, Container::Png);
-        assert!(!structure.segments.is_empty());
+        assert_eq!(asset.structure().container, ContainerKind::Png);
+        assert!(!asset.structure().segments.is_empty());
         println!(
             "Parsed {} segments from GreenCat.png",
-            structure.segments.len()
+            asset.structure().segments.len()
         );
     }
 
     #[test]
     fn test_png_round_trip_real_file() {
-        use std::fs::File;
-
-        let mut input = File::open("tests/fixtures/GreenCat.png").unwrap();
-        let handler = PngIO::new();
-        let structure = handler.parse(&mut input).unwrap();
+        let mut asset = Asset::open("tests/fixtures/GreenCat.png").unwrap();
 
         // Write with no changes
         let mut output = Vec::new();
         let updates = Updates::default();
-        handler
-            .write(&structure, &mut input, &mut output, &updates)
-            .unwrap();
+        asset.write(&mut output, &updates).unwrap();
 
         // Output should be valid PNG
         assert_eq!(&output[0..8], b"\x89PNG\r\n\x1a\n");
@@ -418,8 +405,8 @@ mod png_tests {
         std::fs::write("/tmp/png_output.png", &output).ok();
 
         // Should be parseable
-        let mut output_cursor = Cursor::new(output);
-        let result = handler.parse(&mut output_cursor);
+        let mut output_cursor = Cursor::new(output.clone());
+        let result = Asset::from_source(&mut output_cursor);
         if let Err(e) = &result {
             eprintln!("Parse error: {:?}", e);
         }
@@ -428,61 +415,45 @@ mod png_tests {
 
     #[test]
     fn test_png_add_xmp_to_real_file() {
-        use std::fs::File;
-
-        let mut input = File::open("tests/fixtures/GreenCat.png").unwrap();
-        let handler = PngIO::new();
-        let structure = handler.parse(&mut input).unwrap();
+        let mut asset = Asset::open("tests/fixtures/GreenCat.png").unwrap();
 
         // Add XMP metadata
         let xmp_data = b"<rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\"><test>PNG XMP</test></rdf:RDF>".to_vec();
         let mut output = Vec::new();
         let updates = Updates::new().set_xmp(xmp_data.clone());
-        handler
-            .write(&structure, &mut input, &mut output, &updates)
-            .unwrap();
+        asset.write(&mut output, &updates).unwrap();
 
         // Parse the output and verify XMP was added
-        let output_cursor = Cursor::new(output);
-        let mut asset = Asset::from_source_with_format(output_cursor, MediaType::Png).unwrap();
+        let mut output_cursor = Cursor::new(output);
+        let mut parsed = Asset::from_source(&mut output_cursor).unwrap();
 
-        let result_xmp = asset.xmp().unwrap();
+        let result_xmp = parsed.xmp().unwrap();
         assert!(result_xmp.is_some());
         assert_eq!(result_xmp.unwrap(), xmp_data);
     }
 
     #[test]
     fn test_png_add_jumbf_to_real_file() {
-        use std::fs::File;
-
-        let mut input = File::open("tests/fixtures/GreenCat.png").unwrap();
-        let handler = PngIO::new();
-        let structure = handler.parse(&mut input).unwrap();
+        let mut asset = Asset::open("tests/fixtures/GreenCat.png").unwrap();
 
         // Add JUMBF metadata
         let jumbf_data = b"Test JUMBF data for PNG".to_vec();
         let mut output = Vec::new();
         let updates = Updates::new().set_jumbf(jumbf_data.clone());
-        handler
-            .write(&structure, &mut input, &mut output, &updates)
-            .unwrap();
+        asset.write(&mut output, &updates).unwrap();
 
         // Parse the output and verify JUMBF was added
-        let output_cursor = Cursor::new(output);
-        let mut asset = Asset::from_source_with_format(output_cursor, MediaType::Png).unwrap();
+        let mut output_cursor = Cursor::new(output);
+        let mut parsed = Asset::from_source(&mut output_cursor).unwrap();
 
-        let result_jumbf = asset.jumbf().unwrap();
+        let result_jumbf = parsed.jumbf().unwrap();
         assert!(result_jumbf.is_some());
         assert_eq!(result_jumbf.unwrap(), jumbf_data);
     }
 
     #[test]
     fn test_png_add_both_xmp_and_jumbf_to_real_file() {
-        use std::fs::File;
-
-        let mut input = File::open("tests/fixtures/GreenCat.png").unwrap();
-        let handler = PngIO::new();
-        let structure = handler.parse(&mut input).unwrap();
+        let mut asset = Asset::open("tests/fixtures/GreenCat.png").unwrap();
 
         // Add both XMP and JUMBF
         let xmp_data = b"<test>XMP Data</test>".to_vec();
@@ -492,15 +463,13 @@ mod png_tests {
         let updates = Updates::new()
             .set_xmp(xmp_data.clone())
             .set_jumbf(jumbf_data.clone());
-        handler
-            .write(&structure, &mut input, &mut output, &updates)
-            .unwrap();
+        asset.write(&mut output, &updates).unwrap();
 
         // Verify both were added
-        let output_cursor = Cursor::new(output);
-        let mut asset = Asset::from_source_with_format(output_cursor, MediaType::Png).unwrap();
+        let mut output_cursor = Cursor::new(output);
+        let mut parsed = Asset::from_source(&mut output_cursor).unwrap();
 
-        assert_eq!(asset.xmp().unwrap().unwrap(), xmp_data);
-        assert_eq!(asset.jumbf().unwrap().unwrap(), jumbf_data);
+        assert_eq!(parsed.xmp().unwrap().unwrap(), xmp_data);
+        assert_eq!(parsed.jumbf().unwrap().unwrap(), jumbf_data);
     }
 }

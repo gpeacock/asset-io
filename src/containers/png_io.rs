@@ -1,10 +1,11 @@
 //! PNG container I/O implementation
 
+use super::{ContainerIO, ContainerKind};
 use crate::{
     error::{Error, Result},
     segment::{ByteRange, Segment, SegmentKind},
     structure::Structure,
-    Container, ContainerIO, Updates,
+    Updates,
 };
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -57,8 +58,8 @@ impl PngIO {
     }
 
     /// Formats this handler supports
-    pub fn container_type() -> Container {
-        Container::Png
+    pub fn container_type() -> ContainerKind {
+        ContainerKind::Png
     }
 
     /// Media types this handler supports
@@ -77,10 +78,10 @@ impl PngIO {
     }
 
     /// Detect if this is a PNG file from header
-    pub fn detect(header: &[u8]) -> Option<crate::Container> {
+    pub fn detect(header: &[u8]) -> Option<crate::ContainerKind> {
         // PNG signature: 89 50 4E 47 0D 0A 1A 0A
         if header.len() >= 8 && &header[0..8] == b"\x89PNG\r\n\x1a\n" {
-            Some(Container::Png)
+            Some(ContainerKind::Png)
         } else {
             None
         }
@@ -157,7 +158,7 @@ impl PngIO {
 
     /// Fast single-pass parser
     fn parse_impl<R: Read + Seek>(&self, source: &mut R) -> Result<Structure> {
-        let mut structure = Structure::new(Container::Png, crate::MediaType::Png);
+        let mut structure = Structure::new(ContainerKind::Png, crate::MediaType::Png);
 
         // Check PNG signature
         let mut sig = [0u8; 8];
@@ -485,8 +486,8 @@ impl Default for PngIO {
 }
 
 impl ContainerIO for PngIO {
-    fn container_type() -> Container {
-        Container::Png
+    fn container_type() -> ContainerKind {
+        ContainerKind::Png
     }
 
     fn supported_media_types() -> &'static [crate::MediaType] {
@@ -501,9 +502,9 @@ impl ContainerIO for PngIO {
         &["image/png"]
     }
 
-    fn detect(header: &[u8]) -> Option<crate::Container> {
+    fn detect(header: &[u8]) -> Option<crate::ContainerKind> {
         if header.len() >= 8 && &header[0..8] == b"\x89PNG\r\n\x1a\n" {
-            Some(Container::Png)
+            Some(ContainerKind::Png)
         } else {
             None
         }
@@ -845,7 +846,7 @@ impl ContainerIO for PngIO {
         // The segment iteration and decision logic mirrors write() exactly
         use crate::MetadataUpdate;
 
-        let mut dest_structure = Structure::new(Container::Png, source_structure.media_type);
+        let mut dest_structure = Structure::new(ContainerKind::Png, source_structure.media_type);
         let mut current_offset = PNG_SIGNATURE.len() as u64;
 
         let mut xmp_written = false;
@@ -1232,7 +1233,7 @@ mod tests {
         let handler = PngIO::new();
         let structure = handler.parse(&mut source).unwrap();
 
-        assert_eq!(structure.container, Container::Png);
+        assert_eq!(structure.container, ContainerKind::Png);
         assert!(structure.segments.len() >= 2); // At least Header + IEND
     }
 

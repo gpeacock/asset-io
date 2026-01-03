@@ -1,9 +1,10 @@
 //! Structure representation for parsed assets
 
 use crate::{
+    containers::ContainerKind,
     error::Result,
     segment::{ByteRange, ChunkedSegmentReader, Location, Segment, SegmentKind, DEFAULT_CHUNK_SIZE, MAX_SEGMENT_SIZE},
-    Container, MediaType,
+    MediaType,
 };
 use std::io::{Read, Seek, SeekFrom, Take};
 
@@ -17,8 +18,8 @@ pub struct Structure {
     /// All segments in the asset
     pub segments: Vec<Segment>,
 
-    /// Container format - how the file is structured
-    pub container: Container,
+    /// ContainerKind format - how the file is structured
+    pub container: ContainerKind,
 
     /// Media type - what the content represents
     pub media_type: MediaType,
@@ -39,7 +40,7 @@ pub struct Structure {
 
 impl Structure {
     /// Create a new structure for the given container and media type
-    pub fn new(container: Container, media_type: MediaType) -> Self {
+    pub fn new(container: ContainerKind, media_type: MediaType) -> Self {
         Self {
             segments: Vec::new(),
             container,

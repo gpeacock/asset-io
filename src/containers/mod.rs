@@ -6,15 +6,36 @@
 use crate::{error::Result, structure::Structure, MediaType, Updates};
 use std::io::{Read, Seek, Write};
 
+/// Container format - defines how a file is structured on disk
+///
+/// A container format determines the parsing strategy and file structure.
+/// Multiple media types can share the same container (e.g., BMFF container
+/// holds HEIC, AVIF, MP4, MOV, etc.).
+///
+/// Note: The actual variants are determined by enabled features.
+/// Use `"Kind"` suffix to distinguish this from content-type concepts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ContainerKind {
+    /// JPEG container (JFIF/Exif structure)
+    #[cfg(feature = "jpeg")]
+    Jpeg,
+
+    /// PNG container (chunk-based structure)
+    #[cfg(feature = "png")]
+    Png,
+
+    /// BMFF container (ISO Base Media File Format: HEIC, HEIF, AVIF, MP4, MOV)
+    #[cfg(feature = "bmff")]
+    Bmff,
+}
+
 /// Trait for container-specific I/O operations
 ///
 /// Each implementation handles one container format (e.g., JPEG, PNG, BMFF) and can
 /// support multiple media types within that container.
 pub trait ContainerIO: Send + Sync {
-    /// Container type this I/O implementation manages
-    ///
-    /// Note: Container is defined in the register_containers! macro
-    fn container_type() -> crate::Container
+    /// ContainerKind type this I/O implementation manages
+    fn container_type() -> ContainerKind
     where
         Self: Sized;
 
@@ -34,8 +55,8 @@ pub trait ContainerIO: Send + Sync {
         Self: Sized;
 
     /// Try to detect if this I/O implementation can parse the given header
-    /// Returns Some(Container) if confident, None if unsure
-    fn detect(header: &[u8]) -> Option<crate::Container>
+    /// Returns Some(ContainerKind) if confident, None if unsure
+    fn detect(header: &[u8]) -> Option<ContainerKind>
     where
         Self: Sized;
 
@@ -210,7 +231,7 @@ pub trait ContainerIO: Send + Sync {
     ) -> Result<Option<crate::tiff::ExifInfo>>;
 }
 
-// Container I/O modules - pub(crate) so register_containers! macro can access them
+// ContainerKind I/O modules - pub(crate) so register_containers! macro can access them
 #[cfg(feature = "jpeg")]
 pub(crate) mod jpeg_io;
 
@@ -221,37 +242,25 @@ pub(crate) mod png_io;
 pub(crate) mod bmff_io;
 
 // ============================================================================
-// Container Registration Macro
+// ContainerKind Registration Macro
 // ============================================================================
 
 /// Register all supported container formats in one place
 ///
 /// This macro generates:
-/// - Container enum with variants
 /// - Handler enum for internal use (zero-cost dispatch)
 /// - Handler implementation with container delegation
 /// - detect_container() function
 /// - get_handler() function  
 /// - Extension and MIME type lookup
-/// - Container methods for MIME types and extensions
+/// - ContainerKind methods for MIME types and extensions
+///
+/// Note: ContainerKind enum is defined separately above to avoid circular dependencies
 macro_rules! register_containers {
     ($(
         $(#[$meta:meta])*
         $variant:ident => $module:ident :: $io:ident
     ),* $(,)?) => {
-        /// Container format - defines how a file is structured on disk
-        ///
-        /// A container format determines the parsing strategy and file structure.
-        /// Multiple media types can share the same container (e.g., BMFF container
-        /// holds HEIC, AVIF, MP4, MOV, etc.).
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-        pub enum Container {
-            $(
-                $(#[$meta])*
-                $variant,
-            )*
-        }
-
         // Generate Handler enum for internal use (zero-cost dispatch)
         pub(crate) enum Handler {
             $(
@@ -381,7 +390,7 @@ macro_rules! register_containers {
         /// Detect container from file header
         pub(crate) fn detect_container<R: std::io::Read + std::io::Seek>(
             source: &mut R
-        ) -> $crate::Result<Container> {
+        ) -> $crate::Result<ContainerKind> {
             use std::io::SeekFrom;
 
             source.seek(SeekFrom::Start(0))?;
@@ -404,17 +413,17 @@ macro_rules! register_containers {
         }
 
         /// Get handler for a container
-        pub(crate) fn get_handler(container: Container) -> $crate::Result<Handler> {
+        pub(crate) fn get_handler(container: ContainerKind) -> $crate::Result<Handler> {
             match container {
                 $(
                     $(#[$meta])*
-                    Container::$variant => Ok(Handler::$variant($module::$io::new())),
+                    ContainerKind::$variant => Ok(Handler::$variant($module::$io::new())),
                 )*
             }
         }
 
         /// Detect container from file extension
-        pub fn detect_from_extension(ext: &str) -> Option<Container> {
+        pub fn detect_from_extension(ext: &str) -> Option<ContainerKind> {
             let ext_lower = ext.to_lowercase();
             $(
                 $(#[$meta])*
@@ -426,7 +435,7 @@ macro_rules! register_containers {
         }
 
         /// Detect container from MIME type
-        pub fn detect_from_mime(mime: &str) -> Option<Container> {
+        pub fn detect_from_mime(mime: &str) -> Option<ContainerKind> {
             $(
                 $(#[$meta])*
                 if $module::$io::mime_types().iter().any(|m| m.eq_ignore_ascii_case(mime)) {
@@ -436,8 +445,8 @@ macro_rules! register_containers {
             None
         }
 
-        // Generate Container methods
-        impl Container {
+        // Generate ContainerKind methods
+        impl ContainerKind {
             /// Get the primary MIME type for this container
             ///
             /// Returns the most common/primary MIME type for this container.
@@ -459,7 +468,7 @@ macro_rules! register_containers {
                 match self {
                     $(
                         $(#[$meta])*
-                        Container::$variant => $module::$io::supported_media_types(),
+                        ContainerKind::$variant => $module::$io::supported_media_types(),
                     )*
                 }
             }
@@ -471,7 +480,7 @@ macro_rules! register_containers {
                 match self {
                     $(
                         $(#[$meta])*
-                        Container::$variant => $module::$io::mime_types(),
+                        ContainerKind::$variant => $module::$io::mime_types(),
                     )*
                 }
             }
@@ -483,13 +492,13 @@ macro_rules! register_containers {
                 match self {
                     $(
                         $(#[$meta])*
-                        Container::$variant => $module::$io::extensions(),
+                        ContainerKind::$variant => $module::$io::extensions(),
                     )*
                 }
             }
         }
 
-        impl std::fmt::Display for Container {
+        impl std::fmt::Display for ContainerKind {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 write!(f, "{}", self.to_mime())
             }

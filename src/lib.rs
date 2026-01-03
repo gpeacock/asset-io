@@ -106,7 +106,7 @@
 
 mod asset;
 mod error;
-mod formats;
+mod containers;
 mod media_type;
 mod processing_writer;
 mod segment;
@@ -123,16 +123,16 @@ pub use asset::{Asset, AssetBuilder};
 pub use error::{Error, Result};
 pub use segment::{ByteRange, ExclusionMode, Segment, SegmentKind};
 pub use structure::Structure;
-pub use thumbnail::{Thumbnail, ThumbnailFormat};
+pub use thumbnail::{Thumbnail, ThumbnailKind};
 #[cfg(feature = "exif")]
 pub use tiff::ExifInfo;
 
 // Internal re-exports
-pub(crate) use formats::ContainerIO;
+pub(crate) use containers::ContainerIO;
 pub(crate) use media_type::MediaType;
 pub(crate) use segment::{ChunkedSegmentReader, SegmentMetadata, DEFAULT_CHUNK_SIZE};
 
-// Container and handlers are exported by the register_containers! macro below
+// ContainerKind and handlers are exported by the register_containers! macro below
 
 // Test utilities - only compiled for tests or when explicitly enabled
 #[cfg(any(test, feature = "test-utils"))]
@@ -394,8 +394,8 @@ impl Updates {
 }
 
 // Re-export generated items from formats module
-pub(crate) use formats::{detect_container, get_handler, Handler};
-pub use formats::Container;
+pub(crate) use containers::{detect_container, get_handler, Handler};
+pub use containers::ContainerKind;
 /// Update a segment in an already-written stream using structure information
 ///
 /// This is a low-level utility for updating specific segments after a file has been
@@ -459,8 +459,8 @@ pub fn update_segment_with_structure<W: std::io::Write + std::io::Seek>(
 
     // PNG requires special handling for CRC recalculation
     #[cfg(feature = "png")]
-    if structure.container == Container::Png {
-        return formats::png_io::update_png_segment_in_stream(writer, structure, kind, data);
+    if structure.container == ContainerKind::Png {
+        return containers::png_io::update_png_segment_in_stream(writer, structure, kind, data);
     }
 
     // Find the segment

@@ -27,7 +27,7 @@
 
 /// Format of an embedded thumbnail
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ThumbnailFormat {
+pub enum ThumbnailKind {
     /// JPEG thumbnail
     Jpeg,
     /// PNG thumbnail
@@ -48,7 +48,7 @@ pub struct Thumbnail {
     pub data: Vec<u8>,
 
     /// Format of the thumbnail
-    pub format: ThumbnailFormat,
+    pub format: ThumbnailKind,
 
     /// Width in pixels (if known)
     pub width: Option<u32>,
@@ -59,7 +59,7 @@ pub struct Thumbnail {
 
 impl Thumbnail {
     /// Create a new thumbnail with data
-    pub fn new(data: Vec<u8>, format: ThumbnailFormat) -> Self {
+    pub fn new(data: Vec<u8>, format: ThumbnailKind) -> Self {
         Self {
             data,
             format,
@@ -69,7 +69,7 @@ impl Thumbnail {
     }
 
     /// Create a new thumbnail with dimensions
-    pub fn with_dimensions(data: Vec<u8>, format: ThumbnailFormat, width: u32, height: u32) -> Self {
+    pub fn with_dimensions(data: Vec<u8>, format: ThumbnailKind, width: u32, height: u32) -> Self {
         Self {
             data,
             format,
@@ -92,7 +92,7 @@ pub struct EmbeddedThumbnailInfo {
     pub size: u64,
 
     /// Format of the thumbnail
-    pub format: ThumbnailFormat,
+    pub format: ThumbnailKind,
 
     /// Width in pixels (if known)
     pub width: Option<u32>,
@@ -106,7 +106,7 @@ impl EmbeddedThumbnailInfo {
     pub fn new(
         offset: u64,
         size: u64,
-        format: ThumbnailFormat,
+        format: ThumbnailKind,
         width: Option<u32>,
         height: Option<u32>,
     ) -> Self {

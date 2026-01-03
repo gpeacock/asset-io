@@ -226,7 +226,7 @@ fn generate_data_hash_from_structure(
 
     // Calculate exclusion range based on container type
     let (exclusion_offset, exclusion_size) = match structure.container {
-        asset_io::Container::Png => {
+        asset_io::ContainerKind::Png => {
             // Per C2PA spec: Include headers in hash, exclude only data+CRC
             // PNG caBX chunk structure: length(4) + type(4) + data(N) + CRC(4)
             //
@@ -239,7 +239,7 @@ fn generate_data_hash_from_structure(
             // Segment stores data_offset (after length+type) and data_size
             (data_offset, data_size + 4) // +4 for CRC
         }
-        asset_io::Container::Jpeg => {
+        asset_io::ContainerKind::Jpeg => {
             // Per C2PA spec: Only exclude the manifest DATA, not the APP11 headers.
             // The headers (marker, length, JPEG XT fields) must be included in the hash
             // to prevent insertion attacks.

@@ -23,7 +23,7 @@ fn main() -> asset_io::Result<()> {
     let mut asset = Asset::open(filename)?;
 
     println!("\nFile structure:");
-    println!("  Container: {:?}", asset.container());
+    println!("  ContainerKind: {:?}", asset.container());
     println!("  Media type: {:?}", asset.media_type());
     println!("  Total size: {} bytes", asset.structure().total_size);
     println!("  Segments: {}", asset.structure().segments.len());

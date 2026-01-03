@@ -16,7 +16,7 @@ fn test_file(path: &str) -> asset_io::Result<()> {
 
     // Test with Asset API (auto-detection)
     let mut asset = asset_io::Asset::open(path)?;
-    println!("  Container: {:?}", asset.container());
+    println!("  ContainerKind: {:?}", asset.container());
     println!("  Media Type: {:?}", asset.media_type());
     println!("  Size: {} bytes", asset.structure().total_size);
     println!("  Segments: {}", asset.structure().segments().len());

@@ -4,7 +4,8 @@
 //! without needing to know the specific media type.
 
 use crate::{
-    detect_container, error::Result, get_handler, structure::Structure, Container, Updates,
+    containers::ContainerKind, detect_container, error::Result, get_handler, structure::Structure,
+    Updates,
 };
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -231,7 +232,7 @@ impl<R: Read + Seek> Asset<R> {
     }
 
     /// Get the detected format
-    pub fn container(&self) -> Container {
+    pub fn container(&self) -> ContainerKind {
         self.structure.container
     }
 

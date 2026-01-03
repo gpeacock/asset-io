@@ -4,11 +4,12 @@
 //!
 //! Reference: ISO/IEC 14496-12:2022
 
+use super::{ContainerIO, ContainerKind};
 use crate::{
     error::{Error, Result},
     segment::{ByteRange, Segment, SegmentKind},
     structure::Structure,
-    Container, ContainerIO, MediaType, Updates,
+    MediaType, Updates,
 };
 use atree::{Arena, Token};
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
@@ -552,8 +553,8 @@ impl BmffIO {
         Self
     }
 
-    pub fn container_type() -> Container {
-        Container::Bmff
+    pub fn container_type() -> ContainerKind {
+        ContainerKind::Bmff
     }
 
     pub fn supported_media_types() -> &'static [MediaType] {
@@ -584,13 +585,13 @@ impl BmffIO {
         ]
     }
 
-    pub fn detect(header: &[u8]) -> Option<Container> {
+    pub fn detect(header: &[u8]) -> Option<ContainerKind> {
         // BMFF files start with ftyp box
         // Format: size(4) + 'ftyp'(4) + ...
         if header.len() >= 8 {
             let ftyp = &header[4..8];
             if ftyp == b"ftyp" {
-                return Some(Container::Bmff);
+                return Some(ContainerKind::Bmff);
             }
         }
         None
@@ -652,7 +653,7 @@ impl BmffIO {
         )?;
 
         // Create structure
-        let mut structure = Structure::new(Container::Bmff, media_type);
+        let mut structure = Structure::new(ContainerKind::Bmff, media_type);
         structure.total_size = file_size;
 
         // Find XMP UUID boxes
@@ -722,8 +723,8 @@ impl Default for BmffIO {
 }
 
 impl ContainerIO for BmffIO {
-    fn container_type() -> Container {
-        Container::Bmff
+    fn container_type() -> ContainerKind {
+        ContainerKind::Bmff
     }
 
     fn supported_media_types() -> &'static [MediaType] {
@@ -738,7 +739,7 @@ impl ContainerIO for BmffIO {
         Self::mime_types()
     }
 
-    fn detect(header: &[u8]) -> Option<Container> {
+    fn detect(header: &[u8]) -> Option<ContainerKind> {
         Self::detect(header)
     }
 
@@ -1146,7 +1147,7 @@ impl ContainerIO for BmffIO {
 fn extract_heif_thumbnail_info<R: Read + Seek>(
     source: &mut R,
 ) -> Result<Option<crate::thumbnail::EmbeddedThumbnailInfo>> {
-    use crate::thumbnail::{EmbeddedThumbnailInfo, ThumbnailFormat};
+    use crate::thumbnail::{EmbeddedThumbnailInfo, ThumbnailKind};
 
     source.seek(SeekFrom::Start(0))?;
     let file_size = source.seek(SeekFrom::End(0))?;
@@ -1181,9 +1182,9 @@ fn extract_heif_thumbnail_info<R: Read + Seek>(
             let mut magic = [0u8; 4];
             if source.read_exact(&mut magic).is_ok() {
                 let format = if magic[0..2] == [0xFF, 0xD8] {
-                    ThumbnailFormat::Jpeg
+                    ThumbnailKind::Jpeg
                 } else {
-                    ThumbnailFormat::Other
+                    ThumbnailKind::Other
                 };
 
                 return Ok(Some(EmbeddedThumbnailInfo {
@@ -1615,6 +1616,6 @@ mod tests {
             b'm', b'i', b'f', b'1', // compatible brand
         ];
 
-        assert_eq!(BmffIO::detect(&data), Some(Container::Bmff));
+        assert_eq!(BmffIO::detect(&data), Some(ContainerKind::Bmff));
     }
 }
