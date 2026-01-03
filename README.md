@@ -159,13 +159,13 @@ Update: [Seek→][Patch]           → in-place JUMBF update
 
 ## Supported Formats
 
-| Format | Parse | Write | XMP | JUMBF | EXIF |
-|--------|-------|-------|-----|-------|------|
-| JPEG | ✅ | ✅ | ✅ | ✅ | ✅ |
-| PNG | ✅ | ✅ | ✅ | ✅ | - |
-| HEIC/HEIF | ✅ | ✅ | ✅ | ✅ | - |
-| AVIF | ✅ | ✅ | ✅ | ✅ | - |
-| MP4/MOV | ✅ | ✅ | ✅ | ✅ | - |
+| Format | Parse | Write | XMP | JUMBF | EXIF | Thumbnail |
+|--------|-------|-------|-----|-------|------|-----------|
+| JPEG | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| PNG | ✅ | ✅ | ✅ | ✅ | - | - |
+| HEIC/HEIF | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| AVIF | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| MP4/MOV | ✅ | ✅ | ✅ | ✅ | - | - |
 
 ## Examples
 
@@ -244,7 +244,8 @@ asset.update_jumbf_in_place(new_jumbf)?
 - [x] Streaming writes with seek optimization
 - [x] Metadata add/remove/replace (all combinations)
 - [x] MiniXmp parser
-- [x] EXIF parsing and thumbnail extraction
+- [x] EXIF parsing (JPEG, HEIC/HEIF, AVIF)
+- [x] Thumbnail extraction (JPEG, HEIC/HEIF, AVIF)
 - [x] Streaming processing callbacks
 - [x] BMFF thumbnail extraction
 - [ ] Memory-mapped I/O option
