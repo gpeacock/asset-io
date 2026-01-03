@@ -1478,6 +1478,7 @@ impl ContainerIO for JpegIO {
     fn exclusion_range_for_segment(
         structure: &Structure,
         kind: SegmentKind,
+        _mode: crate::segment::ExclusionMode,
     ) -> Option<(u64, u64)> {
         let segment = match kind {
             SegmentKind::Jumbf => structure
@@ -1491,6 +1492,7 @@ impl ContainerIO for JpegIO {
         // JPEG: Only exclude the JUMBF/XMP data portion
         // Headers (marker, length, JPEG XT header) are included in hash
         // Segment offset already points to data start
+        // Note: JPEG doesn't have wrapper structures, so mode is ignored
         Some((location.offset, location.size))
     }
 }
