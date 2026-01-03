@@ -1067,7 +1067,6 @@ impl ContainerIO for PngIO {
     fn exclusion_range_for_segment(
         structure: &Structure,
         kind: SegmentKind,
-        _mode: crate::segment::ExclusionMode,
     ) -> Option<(u64, u64)> {
         let segment = match kind {
             SegmentKind::Jumbf => structure
@@ -1081,7 +1080,6 @@ impl ContainerIO for PngIO {
         // PNG chunks: length(4) + type(4) + data(N) + CRC(4)
         // Segment stores data offset/size. CRC immediately follows data.
         // For C2PA: exclude data + CRC (CRC depends on data, so it changes too)
-        // Note: PNG doesn't have wrapper structures, so mode is ignored
         Some((location.offset, location.size + 4))
     }
 }

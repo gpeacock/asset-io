@@ -1186,10 +1186,7 @@ impl ContainerIO for BmffIO {
     fn exclusion_range_for_segment(
         structure: &Structure,
         kind: SegmentKind,
-        mode: crate::segment::ExclusionMode,
     ) -> Option<(u64, u64)> {
-        use crate::segment::ExclusionMode;
-
         let segment = match kind {
             SegmentKind::Jumbf => structure
                 .c2pa_jumbf_index()
@@ -1198,26 +1195,10 @@ impl ContainerIO for BmffIO {
             _ => None,
         }?;
 
-        match mode {
-            ExclusionMode::DataOnly => {
-                // Only exclude the manifest/XMP data portion
-                // ranges[0] is the data location
-                let location = segment.location();
-                Some((location.offset, location.size))
-            }
-            ExclusionMode::EntireSegment => {
-                // For BMFF, exclude the entire C2PA UUID box
-                // ranges[1] is the full box location (if available)
-                if segment.ranges.len() > 1 {
-                    let box_range = &segment.ranges[1];
-                    Some((box_range.offset, box_range.size))
-                } else {
-                    // Fallback: just use data range if box range not available
-                    let location = segment.location();
-                    Some((location.offset, location.size))
-                }
-            }
-        }
+        // Return the data range (ranges[0])
+        // Box headers are included in hash per C2PA spec
+        let location = segment.location();
+        Some((location.offset, location.size))
     }
 }
 

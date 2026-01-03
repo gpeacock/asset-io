@@ -237,20 +237,13 @@ pub trait ContainerIO: Send + Sync {
     /// from hashing when generating C2PA DataHash assertions. For example:
     /// - PNG: Excludes data + CRC (4 extra bytes after data)
     /// - JPEG: Excludes only the JUMBF data (headers are hashed)
-    /// - BMFF: With `DataOnly`, excludes just manifest data; with `EntireSegment`,
-    ///   includes the C2PA UUID box wrapper
-    ///
-    /// # Arguments
-    /// * `structure` - The file structure containing the segment
-    /// * `kind` - The segment kind to find the exclusion range for
-    /// * `mode` - Exclusion mode: `DataOnly` for just data, `EntireSegment` for wrapper too
+    /// - BMFF: Excludes only the manifest data (box headers are hashed)
     ///
     /// Returns (offset, size) for the range to exclude from the hash, or None
     /// if the segment kind is not found.
     fn exclusion_range_for_segment(
         structure: &Structure,
         kind: crate::segment::SegmentKind,
-        mode: crate::segment::ExclusionMode,
     ) -> Option<(u64, u64)>
     where
         Self: Sized;
@@ -416,12 +409,11 @@ macro_rules! register_containers {
                 &self,
                 structure: &$crate::Structure,
                 kind: $crate::segment::SegmentKind,
-                mode: $crate::segment::ExclusionMode,
             ) -> Option<(u64, u64)> {
                 match self {
                     $(
                         $(#[$meta])*
-                        Handler::$variant(_) => $module::$io::exclusion_range_for_segment(structure, kind, mode),
+                        Handler::$variant(_) => $module::$io::exclusion_range_for_segment(structure, kind),
                     )*
                 }
             }
@@ -569,15 +561,7 @@ register_containers! {
 /// from hashing when generating C2PA DataHash assertions. For example:
 /// - PNG: Excludes data + CRC (4 extra bytes after data)
 /// - JPEG: Excludes only the JUMBF data (headers are hashed)
-/// - BMFF: With `DataOnly`, excludes just manifest data; with `EntireSegment`,
-///   includes the C2PA UUID box wrapper
-///
-/// # Arguments
-/// * `structure` - The file structure containing the segment
-/// * `kind` - The segment kind to find the exclusion range for
-/// * `mode` - Exclusion mode:
-///   - `DataOnly`: Exclude only the manifest/XMP data (C2PA compliant)
-///   - `EntireSegment`: Exclude data plus wrapper structures (for BMFF Merkle scenarios)
+/// - BMFF: Excludes only the manifest data (box headers are hashed)
 ///
 /// # Returns
 /// Some((offset, size)) for the range to exclude from the hash, or None
@@ -585,20 +569,16 @@ register_containers! {
 ///
 /// # Example
 /// ```ignore
-/// use asset_io::{ExclusionMode, SegmentKind};
+/// use asset_io::SegmentKind;
 ///
 /// let structure = asset.write_with_processing(&updates, |chunk| hasher.update(chunk))?;
-/// let (offset, size) = exclusion_range_for_segment(
-///     &structure,
-///     SegmentKind::Jumbf,
-///     ExclusionMode::DataOnly,
-/// ).expect("JUMBF segment not found");
+/// let (offset, size) = exclusion_range_for_segment(&structure, SegmentKind::Jumbf)
+///     .expect("JUMBF segment not found");
 /// ```
 pub fn exclusion_range_for_segment(
     structure: &crate::Structure,
     kind: crate::segment::SegmentKind,
-    mode: crate::segment::ExclusionMode,
 ) -> Option<(u64, u64)> {
     let handler = get_handler(structure.container).ok()?;
-    handler.exclusion_range_for_segment(structure, kind, mode)
+    handler.exclusion_range_for_segment(structure, kind)
 }

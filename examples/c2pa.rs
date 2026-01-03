@@ -207,13 +207,10 @@ fn generate_data_hash_from_structure(
     // Container-specific details are handled internally:
     // - PNG: includes CRC in exclusion (data + 4 bytes)
     // - JPEG: excludes only data (headers are hashed)
-    // - BMFF: DataOnly excludes just data, EntireSegment includes UUID box wrapper
-    let (exclusion_offset, exclusion_size) = asset_io::exclusion_range_for_segment(
-        structure,
-        asset_io::SegmentKind::Jumbf,
-        asset_io::ExclusionMode::DataOnly,
-    )
-    .ok_or("No JUMBF segment found for exclusion range")?;
+    // - BMFF: excludes only manifest data (box headers are hashed)
+    let (exclusion_offset, exclusion_size) =
+        asset_io::exclusion_range_for_segment(structure, asset_io::SegmentKind::Jumbf)
+            .ok_or("No JUMBF segment found for exclusion range")?;
 
     // Create DataHash with exclusion
     let mut dh = DataHash::new("jumbf_manifest", "sha256");
