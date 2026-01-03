@@ -713,14 +713,9 @@ impl BmffIO {
                         let header_overhead = (data_offset - box_offset) as u64;
                         let data_size = box_size.saturating_sub(header_overhead);
 
-                        // Store two ranges:
-                        // - ranges[0]: JUMBF data location (for reading/writing manifest)
-                        // - ranges[1]: Full box location (for EntireSegment exclusion mode)
+                        // Store JUMBF data location (for reading/writing manifest)
                         structure.add_segment(Segment::with_ranges(
-                            vec![
-                                ByteRange::new(data_offset, data_size),
-                                ByteRange::new(box_offset, box_size),
-                            ],
+                            vec![ByteRange::new(data_offset, data_size)],
                             SegmentKind::Jumbf,
                             Some(format!(
                                 "uuid/c2pa/{}",
