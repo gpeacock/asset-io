@@ -739,6 +739,108 @@ impl<R: Read + Seek> Asset<R> {
         Ok(hashes.into_iter().map(|(_, h)| h).collect())
     }
 
+    /// Hash the file in parallel using memory-mapped I/O
+    ///
+    /// This is the fastest hashing method for large files. Each rayon worker
+    /// reads its chunk directly from the memory-mapped file - no sequential
+    /// I/O bottleneck, no channel coordination.
+    ///
+    /// Requires both `memory-mapped` and `parallel` features.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use asset_io::{Asset, Updates, SegmentKind, ExclusionMode, merkle_root};
+    /// use sha2::Sha256;
+    ///
+    /// let asset = unsafe { Asset::open_with_mmap("large_video.mov")? };
+    /// let updates = Updates::new()
+    ///     .with_chunk_size(1024 * 1024)
+    ///     .exclude_from_processing(vec![SegmentKind::Jumbf], ExclusionMode::DataOnly);
+    ///
+    /// let chunk_hashes = asset.parallel_hash_mmap::<Sha256>(&updates)?;
+    /// let root = merkle_root::<Sha256>(&chunk_hashes);
+    /// ```
+    #[cfg(all(feature = "memory-mapped", feature = "parallel"))]
+    pub fn parallel_hash_mmap<H>(&self, updates: &Updates) -> Result<Vec<[u8; 32]>>
+    where
+        H: sha2::Digest + Clone + Send + Sync + Default,
+    {
+        use crate::segment::{ByteRange, DEFAULT_CHUNK_SIZE};
+        use rayon::prelude::*;
+        
+        // Check if mmap is available
+        if !self.structure.has_mmap() {
+            return Err(crate::Error::InvalidFormat(
+                "No memory map available - use open_with_mmap()".into(),
+            ));
+        }
+        
+        let chunk_size = updates.processing.effective_chunk_size().max(DEFAULT_CHUNK_SIZE);
+        let exclude_segments = &updates.processing.exclude_segments;
+        
+        // Calculate ranges to hash (everything except excluded segments)
+        let mut hash_ranges: Vec<ByteRange> = Vec::new();
+        let mut last_end = 0u64;
+        
+        for segment in self.structure.segments.iter() {
+            let is_excluded = exclude_segments.iter().any(|kind| segment.is_type(*kind));
+            
+            if is_excluded {
+                let loc = segment.location();
+                if loc.offset > last_end {
+                    hash_ranges.push(ByteRange::new(last_end, loc.offset - last_end));
+                }
+                last_end = loc.offset + loc.size;
+            }
+        }
+        
+        if last_end < self.structure.total_size {
+            hash_ranges.push(ByteRange::new(last_end, self.structure.total_size - last_end));
+        }
+        
+        // Split ranges into chunks
+        let mut chunks: Vec<(usize, ByteRange)> = Vec::new();
+        let mut chunk_idx = 0;
+        
+        for range in hash_ranges {
+            let mut offset = range.offset;
+            let end = range.offset + range.size;
+            
+            while offset < end {
+                let remaining = end - offset;
+                let size = remaining.min(chunk_size as u64);
+                chunks.push((chunk_idx, ByteRange::new(offset, size)));
+                offset += size;
+                chunk_idx += 1;
+            }
+        }
+        
+        // Hash in parallel - each thread reads directly from mmap
+        let structure = &self.structure;
+        let hashes: Vec<(usize, [u8; 32])> = chunks
+            .par_iter()
+            .map(|(idx, range)| {
+                let slice = structure
+                    .get_mmap_slice(*range)
+                    .expect("mmap slice should exist for computed range");
+                
+                let mut hasher = H::new();
+                hasher.update(slice);
+                let result = hasher.finalize();
+                let mut hash = [0u8; 32];
+                hash.copy_from_slice(&result[..32]);
+                (*idx, hash)
+            })
+            .collect();
+        
+        // Sort by index to maintain order (parallel collect may be unordered)
+        let mut sorted = hashes;
+        sorted.sort_by_key(|(idx, _)| *idx);
+        
+        Ok(sorted.into_iter().map(|(_, h)| h).collect())
+    }
+
     /// Hash the asset excluding specified segments (zero-copy with mmap)
     ///
     /// **Deprecated**: Use `read_with_processing()` instead for a unified API.

@@ -2,7 +2,7 @@
 //!
 //! Demonstrates using rayon with read_chunks() for parallel hashing of large files.
 //!
-//! Run with: cargo run --release --example parallel_hash --features "all-formats,parallel" -- <file>
+//! Run with: cargo run --release --example parallel_hash --features "all-formats,parallel,memory-mapped" -- <file>
 
 use asset_io::{Asset, ExclusionMode, SegmentKind, Updates};
 use std::time::Instant;
@@ -163,6 +163,40 @@ fn main() -> asset_io::Result<()> {
             "  Throughput: {:.2} GB/s",
             (total_bytes as f64 / 1_073_741_824.0) / elapsed.as_secs_f64()
         );
+        
+        // Memory-mapped parallel hash (true parallel I/O)
+        #[cfg(feature = "memory-mapped")]
+        {
+            println!("\n--- Memory-Mapped Parallel Hash (parallel_hash_mmap) ---");
+            
+            let start = Instant::now();
+            let asset = unsafe { Asset::open_with_mmap(&input)? };
+            let open_time = start.elapsed();
+            
+            let hash_start = Instant::now();
+            let hashes = asset.parallel_hash_mmap::<Sha256>(&updates)?;
+            let hash_time = hash_start.elapsed();
+            
+            let merkle_start = Instant::now();
+            let root3 = merkle_root::<Sha256>(&hashes);
+            let merkle_time = merkle_start.elapsed();
+            
+            let elapsed = start.elapsed();
+            
+            println!("  Merkle root: {:02x?}...", &root3[..8]);
+            println!("  Chunks: {}", hashes.len());
+            println!("  Open time: {:?}", open_time);
+            println!("  Hash time: {:?}", hash_time);
+            println!("  Merkle time: {:?}", merkle_time);
+            println!("  Total time: {:?}", elapsed);
+            println!(
+                "  Throughput: {:.2} GB/s",
+                (total_bytes as f64 / 1_073_741_824.0) / elapsed.as_secs_f64()
+            );
+            
+            let speedup = sequential_time.as_secs_f64() / elapsed.as_secs_f64();
+            println!("  Speedup: {:.2}x vs sequential", speedup);
+        }
     }
 
     #[cfg(not(feature = "parallel"))]

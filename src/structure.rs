@@ -83,6 +83,12 @@ impl Structure {
         })
     }
 
+    /// Check if a memory map is available
+    #[cfg(feature = "memory-mapped")]
+    pub fn has_mmap(&self) -> bool {
+        self.mmap.is_some()
+    }
+
     /// Add a segment and update indices
     pub fn add_segment(&mut self, segment: Segment) {
         let index = self.segments.len();
