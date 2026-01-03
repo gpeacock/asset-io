@@ -46,7 +46,7 @@
 //!
 //! Run: `cargo run --example c2pa --features xmp,png tests/fixtures/sample1.png`
 
-use asset_io::{update_segment_with_structure, Asset, ExclusionMode, SegmentKind, Updates};
+use asset_io::{Asset, ExclusionMode, SegmentKind, Updates};
 use c2pa::{
     assertions::{c2pa_action, Action, DataHash, DigitalSourceType},
     settings::Settings,
@@ -334,12 +334,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Update manifest in-place (file still open!)
     println!("✏️  Updating JUMBF in-place...");
-    update_segment_with_structure(
-        &mut output_file,
-        &structure,
-        SegmentKind::Jumbf,
-        final_manifest,
-    )?;
+    structure.update_segment(&mut output_file, SegmentKind::Jumbf, final_manifest)?;
 
     // IMPORTANT: Flush to ensure all bytes are written to disk before verification
     use std::io::Write;

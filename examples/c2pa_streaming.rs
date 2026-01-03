@@ -11,7 +11,7 @@
 //!
 //! Run with: cargo run --features jpeg,xmp,hashing --example c2pa_streaming
 
-use asset_io::{update_segment_with_structure, Asset, ExclusionMode, SegmentKind, Updates};
+use asset_io::{Asset, ExclusionMode, SegmentKind, Updates};
 use sha2::{Digest, Sha256};
 use std::fs::OpenOptions;
 
@@ -68,8 +68,7 @@ fn main() -> asset_io::Result<()> {
 
     // Step 7: Update JUMBF in-place (file still open!)
     println!("\n✏️  Updating JUMBF in-place...");
-    let bytes_written =
-        update_segment_with_structure(&mut output, &structure, SegmentKind::Jumbf, final_manifest)?;
+    let bytes_written = structure.update_segment(&mut output, SegmentKind::Jumbf, final_manifest)?;
     println!("✅ Updated {} bytes", bytes_written);
 
     // Step 8: Close output (automatic on drop)

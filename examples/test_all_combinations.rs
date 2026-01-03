@@ -498,7 +498,7 @@ mod tests {
     /// This tests the calculate_updated_structure + write + update path
     #[test]
     fn test_streaming_write_and_update() {
-        use asset_io::{update_segment_with_structure, SegmentKind};
+        use asset_io::SegmentKind;
         use std::io::{Seek, SeekFrom};
 
         let test_cases = vec![
@@ -567,13 +567,9 @@ mod tests {
                 .seek(SeekFrom::Start(0))
                 .expect("Failed to seek");
 
-            update_segment_with_structure(
-                &mut output_file,
-                &structure,
-                SegmentKind::Jumbf,
-                final_jumbf.clone(),
-            )
-            .expect(&format!("update_segment_with_structure failed for {}", name));
+            structure
+                .update_segment(&mut output_file, SegmentKind::Jumbf, final_jumbf.clone())
+                .expect(&format!("update_segment failed for {}", name));
 
             // Flush and close
             drop(output_file);

@@ -6,7 +6,7 @@ use crate::{
     segment::{ByteRange, ChunkedSegmentReader, Location, Segment, SegmentKind, DEFAULT_CHUNK_SIZE, MAX_SEGMENT_SIZE},
     MediaType,
 };
-use std::io::{Read, Seek, SeekFrom, Take};
+use std::io::{Read, Seek, SeekFrom, Take, Write};
 
 /// Represents the discovered structure of a parsed asset
 ///
@@ -472,5 +472,118 @@ impl Structure {
                 None
             }
         })
+    }
+
+    /// Update a segment in an already-written stream
+    ///
+    /// This is a low-level utility for updating specific segments after a file has been
+    /// written but before it's closed. It's designed for use with
+    /// [`crate::Asset::write_with_processing`] to enable efficient workflows like:
+    /// - C2PA: Write with placeholder → hash → generate manifest → update in-place
+    /// - XMP: Write file → calculate derived metadata → update XMP in-place
+    ///
+    /// The new data must fit within the existing segment's capacity. If smaller,
+    /// it will be zero-padded to maintain file structure.
+    ///
+    /// # Arguments
+    /// - `writer`: An open, seekable writer with the written file
+    /// - `kind`: The type of segment to update
+    /// - `data`: The new segment data
+    ///
+    /// # Returns
+    /// Number of bytes written (including padding)
+    ///
+    /// # Errors
+    /// - `InvalidFormat`: Segment not found or data too large
+    /// - I/O errors during seek/write
+    ///
+    /// # Example
+    /// ```no_run
+    /// use asset_io::{Asset, Updates, SegmentKind, ExclusionMode};
+    /// use sha2::{Sha256, Digest};
+    /// use std::fs::File;
+    ///
+    /// # fn main() -> asset_io::Result<()> {
+    /// let mut asset = Asset::open("input.jpg")?;
+    /// let mut output = File::create("output.jpg")?;
+    ///
+    /// // Write and hash with C2PA-compliant exclusions
+    /// let placeholder = vec![0u8; 20000];
+    /// let updates = Updates::new()
+    ///     .set_jumbf(placeholder)
+    ///     .exclude_from_processing(vec![SegmentKind::Jumbf], ExclusionMode::DataOnly);
+    ///
+    /// let mut hasher = Sha256::new();
+    /// let structure = asset.write_with_processing(
+    ///     &mut output,
+    ///     &updates,
+    ///     &mut |chunk| hasher.update(chunk),
+    /// )?;
+    ///
+    /// // Generate manifest and update in-place
+    /// let manifest = vec![/* final manifest with hash */];
+    /// structure.update_segment(&mut output, SegmentKind::Jumbf, manifest)?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn update_segment<W: std::io::Write + Seek>(
+        &self,
+        writer: &mut W,
+        kind: SegmentKind,
+        data: Vec<u8>,
+    ) -> Result<usize> {
+        use crate::error::Error;
+
+        // PNG requires special handling for CRC recalculation
+        #[cfg(feature = "png")]
+        if self.container == ContainerKind::Png {
+            return crate::containers::png_io::update_png_segment_in_stream(writer, self, kind, data);
+        }
+
+        // Find the segment
+        let segment_idx = match kind {
+            SegmentKind::Jumbf => self.c2pa_jumbf_index(),
+            SegmentKind::Xmp => self.xmp_index(),
+            _ => {
+                return Err(Error::InvalidFormat(format!(
+                    "Cannot update {:?} segments",
+                    kind
+                )))
+            }
+        }
+        .ok_or_else(|| Error::InvalidFormat(format!("No {:?} segment found", kind)))?;
+
+        let segment = &self.segments[segment_idx];
+
+        // Calculate total capacity across all ranges
+        let total_capacity: u64 = segment.ranges.iter().map(|r| r.size).sum();
+
+        // Validate size
+        if data.len() as u64 > total_capacity {
+            return Err(Error::InvalidFormat(format!(
+                "Data ({} bytes) exceeds capacity ({} bytes)",
+                data.len(),
+                total_capacity
+            )));
+        }
+
+        // Pad to exact capacity (preserves file structure)
+        let mut padded = data;
+        padded.resize(total_capacity as usize, 0);
+
+        // For non-PNG formats, just write the data directly
+        let mut offset = 0;
+        for range in &segment.ranges {
+            writer.seek(SeekFrom::Start(range.offset))?;
+            let to_write = (padded.len() - offset).min(range.size as usize);
+            writer.write_all(&padded[offset..offset + to_write])?;
+            offset += to_write;
+            if offset >= padded.len() {
+                break;
+            }
+        }
+
+        writer.flush()?;
+        Ok(padded.len())
     }
 }
