@@ -198,8 +198,9 @@ cargo run --release --example hash_benchmark --features jpeg
 | `Asset` | Main entry point - open, read, write assets |
 | `Updates` | Builder for metadata modifications |
 | `Structure` | Parsed file structure with segment info |
-| `MiniXmp` | Lightweight XMP parser/modifier |
-| `ProcessingWriter` | Write wrapper with byte callbacks |
+| `MiniXmp` | Lightweight XMP parser/modifier (requires `xmp` feature) |
+| `ExifInfo` | Parsed EXIF metadata (requires `exif` feature) |
+| `Thumbnail` | Embedded thumbnail data |
 
 ### Key Methods
 

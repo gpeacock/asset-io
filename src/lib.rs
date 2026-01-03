@@ -109,13 +109,11 @@ mod error;
 mod formats;
 mod media_type;
 mod processing_writer;
-pub use processing_writer::ProcessingWriter;
 mod segment;
 mod structure;
-pub mod thumbnail;
+mod thumbnail;
 #[cfg(feature = "exif")]
 mod tiff;
-#[cfg(feature = "xmp")]
 #[cfg(feature = "xmp")]
 mod xmp;
 #[cfg(feature = "xmp")]
@@ -123,16 +121,16 @@ pub use xmp::MiniXmp;
 
 pub use asset::{Asset, AssetBuilder};
 pub use error::{Error, Result};
-pub use formats::ContainerIO;
-pub use media_type::MediaType;
-pub use segment::{
-    ByteRange, ChunkedSegmentReader, ExclusionMode, LazyData, Location, Segment, SegmentKind,
-    SegmentMetadata, DEFAULT_CHUNK_SIZE, MAX_SEGMENT_SIZE,
-};
+pub use segment::{ByteRange, ExclusionMode, Segment, SegmentKind};
 pub use structure::Structure;
-pub use thumbnail::{EmbeddedThumbnailInfo, Thumbnail, ThumbnailFormat};
+pub use thumbnail::{Thumbnail, ThumbnailFormat};
 #[cfg(feature = "exif")]
 pub use tiff::ExifInfo;
+
+// Internal re-exports
+pub(crate) use formats::ContainerIO;
+pub(crate) use media_type::MediaType;
+pub(crate) use segment::{ChunkedSegmentReader, SegmentMetadata, DEFAULT_CHUNK_SIZE};
 
 // Container and handlers are exported by the register_containers! macro below
 
@@ -146,65 +144,33 @@ pub mod test_utils;
 /// processing parameters. Used by both `read_with_processing()` and
 /// `write_with_processing()` for symmetric read/write operations.
 ///
-/// # Example
-///
-/// ```no_run
-/// use asset_io::{ProcessingOptions, SegmentKind, ExclusionMode};
-///
-/// let options = ProcessingOptions::new()
-///     .exclude(vec![SegmentKind::Jumbf])
-///     .exclusion_mode(ExclusionMode::DataOnly)
-///     .chunk_size(65536);
-/// ```
+/// Use the builder methods on `Updates` to configure these options.
 #[derive(Debug, Clone, Default)]
-pub struct ProcessingOptions {
+pub(crate) struct ProcessingOptions {
     /// Chunk size for streaming operations (default: DEFAULT_CHUNK_SIZE = 64KB)
-    pub chunk_size: Option<usize>,
+    pub(crate) chunk_size: Option<usize>,
 
     /// Segments to exclude from processing (e.g., for hashing)
-    pub exclude_segments: Vec<SegmentKind>,
+    pub(crate) exclude_segments: Vec<SegmentKind>,
 
     /// How to handle exclusions (default: EntireSegment)
-    pub exclusion_mode: ExclusionMode,
+    pub(crate) exclusion_mode: ExclusionMode,
     // Future: include_segments for explicit inclusion
 }
 
 impl ProcessingOptions {
-    /// Create new ProcessingOptions with defaults
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Set the chunk size for streaming operations
-    pub fn chunk_size(mut self, size: usize) -> Self {
-        self.chunk_size = Some(size);
-        self
-    }
-
-    /// Set segments to exclude from processing
-    pub fn exclude(mut self, segments: Vec<SegmentKind>) -> Self {
-        self.exclude_segments = segments;
-        self
-    }
-
-    /// Set the exclusion mode (EntireSegment or DataOnly)
-    pub fn exclusion_mode(mut self, mode: ExclusionMode) -> Self {
-        self.exclusion_mode = mode;
-        self
-    }
-
     /// Get the effective chunk size (uses DEFAULT_CHUNK_SIZE if not set)
-    pub fn effective_chunk_size(&self) -> usize {
+    pub(crate) fn effective_chunk_size(&self) -> usize {
         self.chunk_size.unwrap_or(DEFAULT_CHUNK_SIZE)
     }
 }
 
-/// Metadata update strategy
+/// Metadata update strategy (internal)
 ///
 /// Specifies how to handle a particular type of metadata when writing an asset.
 /// By default, all metadata is kept unchanged.
 #[derive(Debug, Clone, Default)]
-pub enum MetadataUpdate {
+pub(crate) enum MetadataUpdate {
     /// Keep existing metadata (default)
     #[default]
     Keep,
@@ -245,15 +211,15 @@ pub enum MetadataUpdate {
 /// ```
 #[derive(Debug, Default)]
 pub struct Updates {
-    /// XMP data update strategy
-    pub xmp: MetadataUpdate,
+    /// XMP data update strategy (use builder methods to modify)
+    pub(crate) xmp: MetadataUpdate,
 
-    /// JUMBF data update strategy
-    pub jumbf: MetadataUpdate,
+    /// JUMBF data update strategy (use builder methods to modify)
+    pub(crate) jumbf: MetadataUpdate,
 
     /// Processing options (chunk size, exclusions, etc.)
     /// Used by both read_with_processing() and write_with_processing()
-    pub processing: ProcessingOptions,
+    pub(crate) processing: ProcessingOptions,
 }
 
 impl Updates {
@@ -425,38 +391,11 @@ impl Updates {
         self
     }
 
-    /// Set custom processing options
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// use asset_io::{Updates, ProcessingOptions, SegmentKind, ExclusionMode};
-    ///
-    /// let options = ProcessingOptions::new()
-    ///     .exclude(vec![SegmentKind::Jumbf])
-    ///     .exclusion_mode(ExclusionMode::DataOnly);
-    ///
-    /// let updates = Updates::new()
-    ///     .set_jumbf(vec![0u8; 1000])
-    ///     .with_processing(options);
-    /// ```
-    pub fn with_processing(mut self, options: ProcessingOptions) -> Self {
-        self.processing = options;
-        self
-    }
 }
 
 // Re-export generated items from formats module
 pub(crate) use formats::{detect_container, get_handler, Handler};
-pub use formats::{detect_from_extension, detect_from_mime, Container};
-
-// Re-export container handlers at crate root
-#[cfg(feature = "bmff")]
-pub use formats::bmff_io::BmffIO;
-#[cfg(feature = "jpeg")]
-pub use formats::jpeg_io::JpegIO;
-#[cfg(feature = "png")]
-pub use formats::png_io::PngIO;
+pub use formats::Container;
 /// Update a segment in an already-written stream using structure information
 ///
 /// This is a low-level utility for updating specific segments after a file has been
