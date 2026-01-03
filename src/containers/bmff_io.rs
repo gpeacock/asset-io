@@ -665,8 +665,10 @@ impl BmffIO {
                     if uuid.as_slice() == XMP_UUID {
                         // XMP UUID box found
                         // XMP boxes DON'T have version/flags, data starts right after UUID
-                        let data_offset = box_info.data.offset + HEADER_SIZE + 16;
-                        let data_size = box_info.data.size - HEADER_SIZE - 16;
+                        // box_info.data.offset points to START of box (before size+type header)
+                        // After header (8) + UUID (16) = 24 bytes, XMP data starts
+                        let data_offset = box_info.data.offset + 8 + 16;
+                        let data_size = box_info.data.size - 8 - 16;
                         structure.add_segment(Segment::with_ranges(
                             vec![ByteRange::new(data_offset, data_size)],
                             SegmentKind::Xmp,
@@ -676,17 +678,18 @@ impl BmffIO {
                         // C2PA UUID box found (contains JUMBF)
                         // Structure: header(8) + uuid(16) + version/flags(4) + purpose(var+\0) + merkle_offset(8) + data
                         //
-                        // We need to:
-                        // 1. Skip past version/flags (4 bytes after UUID)
-                        // 2. Read purpose string (scan for null terminator)
-                        // 3. Skip merkle offset (8 bytes)
-                        // 4. Remaining bytes are the JUMBF data
+                        // box_info.data.offset points to START of box (before size+type header)
+                        // After header (8) + UUID (16) + version/flags (4) = 28 bytes, we have:
+                        // - purpose string (variable, null-terminated)
+                        // - merkle offset (8 bytes)
+                        // - JUMBF data
 
                         let box_offset = box_info.data.offset;
                         let box_size = box_info.data.size;
 
-                        let version_flags_offset = box_offset + HEADER_SIZE + 16;
-                        source.seek(SeekFrom::Start(version_flags_offset + 4))?; // Skip version/flags
+                        // Seek to after header + UUID + version/flags
+                        let version_flags_offset = box_offset + 8 + 16 + 4;
+                        source.seek(SeekFrom::Start(version_flags_offset))?;
 
                         // Read purpose string (null-terminated)
                         let mut purpose_bytes = Vec::new();
