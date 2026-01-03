@@ -585,6 +585,74 @@ impl ProcessingChunk {
     }
 }
 
+/// Specification for a chunk to be processed - metadata only, no data
+///
+/// This is a lightweight alternative to [`ProcessingChunk`] that describes
+/// what to read without actually reading it. This enables parallel I/O
+/// where each worker can open its own file handle and read independently.
+///
+/// # Example
+///
+/// ```ignore
+/// use asset_io::{Asset, Updates, SegmentKind, ExclusionMode};
+/// use rayon::prelude::*;
+/// use sha2::{Sha256, Digest};
+/// use std::fs::File;
+/// use std::io::{Read, Seek, SeekFrom};
+///
+/// let asset = Asset::open("large_video.mov")?;
+/// let updates = Updates::new()
+///     .with_chunk_size(1024 * 1024)
+///     .exclude_from_processing(vec![SegmentKind::Jumbf], ExclusionMode::DataOnly);
+///
+/// let specs = asset.chunk_specs(&updates);
+/// let path = "large_video.mov".to_string();
+///
+/// // Each thread opens its own file handle - true parallel I/O!
+/// let hashes: Vec<[u8; 32]> = specs
+///     .into_par_iter()
+///     .filter(|s| !s.excluded)
+///     .map(|spec| {
+///         let mut file = File::open(&path).unwrap();
+///         file.seek(SeekFrom::Start(spec.offset)).unwrap();
+///         let mut buffer = vec![0u8; spec.size];
+///         file.read_exact(&mut buffer).unwrap();
+///
+///         let mut hasher = Sha256::new();
+///         hasher.update(&buffer);
+///         hasher.finalize().into()
+///     })
+///     .collect();
+/// ```
+#[derive(Debug, Clone, Copy)]
+pub struct ChunkSpec {
+    /// Index of this chunk (for ordering results)
+    pub index: usize,
+    /// Byte offset in the file
+    pub offset: u64,
+    /// Size in bytes
+    pub size: usize,
+    /// Whether this chunk overlaps with an exclusion range
+    pub excluded: bool,
+}
+
+impl ChunkSpec {
+    /// Create a new chunk specification
+    pub fn new(index: usize, offset: u64, size: usize, excluded: bool) -> Self {
+        Self {
+            index,
+            offset,
+            size,
+            excluded,
+        }
+    }
+
+    /// Get the byte range covered by this chunk
+    pub fn range(&self) -> ByteRange {
+        ByteRange::new(self.offset, self.size as u64)
+    }
+}
+
 /// Build a Merkle tree root hash from a list of leaf hashes
 ///
 /// This is useful for C2PA BMFF v3 hash assertions which use a Merkle tree

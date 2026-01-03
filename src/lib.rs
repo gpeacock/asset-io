@@ -96,7 +96,7 @@ mod xmp;
 pub use asset::{Asset, AssetBuilder};
 pub use containers::ContainerKind;
 pub use error::{Error, Result};
-pub use segment::{ByteRange, ExclusionMode, ProcessingChunk, Segment, SegmentKind};
+pub use segment::{ByteRange, ChunkSpec, ExclusionMode, ProcessingChunk, Segment, SegmentKind};
 pub use structure::Structure;
 pub use thumbnail::{Thumbnail, ThumbnailKind};
 pub use updates::Updates;

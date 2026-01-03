@@ -163,6 +163,39 @@ fn main() -> asset_io::Result<()> {
             "  Throughput: {:.2} GB/s",
             (total_bytes as f64 / 1_073_741_824.0) / elapsed.as_secs_f64()
         );
+
+        // Parallel hash with file handle factory (true parallel I/O without mmap)
+        println!("\n--- Parallel Hash with Factory (parallel_hash_with) ---");
+        {
+            let asset = Asset::open(&input)?;
+            let input_path = input.clone();
+            
+            let start = Instant::now();
+            let hashes = asset.parallel_hash_with::<Sha256, _, _>(
+                &updates,
+                || std::fs::File::open(&input_path),
+            )?;
+            let hash_time = start.elapsed();
+            
+            let merkle_start = Instant::now();
+            let root3 = merkle_root::<Sha256>(&hashes);
+            let merkle_time = merkle_start.elapsed();
+            
+            let elapsed = start.elapsed();
+            
+            println!("  Merkle root: {:02x?}...", &root3[..8]);
+            println!("  Chunks: {}", hashes.len());
+            println!("  Hash time: {:?}", hash_time);
+            println!("  Merkle time: {:?}", merkle_time);
+            println!("  Total time: {:?}", elapsed);
+            println!(
+                "  Throughput: {:.2} GB/s",
+                (total_bytes as f64 / 1_073_741_824.0) / elapsed.as_secs_f64()
+            );
+            
+            let speedup = sequential_time.as_secs_f64() / elapsed.as_secs_f64();
+            println!("  Speedup: {:.2}x vs sequential", speedup);
+        }
         
         // Memory-mapped parallel hash (true parallel I/O)
         #[cfg(feature = "memory-mapped")]

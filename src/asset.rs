@@ -841,6 +841,167 @@ impl<R: Read + Seek> Asset<R> {
         Ok(sorted.into_iter().map(|(_, h)| h).collect())
     }
 
+    /// Get chunk specifications for parallel processing
+    ///
+    /// Returns a list of [`ChunkSpec`] describing the chunks to process,
+    /// without reading any data. This enables true parallel I/O where each
+    /// worker thread can open its own file handle and read independently.
+    ///
+    /// This is more efficient than [`read_chunks()`](Self::read_chunks) for
+    /// parallel hashing because it avoids the sequential I/O bottleneck.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use asset_io::{Asset, Updates, SegmentKind, ExclusionMode, ChunkSpec};
+    /// use rayon::prelude::*;
+    /// use sha2::{Sha256, Digest};
+    /// use std::fs::File;
+    /// use std::io::{Read, Seek, SeekFrom};
+    ///
+    /// let asset = Asset::open("large_video.mov")?;
+    /// let updates = Updates::new()
+    ///     .with_chunk_size(1024 * 1024)
+    ///     .exclude_from_processing(vec![SegmentKind::Jumbf], ExclusionMode::DataOnly);
+    ///
+    /// let specs = asset.chunk_specs(&updates);
+    /// let path = "large_video.mov".to_string();
+    ///
+    /// // Each thread opens its own file handle - true parallel I/O!
+    /// let hashes: Vec<_> = specs
+    ///     .into_par_iter()
+    ///     .filter(|s| !s.excluded)
+    ///     .map(|spec| {
+    ///         let mut file = File::open(&path).unwrap();
+    ///         file.seek(SeekFrom::Start(spec.offset)).unwrap();
+    ///         let mut buffer = vec![0u8; spec.size];
+    ///         file.read_exact(&mut buffer).unwrap();
+    ///         // hash buffer...
+    ///     })
+    ///     .collect();
+    /// ```
+    pub fn chunk_specs(&self, updates: &Updates) -> Vec<crate::ChunkSpec> {
+        use crate::segment::{ByteRange, ChunkSpec, DEFAULT_CHUNK_SIZE};
+        
+        let chunk_size = updates.processing.effective_chunk_size().max(DEFAULT_CHUNK_SIZE);
+        let exclude_segments = &updates.processing.exclude_segments;
+        let exclusion_mode = updates.processing.exclusion_mode;
+        
+        // Calculate exclusion ranges
+        let exclusion_ranges: Vec<ByteRange> = exclude_segments
+            .iter()
+            .filter_map(|kind| {
+                self.structure.segments.iter().find(|s| s.is_type(*kind))
+            })
+            .map(|segment| {
+                let loc = segment.location();
+                if exclusion_mode == crate::ExclusionMode::DataOnly {
+                    loc
+                } else {
+                    loc
+                }
+            })
+            .collect();
+        
+        // Build chunk specs
+        let mut specs = Vec::new();
+        let mut offset = 0u64;
+        let mut index = 0usize;
+        
+        while offset < self.structure.total_size {
+            let remaining = self.structure.total_size - offset;
+            let size = chunk_size.min(remaining as usize);
+            
+            // Check if this chunk overlaps with any exclusion range
+            let chunk_range = ByteRange::new(offset, size as u64);
+            let excluded = exclusion_ranges.iter().any(|excl| {
+                let chunk_end = chunk_range.offset + chunk_range.size;
+                let excl_end = excl.offset + excl.size;
+                chunk_range.offset < excl_end && chunk_end > excl.offset
+            });
+            
+            specs.push(ChunkSpec::new(index, offset, size, excluded));
+            
+            offset += size as u64;
+            index += 1;
+        }
+        
+        specs
+    }
+
+    /// Hash in parallel with custom file handle factory
+    ///
+    /// Each rayon worker calls the factory to get its own file handle,
+    /// enabling true parallel I/O. This is faster than [`parallel_hash()`](Self::parallel_hash)
+    /// which reads all data sequentially before hashing.
+    ///
+    /// For memory-mapped files, use [`parallel_hash_mmap()`](Self::parallel_hash_mmap) instead,
+    /// which is even faster as it avoids the kernel→userspace copy.
+    ///
+    /// Requires the `parallel` feature.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use asset_io::{Asset, Updates, SegmentKind, ExclusionMode, merkle_root};
+    /// use sha2::Sha256;
+    /// use std::fs::File;
+    ///
+    /// let asset = Asset::open("large_video.mov")?;
+    /// let updates = Updates::new()
+    ///     .with_chunk_size(1024 * 1024)
+    ///     .exclude_from_processing(vec![SegmentKind::Jumbf], ExclusionMode::DataOnly);
+    ///
+    /// let path = "large_video.mov".to_string();
+    /// let chunk_hashes = asset.parallel_hash_with::<Sha256, _, _>(
+    ///     &updates,
+    ///     || File::open(&path),
+    /// )?;
+    /// let root = merkle_root::<Sha256>(&chunk_hashes);
+    /// ```
+    #[cfg(feature = "parallel")]
+    pub fn parallel_hash_with<H, F, S>(
+        &self,
+        updates: &Updates,
+        open_source: F,
+    ) -> Result<Vec<[u8; 32]>>
+    where
+        H: sha2::Digest + Default + Send + Sync,
+        F: Fn() -> std::io::Result<S> + Sync,
+        S: Read + Seek + Send,
+    {
+        use rayon::prelude::*;
+        
+        let specs = self.chunk_specs(updates);
+        
+        // Hash in parallel - each thread opens its own file handle
+        let results: Result<Vec<_>> = specs
+            .into_par_iter()
+            .filter(|s| !s.excluded)
+            .map(|spec| -> Result<(usize, [u8; 32])> {
+                let mut source = open_source().map_err(crate::Error::Io)?;
+                source.seek(SeekFrom::Start(spec.offset)).map_err(crate::Error::Io)?;
+                
+                let mut buffer = vec![0u8; spec.size];
+                source.read_exact(&mut buffer).map_err(crate::Error::Io)?;
+                
+                let mut hasher = H::new();
+                hasher.update(&buffer);
+                let result = hasher.finalize();
+                let mut hash = [0u8; 32];
+                hash.copy_from_slice(&result[..32]);
+                Ok((spec.index, hash))
+            })
+            .collect();
+        
+        let mut hashes = results?;
+        
+        // Sort by index to maintain order
+        hashes.sort_by_key(|(idx, _)| *idx);
+        
+        Ok(hashes.into_iter().map(|(_, h)| h).collect())
+    }
+
     /// Hash the asset excluding specified segments (zero-copy with mmap)
     ///
     /// **Deprecated**: Use `read_with_processing()` instead for a unified API.
