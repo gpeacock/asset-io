@@ -52,11 +52,8 @@ fn test_mmap_bounds_checking_with_overflow() {
     }
 
     // Open with mmap enabled
-    let asset = Asset::builder()
-        .path(temp_path)
-        .memory_mapped(true)
-        .build()
-        .expect("Failed to open with mmap");
+    // SAFETY: Test file is read-only during test
+    let asset = unsafe { Asset::open_with_mmap(temp_path).expect("Failed to open with mmap") };
 
     let structure = asset.structure();
 

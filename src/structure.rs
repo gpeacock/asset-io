@@ -6,7 +6,7 @@ use crate::{
     segment::{ByteRange, ChunkedSegmentReader, Location, Segment, SegmentKind, DEFAULT_CHUNK_SIZE, MAX_SEGMENT_SIZE},
     MediaType,
 };
-use std::io::{Read, Seek, SeekFrom, Take, Write};
+use std::io::{Read, Seek, SeekFrom, Take};
 
 /// Represents the discovered structure of a parsed asset
 ///

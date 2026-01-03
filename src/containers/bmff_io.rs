@@ -553,6 +553,7 @@ impl BmffIO {
         Self
     }
 
+    #[allow(dead_code)]
     pub fn container_type() -> ContainerKind {
         ContainerKind::Bmff
     }

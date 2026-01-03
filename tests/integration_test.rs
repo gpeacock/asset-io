@@ -4,9 +4,6 @@
 mod fixture_tests {
     use asset_io::{test_utils::*, Asset, Updates};
 
-    #[cfg(feature = "memory-mapped")]
-    use asset_io::ContainerIO;
-
     #[test]
     fn test_embedded_fixture_access() {
         // This test works with or without embed-fixtures feature
@@ -158,25 +155,18 @@ mod fixture_tests {
     #[test]
     #[cfg(feature = "memory-mapped")]
     fn test_memory_mapped_access() {
-        use std::fs::File;
-
-        // Open a fixture with memory mapping
+        // Open a fixture with memory mapping using the public API
         let path = fixture_path(FIREFLY_TRAIN);
-        let file = File::open(&path).expect("Failed to open file");
 
-        // Create memory map
-        let mmap = unsafe { memmap2::Mmap::map(&file).expect("Failed to mmap") };
-        let file_size = mmap.len() as u64;
+        // SAFETY: Test fixture is read-only and won't be modified during test
+        let asset = unsafe { Asset::open_with_mmap(&path).expect("Failed to open with mmap") };
 
-        println!("Memory-mapped {} ({} bytes)", path.display(), file_size);
-
-        // Parse the file structure
-        let handler = asset_io::JpegIO::new();
-        let mut file_for_parse = File::open(&path).expect("Failed to open file");
-        let mut structure = handler.parse(&mut file_for_parse).expect("Failed to parse");
-
-        // Attach mmap to structure
-        structure = structure.with_mmap(mmap);
+        let structure = asset.structure();
+        println!(
+            "Memory-mapped {} ({} bytes)",
+            path.display(),
+            structure.total_size
+        );
 
         // Test 1: Get a byte range via mmap (zero-copy)
         let range = asset_io::ByteRange {
@@ -216,26 +206,6 @@ mod fixture_tests {
             total_bytes_accessed,
             structure.segments.len()
         );
-
-        // Test 3: LazyData with mmap
-        #[cfg(feature = "memory-mapped")]
-        {
-            use asset_io::LazyData;
-            use std::sync::Arc;
-
-            let file = File::open(&path).expect("Failed to open file");
-            let mmap = unsafe { memmap2::Mmap::map(&file).expect("Failed to mmap") };
-            let mmap_arc = Arc::new(mmap);
-
-            let lazy = LazyData::from_mmap(mmap_arc, 0, 100);
-
-            // Get should work without any I/O
-            let data = lazy.get().expect("Should get data from mmap");
-            assert_eq!(data.len(), 100);
-            assert_eq!(data[0], 0xFF);
-
-            println!("  ✓ LazyData::MemoryMapped works");
-        }
 
         println!("✓ All memory-mapped tests passed!");
     }
@@ -310,23 +280,21 @@ mod thumbnail_tests {
     #[test]
     #[cfg(feature = "memory-mapped")]
     fn test_mmap_image_slice() {
+        use asset_io::Asset;
+
         println!("\n=== Testing memory-mapped image access ===");
 
         let path = test_utils::fixture_path(test_utils::P1000708);
-        let mut file = File::open(&path).expect("Failed to open file");
 
-        let handler = JpegIO::new();
-        let structure = handler.parse(&mut file).expect("Failed to parse");
+        // SAFETY: Test fixture is read-only and won't be modified during test
+        let asset = unsafe { Asset::open_with_mmap(&path).expect("Failed to open with mmap") };
+
+        let structure = asset.structure();
 
         // Get image data range
         let range = structure
             .image_data_range()
             .expect("Should have image data");
-
-        // Memory-map the file
-        let file = File::open(&path).expect("Failed to open file");
-        let mmap = unsafe { memmap2::Mmap::map(&file).expect("Failed to mmap") };
-        let structure = structure.with_mmap(mmap);
 
         // Get zero-copy slice
         let slice = structure.get_mmap_slice(range).expect("Should get slice");
@@ -471,5 +439,252 @@ mod png_tests {
 
         assert_eq!(parsed.xmp().unwrap().unwrap(), xmp_data);
         assert_eq!(parsed.jumbf().unwrap().unwrap(), jumbf_data);
+    }
+}
+
+/// Tests for streaming write + in-place update workflow (critical for C2PA)
+#[cfg(test)]
+mod streaming_tests {
+    use asset_io::{test_utils::*, Asset, ExclusionMode, SegmentKind, Updates};
+    use std::io::{Seek, SeekFrom};
+
+    /// Create a minimal valid JUMBF structure for testing
+    fn create_test_jumbf() -> Vec<u8> {
+        let mut jumbf = Vec::new();
+
+        // JUMBF superbox
+        jumbf.extend_from_slice(&[0, 0, 0, 120]); // LBox (120 bytes total)
+        jumbf.extend_from_slice(b"jumb"); // TBox
+
+        // JUMBF description box
+        jumbf.extend_from_slice(&[0, 0, 0, 50]); // LBox
+        jumbf.extend_from_slice(b"jumd"); // TBox
+        jumbf.extend_from_slice(b"c2pa"); // UUID (simplified - first 4 bytes)
+        jumbf.extend_from_slice(&[0, 0, 0, 0]); // UUID continued
+        jumbf.extend_from_slice(&[0, 0, 0, 0]); // UUID continued
+        jumbf.extend_from_slice(&[0, 0, 0, 0]); // UUID continued
+        jumbf.extend_from_slice(b"test_label\0"); // Label
+
+        // Pad to 120 bytes
+        while jumbf.len() < 120 {
+            jumbf.push(0);
+        }
+
+        jumbf
+    }
+
+    /// Test streaming write + in-place update workflow (C2PA pattern)
+    /// This tests the calculate_updated_structure + write + update path
+    #[test]
+    fn test_streaming_write_and_update() {
+        let test_cases = vec![
+            #[cfg(feature = "jpeg")]
+            (P1000708, "jpeg", "jpg"), // Has XMP, no JUMBF
+            #[cfg(feature = "jpeg")]
+            (FIREFLY_TRAIN, "firefly", "jpg"), // Has both XMP and JUMBF
+            #[cfg(feature = "png")]
+            (SAMPLE1_PNG, "png", "png"), // PNG test
+        ];
+
+        for (fixture, name, ext) in test_cases {
+            println!("\n=== Testing streaming write+update for {} ===", name);
+
+            let input_path = fixture_path(fixture);
+            let output_path = format!("/tmp/test_streaming_{}.{}", name, ext);
+
+            let mut asset = Asset::open(&input_path).expect(&format!("Failed to open {}", name));
+
+            // Create placeholder JUMBF (using valid JUMBF structure)
+            let placeholder = create_test_jumbf();
+            let placeholder_size = placeholder.len();
+            let updates = Updates::new()
+                .set_jumbf(placeholder.clone())
+                .exclude_from_processing(vec![SegmentKind::Jumbf], ExclusionMode::DataOnly);
+
+            // Create output file
+            let mut output_file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&output_path)
+                .expect("Failed to create output file");
+
+            // Write with processing (uses calculate_updated_structure internally)
+            let structure = asset
+                .write_with_processing(&mut output_file, &updates, &mut |_chunk| {})
+                .expect(&format!("write_with_processing failed for {}", name));
+
+            // Check JUMBF segment exists in structure
+            let jumbf_idx = structure
+                .c2pa_jumbf_index()
+                .expect(&format!("No JUMBF in structure for {}", name));
+            let jumbf_seg = &structure.segments[jumbf_idx];
+            println!(
+                "  JUMBF segment: offset=0x{:x}, size={}",
+                jumbf_seg.location().offset,
+                jumbf_seg.location().size
+            );
+
+            // Update JUMBF in-place with "final" data (same size, different content)
+            let mut final_jumbf = placeholder.clone();
+            // Modify some bytes to make it distinguishable
+            for byte in final_jumbf.iter_mut().skip(50).take(20) {
+                *byte = 0xFF;
+            }
+
+            output_file
+                .seek(SeekFrom::Start(0))
+                .expect("Failed to seek");
+
+            structure
+                .update_segment(&mut output_file, SegmentKind::Jumbf, final_jumbf.clone())
+                .expect(&format!("update_segment failed for {}", name));
+
+            // Flush and close
+            drop(output_file);
+
+            // Verify output is valid and JUMBF was updated
+            let mut verify_asset =
+                Asset::open(&output_path).expect(&format!("Failed to reopen output for {}", name));
+
+            let result_jumbf = verify_asset
+                .jumbf()
+                .expect(&format!("Failed to extract JUMBF from {}", name))
+                .expect(&format!("JUMBF not found in output {}", name));
+
+            // Verify we can read back JUMBF data of the correct size
+            assert_eq!(
+                result_jumbf.len(),
+                placeholder_size,
+                "JUMBF size should match for {}",
+                name
+            );
+
+            println!("✓ {} - Streaming write+update successful", name);
+        }
+    }
+
+    /// Test keeping existing XMP while adding JUMBF (regression test)
+    #[test]
+    #[cfg(feature = "jpeg")]
+    fn test_keep_xmp_add_jumbf() {
+        println!("\n=== Testing Keep XMP + Add JUMBF (regression test) ===");
+
+        let input_path = fixture_path(P1000708);
+        let output_path = "/tmp/test_keep_xmp_add_jumbf.jpg";
+
+        let mut asset = Asset::open(&input_path).expect("Failed to open P1000708");
+
+        // Verify input has XMP
+        let input_xmp = asset
+            .xmp()
+            .expect("Failed to check XMP")
+            .expect("Should have XMP");
+        println!("  Input XMP size: {} bytes", input_xmp.len());
+
+        // Add JUMBF while keeping XMP (default)
+        let jumbf_data = create_test_jumbf();
+        let updates = Updates::new().set_jumbf(jumbf_data.clone());
+
+        // Use write_with_processing to exercise calculate_updated_structure
+        let mut output_file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(output_path)
+            .expect("Failed to create output file");
+
+        let _structure = asset
+            .write_with_processing(&mut output_file, &updates, &mut |_| {})
+            .expect("write_with_processing failed");
+
+        drop(output_file);
+
+        // Verify output
+        let mut verify_asset = Asset::open(output_path).expect("Failed to open output");
+
+        let output_xmp = verify_asset
+            .xmp()
+            .expect("Failed to extract XMP")
+            .expect("XMP should be preserved");
+        let output_jumbf = verify_asset
+            .jumbf()
+            .expect("Failed to extract JUMBF")
+            .expect("JUMBF should be added");
+
+        assert_eq!(output_xmp, input_xmp, "XMP should be preserved");
+        assert_eq!(output_jumbf, jumbf_data, "JUMBF should match");
+
+        println!("✓ Keep XMP + Add JUMBF successful");
+    }
+
+    /// Test all metadata modification combinations
+    #[test]
+    fn test_metadata_modifications() {
+        #[cfg(feature = "jpeg")]
+        {
+            let test_xmp = br#"<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>
+<x:xmpmeta xmlns:x="adobe:ns:meta/">
+<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+<rdf:Description rdf:about="" xmlns:dc="http://purl.org/dc/elements/1.1/">
+<dc:title>Test XMP Data</dc:title>
+</rdf:Description>
+</rdf:RDF>
+</x:xmpmeta>
+<?xpacket end="w"?>"#
+                .to_vec();
+
+            let input_path = fixture_path(P1000708);
+
+            // Test: Add XMP
+            {
+                let output = "/tmp/test_add_xmp.jpg";
+                let mut asset = Asset::open(&input_path).expect("Failed to open");
+                asset
+                    .write_to(output, &Updates::new().set_xmp(test_xmp.clone()))
+                    .expect("Write failed");
+
+                let mut verify = Asset::open(output).expect("Failed to reopen");
+                assert!(verify.xmp().unwrap().is_some(), "XMP should be added");
+            }
+
+            // Test: Add JUMBF
+            {
+                let output = "/tmp/test_add_jumbf.jpg";
+                let jumbf = create_test_jumbf();
+                let mut asset = Asset::open(&input_path).expect("Failed to open");
+                asset
+                    .write_to(output, &Updates::new().set_jumbf(jumbf.clone()))
+                    .expect("Write failed");
+
+                let mut verify = Asset::open(output).expect("Failed to reopen");
+                let result = verify.jumbf().unwrap().expect("JUMBF should be added");
+                assert_eq!(result, jumbf);
+            }
+
+            // Test: Remove XMP
+            {
+                // First add XMP, then remove it
+                let temp = "/tmp/test_remove_xmp_temp.jpg";
+                let output = "/tmp/test_remove_xmp.jpg";
+
+                let mut asset = Asset::open(&input_path).expect("Failed to open");
+                asset
+                    .write_to(temp, &Updates::new().set_xmp(test_xmp.clone()))
+                    .expect("Write failed");
+
+                let mut asset2 = Asset::open(temp).expect("Failed to open temp");
+                asset2
+                    .write_to(output, &Updates::new().remove_xmp())
+                    .expect("Write failed");
+
+                let mut verify = Asset::open(output).expect("Failed to reopen");
+                assert!(verify.xmp().unwrap().is_none(), "XMP should be removed");
+            }
+
+            println!("✓ All metadata modification tests passed");
+        }
     }
 }

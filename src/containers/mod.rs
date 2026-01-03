@@ -33,6 +33,7 @@ pub enum ContainerKind {
 ///
 /// Each implementation handles one container format (e.g., JPEG, PNG, BMFF) and can
 /// support multiple media types within that container.
+#[allow(dead_code)]
 pub trait ContainerIO: Send + Sync {
     /// ContainerKind type this I/O implementation manages
     fn container_type() -> ContainerKind
@@ -423,6 +424,7 @@ macro_rules! register_containers {
         }
 
         /// Detect container from file extension
+        #[allow(dead_code)]
         pub fn detect_from_extension(ext: &str) -> Option<ContainerKind> {
             let ext_lower = ext.to_lowercase();
             $(
@@ -435,6 +437,7 @@ macro_rules! register_containers {
         }
 
         /// Detect container from MIME type
+        #[allow(dead_code)]
         pub fn detect_from_mime(mime: &str) -> Option<ContainerKind> {
             $(
                 $(#[$meta])*

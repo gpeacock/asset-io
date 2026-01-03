@@ -68,6 +68,7 @@ impl JpegIO {
     }
 
     /// Formats this handler supports
+    #[allow(dead_code)]
     pub fn container_type() -> ContainerKind {
         ContainerKind::Jpeg
     }

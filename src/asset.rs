@@ -197,40 +197,6 @@ impl<R: Read + Seek> Asset<R> {
         })
     }
 
-    /// Create an Asset from a source with a known format
-    ///
-    /// Use this when you already know the format or want to override
-    /// auto-detection. This is slightly more efficient as it skips
-    /// format detection.
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// use asset_io::{Asset, MediaType};
-    /// use std::io::Cursor;
-    ///
-    /// # fn main() -> asset_io::Result<()> {
-    /// let data = vec![/* ... */];
-    /// let cursor = Cursor::new(data);
-    ///
-    /// // Skip auto-detection when media type is known
-    /// let mut asset = Asset::from_source_with_format(cursor, MediaType::Jpeg)?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub fn from_source_with_format(mut source: R, format: crate::MediaType) -> Result<Self> {
-        source.seek(SeekFrom::Start(0))?;
-        let container = format.container();
-        let handler = get_handler(container)?;
-        let structure = handler.parse(&mut source)?;
-
-        Ok(Asset {
-            source,
-            structure,
-            handler,
-        })
-    }
-
     /// Get the detected format
     pub fn container(&self) -> ContainerKind {
         self.structure.container
@@ -540,7 +506,7 @@ impl<R: Read + Seek> Asset<R> {
     /// - Validate data during write
     ///
     /// Returns the destination structure, which can be used with
-    /// `update_segment_with_structure` to perform in-place updates before
+    /// [`Structure::update_segment`] to perform in-place updates before
     /// finalizing the output.
     ///
     /// # Example: C2PA workflow
@@ -572,12 +538,7 @@ impl<R: Read + Seek> Asset<R> {
     /// let manifest = vec![/* generate manifest with hash */];
     ///
     /// // Update JUMBF in-place before closing file
-    /// asset_io::update_segment_with_structure(
-    ///     &mut output,
-    ///     &structure,
-    ///     SegmentKind::Jumbf,
-    ///     manifest,
-    /// )?;
+    /// structure.update_segment(&mut output, SegmentKind::Jumbf, manifest)?;
     /// # Ok(())
     /// # }
     /// ```

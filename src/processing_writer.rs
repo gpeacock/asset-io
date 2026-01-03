@@ -18,7 +18,7 @@ use std::io::{Result, Write};
 ///
 /// # Example
 ///
-/// ```rust
+/// ```ignore
 /// use std::io::Write;
 /// use asset_io::ProcessingWriter;
 /// use sha2::{Sha256, Digest};

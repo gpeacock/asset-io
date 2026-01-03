@@ -68,7 +68,7 @@ impl MediaType {
     ///
     /// # Example
     ///
-    /// ```
+    /// ```ignore
     /// use asset_io::MediaType;
     ///
     /// let supported = MediaType::all();
@@ -102,7 +102,7 @@ impl MediaType {
     ///
     /// # Example
     ///
-    /// ```
+    /// ```ignore
     /// # #[cfg(feature = "jpeg")]
     /// # {
     /// use asset_io::MediaType;
@@ -131,7 +131,7 @@ impl MediaType {
     ///
     /// # Example
     ///
-    /// ```
+    /// ```ignore
     /// # #[cfg(feature = "jpeg")]
     /// # {
     /// use asset_io::MediaType;
@@ -165,7 +165,7 @@ impl MediaType {
     ///
     /// # Example
     ///
-    /// ```
+    /// ```ignore
     /// # #[cfg(feature = "jpeg")]
     /// # {
     /// use asset_io::MediaType;

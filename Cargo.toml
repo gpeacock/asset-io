@@ -53,56 +53,8 @@ name = "inspect"
 required-features = ["all-formats", "xmp", "exif"]
 
 [[example]]
-name = "test_mmap"
-required-features = ["memory-mapped", "test-utils"]
-
-[[example]]
-name = "hash_benchmark"
-required-features = ["xmp", "memory-mapped"]
-
-[[example]]
-name = "mmap_comparison"
-required-features = ["xmp", "memory-mapped"]
-
-[[example]]
-name = "test_bmff_hash"
-required-features = ["bmff"]
-
-[[example]]
-name = "bmff_c2pa_hash"
-required-features = ["bmff"]
-
-[[example]]
-name = "test_bmff"
-required-features = ["bmff"]
-
-[[example]]
 name = "c2pa_streaming"
 required-features = ["xmp"]
-
-[[example]]
-name = "update_jumbf"
-required-features = ["jpeg", "xmp"]
-
-[[example]]
-name = "update_xmp_field"
-required-features = ["jpeg", "xmp"]
-
-[[example]]
-name = "test_all_combinations"
-required-features = ["jpeg", "xmp", "test-utils"]
-
-[[example]]
-name = "test_xmp_extended"
-required-features = ["jpeg", "xmp", "test-utils"]
-
-[[example]]
-name = "test_png_exif"
-required-features = ["png", "exif"]
-
-[[example]]
-name = "test_fixtures"
-required-features = ["jpeg", "xmp", "test-utils"]
 
 [[test]]
 name = "integration_test"

@@ -39,32 +39,6 @@
 //! # }
 //! ```
 //!
-//! # Handler-Specific API
-//!
-//! For more control, you can use media type-specific handlers:
-//!
-//! ```no_run
-//! use asset_io::{ContainerIO, JpegIO, Updates};
-//! use std::fs::File;
-//!
-//! # fn main() -> asset_io::Result<()> {
-//! // Parse file structure in single pass
-//! let mut file = File::open("image.jpg")?;
-//! let handler = JpegIO::new();
-//! let structure = handler.parse(&mut file)?;
-//!
-//! // Access XMP data (loaded lazily via handler)
-//! if let Some(xmp) = handler.read_xmp(&structure, &mut file)? {
-//!     println!("Found XMP: {} bytes", xmp.len());
-//! }
-//!
-//! // Write with updates
-//! let updates = Updates::default();
-//! let mut output = File::create("output.jpg")?;
-//! handler.write(&structure, &mut file, &mut output, &updates)?;
-//! # Ok(())
-//! # }
-//! ```
 //!
 //! # Processing During Read/Write
 //!
