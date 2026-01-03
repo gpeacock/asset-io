@@ -84,6 +84,7 @@ impl Thumbnail {
 /// This is used internally to track where thumbnail data is located.
 /// Use `Asset::read_embedded_thumbnail()` to get the actual bytes.
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // Only constructed when exif/bmff features are enabled
 pub struct EmbeddedThumbnailInfo {
     /// Offset of thumbnail data in the file
     pub offset: u64,
@@ -103,6 +104,7 @@ pub struct EmbeddedThumbnailInfo {
 
 impl EmbeddedThumbnailInfo {
     /// Create a new embedded thumbnail info with location
+    #[allow(dead_code)] // Only used when exif/bmff features are enabled
     pub fn new(
         offset: u64,
         size: u64,
