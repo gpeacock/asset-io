@@ -39,8 +39,19 @@
 //! This example correctly implements this by toggling exclusion mode after writing
 //! the container-specific headers but before writing the manifest data.
 //!
-//! Run: `cargo run --example c2pa --features xmp,png tests/fixtures/sample1.png`
-//! Run: `cargo run --example c2pa tearsofsteel_4k.mov`
+//! ## Usage
+//!
+//! ```bash
+//! # PNG (DataHash workflow)
+//! cargo run --example c2pa --features xmp,png tests/fixtures/sample1.png
+//!
+//! # HEIC/HEIF (BmffHash workflow) - recommended for testing
+//! cargo run --example c2pa tests/fixtures/sample1.heic
+//! cargo run --example c2pa tests/fixtures/sample1.heif
+//!
+//! # Large MOV (BmffHash workflow) - use release mode for performance testing
+//! cargo run --example c2pa --release tearsofsteel_4k.mov
+//! ```
 
 use asset_io::{Asset, ExclusionMode, SegmentKind, Updates};
 use c2pa::{
