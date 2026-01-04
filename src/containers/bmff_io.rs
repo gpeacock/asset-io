@@ -1287,18 +1287,20 @@ impl ContainerIO for BmffIO {
         // For BMFF, XMP/JUMBF boxes are written right after ftyp
         // If source has segments, infer ftyp size from first segment's offset
         // Otherwise, we need to make an educated guess based on typical sizes
-        // Most ftyp boxes are 20-32 bytes, with 20 being common for QuickTime
         let ftyp_end = if let Some(first_seg) = source_structure.segments.first() {
             // The first segment (XMP or other) tells us where metadata starts
             // This is right after ftyp in the source file
             first_seg.location().offset
         } else {
-            // No segments in source - use common ftyp size for QuickTime/MP4
-            // QuickTime typically uses 20 bytes, MP4 can vary
-            // This is a limitation of not having access to source file here
+            // No segments in source - use typical ftyp size for each format
+            // These are empirically determined from common files
             match source_structure.media_type {
-                crate::MediaType::QuickTime => 20u64, // Typical QuickTime ftyp
-                _ => 24u64, // Typical MP4 ftyp
+                crate::MediaType::QuickTime => 20u64,  // QuickTime .mov files
+                crate::MediaType::Heif => 24u64,        // HEIF images  
+                crate::MediaType::Heic => 24u64,        // HEIC images
+                crate::MediaType::Avif => 32u64,        // AVIF images (larger ftyp!)
+                crate::MediaType::Mp4Audio => 32u64,    // M4A audio files
+                _ => 24u64,                             // Generic MP4 default
             }
         };
         
