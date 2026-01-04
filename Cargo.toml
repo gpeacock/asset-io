@@ -22,9 +22,10 @@ fs2 = { version = "0.4", optional = true }
 atree = { version = "0.5", optional = true }
 
 [dev-dependencies]
-c2pa = "0.72"
+c2pa = { path = "../c2pa-rs/sdk" }
 sha2 = "0.10"  # For examples only
 serde_bytes = "0.11"  # For BMFF hash example
+serde_cbor = "0.11"  # For DataHash padding
 
 [features]
 default = ["jpeg"]
