@@ -62,6 +62,70 @@ use c2pa::{
 use sha2::{Digest, Sha256};
 use std::fs::OpenOptions;
 
+/// Create a BmffHash with mandatory C2PA exclusions and dummy hash
+fn create_dummy_bmff_hash() -> BmffHash {
+    let mut bmff_hash = BmffHash::new("jumbf manifest", "sha256", None);
+    
+    // Add mandatory exclusions per C2PA spec
+    let exclusions = bmff_hash.exclusions_mut();
+    
+    // 1. C2PA UUID boxes
+    let mut uuid = ExclusionsMap::new("/uuid".to_owned());
+    uuid.data = Some(vec![DataMap {
+        offset: 8,
+        value: vec![
+            0xd8, 0xfe, 0xc3, 0xd6, 0x1b, 0x0e, 0x48, 0x3c,
+            0x92, 0x97, 0x58, 0x28, 0x87, 0x7e, 0xc4, 0x81,
+        ], // C2PA UUID identifier
+    }]);
+    exclusions.push(uuid);
+    
+    // 2. ftyp box
+    exclusions.push(ExclusionsMap::new("/ftyp".to_owned()));
+    
+    // 3. mfra box
+    exclusions.push(ExclusionsMap::new("/mfra".to_owned()));
+    
+    // Set dummy hash (will be replaced after hashing)
+    bmff_hash.set_hash(vec![0; 32]);
+    
+    bmff_hash
+}
+
+/// Create a dummy DataHash with maximum-sized values for CBOR size safety
+fn create_dummy_data_hash() -> Result<(DataHash, usize), Box<dyn std::error::Error>> {
+    let mut dummy_dh = DataHash::new("jumbf_manifest", "sha256");
+    dummy_dh.add_exclusion(HashRange::new(u32::MAX as u64, u32::MAX as u64));
+    dummy_dh.set_hash(vec![0; 32]);
+    
+    // Measure dummy size for padding real DataHash later
+    let dummy_cbor = serde_cbor::to_vec(&dummy_dh)?;
+    let dummy_size = dummy_cbor.len();
+    
+    Ok((dummy_dh, dummy_size))
+}
+
+/// Create real DataHash from structure and hash
+fn create_real_data_hash(
+    structure: &asset_io::Structure,
+    hash: Vec<u8>,
+    dummy_size: usize,
+) -> Result<DataHash, Box<dyn std::error::Error>> {
+    let (exclusion_offset, exclusion_size) =
+        asset_io::exclusion_range_for_segment(structure, SegmentKind::Jumbf)
+            .ok_or("No JUMBF segment found in output structure")?;
+
+    let mut real_dh = DataHash::new("jumbf_manifest", "sha256");
+    real_dh.add_exclusion(HashRange::new(exclusion_offset, exclusion_size));
+    real_dh.set_hash(hash);
+    
+    // Pad real DataHash to match dummy size
+    real_dh.pad_to_size(dummy_size)?;
+    
+    Ok(real_dh)
+}
+
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
 
@@ -104,30 +168,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         
         // Step 1: Create BmffHash with dummy hash
         println!("📦 Creating BmffHash with mandatory exclusions...");
-        let mut bmff_hash = BmffHash::new("jumbf manifest", "sha256", None);
-        
-        // Add mandatory exclusions per C2PA spec
-        let exclusions = bmff_hash.exclusions_mut();
-        
-        // 1. C2PA UUID boxes
-        let mut uuid = ExclusionsMap::new("/uuid".to_owned());
-        uuid.data = Some(vec![DataMap {
-            offset: 8,
-            value: vec![
-                0xd8, 0xfe, 0xc3, 0xd6, 0x1b, 0x0e, 0x48, 0x3c,
-                0x92, 0x97, 0x58, 0x28, 0x87, 0x7e, 0xc4, 0x81,
-            ], // C2PA UUID identifier
-        }]);
-        exclusions.push(uuid);
-        
-        // 2. ftyp box
-        exclusions.push(ExclusionsMap::new("/ftyp".to_owned()));
-        
-        // 3. mfra box
-        exclusions.push(ExclusionsMap::new("/mfra".to_owned()));
-        
-        // Set dummy hash (will be replaced after hashing)
-        bmff_hash.set_hash(vec![0; 32]);
+        let mut bmff_hash = create_dummy_bmff_hash();
         builder.add_assertion(BmffHash::LABEL, &bmff_hash)?;
         println!("   ✅ BmffHash added with dummy hash");
 
@@ -191,14 +232,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         
         // Step 1: Create dummy DataHash with maximum-sized values
         println!("📦 Creating dummy DataHash placeholder...");
-        let mut dummy_dh = DataHash::new("jumbf_manifest", "sha256");
-        dummy_dh.add_exclusion(HashRange::new(u32::MAX as u64, u32::MAX as u64));
-        dummy_dh.set_hash(vec![0; 32]);
-        
-        let dummy_cbor = serde_cbor::to_vec(&dummy_dh)?;
-        let dummy_size = dummy_cbor.len();
+        let (dummy_dh, dummy_size) = create_dummy_data_hash()?;
         println!("   Dummy DataHash CBOR size: {} bytes", dummy_size);
-        
         builder.add_assertion(DataHash::LABEL, &dummy_dh)?;
 
         // Step 2: Create unsigned placeholder manifest
@@ -230,16 +265,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Step 4: Create real DataHash with actual values
         println!("📐 Creating real DataHash with computed hash...");
-        let (exclusion_offset, exclusion_size) =
-            asset_io::exclusion_range_for_segment(&structure, SegmentKind::Jumbf)
-                .ok_or("No JUMBF segment found in output structure")?;
-
-        let mut real_dh = DataHash::new("jumbf_manifest", "sha256");
-        real_dh.add_exclusion(HashRange::new(exclusion_offset, exclusion_size));
-        real_dh.set_hash(hash);
-        
-        // Pad real DataHash to match dummy size
-        real_dh.pad_to_size(dummy_size)?;
+        let real_dh = create_real_data_hash(&structure, hash, dummy_size)?;
         println!("   Real DataHash padded to {} bytes", dummy_size);
 
         // Step 5: Replace DataHash and sign
