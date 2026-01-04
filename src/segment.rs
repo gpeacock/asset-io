@@ -527,3 +527,194 @@ impl<R: Read> Iterator for ChunkedSegmentReader<R> {
         self.read_chunk().transpose()
     }
 }
+
+/// A chunk of data with position information for parallel processing
+///
+/// This is used by [`Asset::read_chunks()`](crate::Asset::read_chunks) to enable
+/// parallel hashing of large files using libraries like `rayon`.
+///
+/// # Example with rayon
+///
+/// ```ignore
+/// use rayon::prelude::*;
+/// use sha2::{Sha256, Digest};
+///
+/// let chunks: Vec<_> = asset.read_chunks(&updates)?.collect::<Result<Vec<_>>>()?;
+///
+/// let chunk_hashes: Vec<[u8; 32]> = chunks
+///     .par_iter()
+///     .filter(|c| !c.excluded)
+///     .map(|c| {
+///         let mut hasher = Sha256::new();
+///         hasher.update(&c.data);
+///         hasher.finalize().into()
+///     })
+///     .collect();
+/// ```
+#[derive(Debug, Clone)]
+pub struct ProcessingChunk {
+    /// Index of this chunk (for ordering results)
+    pub index: usize,
+    /// Byte offset in the file
+    pub offset: u64,
+    /// The chunk data
+    pub data: Vec<u8>,
+    /// Whether this chunk overlaps with an exclusion range
+    pub excluded: bool,
+}
+
+impl ProcessingChunk {
+    /// Create a new processing chunk
+    pub fn new(index: usize, offset: u64, data: Vec<u8>, excluded: bool) -> Self {
+        Self {
+            index,
+            offset,
+            data,
+            excluded,
+        }
+    }
+
+    /// Get the size of this chunk
+    pub fn size(&self) -> usize {
+        self.data.len()
+    }
+
+    /// Get the byte range covered by this chunk
+    pub fn range(&self) -> ByteRange {
+        ByteRange::new(self.offset, self.data.len() as u64)
+    }
+}
+
+/// Specification for a chunk to be processed - metadata only, no data
+///
+/// This is a lightweight alternative to [`ProcessingChunk`] that describes
+/// what to read without actually reading it. This enables parallel I/O
+/// where each worker can open its own file handle and read independently.
+///
+/// # Example
+///
+/// ```ignore
+/// use asset_io::{Asset, Updates, SegmentKind, ExclusionMode};
+/// use rayon::prelude::*;
+/// use sha2::{Sha256, Digest};
+/// use std::fs::File;
+/// use std::io::{Read, Seek, SeekFrom};
+///
+/// let asset = Asset::open("large_video.mov")?;
+/// let updates = Updates::new()
+///     .with_chunk_size(1024 * 1024)
+///     .exclude_from_processing(vec![SegmentKind::Jumbf], ExclusionMode::DataOnly);
+///
+/// let specs = asset.chunk_specs(&updates);
+/// let path = "large_video.mov".to_string();
+///
+/// // Each thread opens its own file handle - true parallel I/O!
+/// let hashes: Vec<[u8; 32]> = specs
+///     .into_par_iter()
+///     .filter(|s| !s.excluded)
+///     .map(|spec| {
+///         let mut file = File::open(&path).unwrap();
+///         file.seek(SeekFrom::Start(spec.offset)).unwrap();
+///         let mut buffer = vec![0u8; spec.size];
+///         file.read_exact(&mut buffer).unwrap();
+///
+///         let mut hasher = Sha256::new();
+///         hasher.update(&buffer);
+///         hasher.finalize().into()
+///     })
+///     .collect();
+/// ```
+#[derive(Debug, Clone, Copy)]
+pub struct ChunkSpec {
+    /// Index of this chunk (for ordering results)
+    pub index: usize,
+    /// Byte offset in the file
+    pub offset: u64,
+    /// Size in bytes
+    pub size: usize,
+    /// Whether this chunk overlaps with an exclusion range
+    pub excluded: bool,
+}
+
+impl ChunkSpec {
+    /// Create a new chunk specification
+    pub fn new(index: usize, offset: u64, size: usize, excluded: bool) -> Self {
+        Self {
+            index,
+            offset,
+            size,
+            excluded,
+        }
+    }
+
+    /// Get the byte range covered by this chunk
+    pub fn range(&self) -> ByteRange {
+        ByteRange::new(self.offset, self.size as u64)
+    }
+}
+
+/// Build a Merkle tree root hash from a list of leaf hashes
+///
+/// This is useful for C2PA BMFF v3 hash assertions which use a Merkle tree
+/// structure to enable parallel hash verification.
+///
+/// # Arguments
+///
+/// * `leaves` - The leaf hashes (individual chunk hashes)
+///
+/// # Returns
+///
+/// The root hash of the Merkle tree
+///
+/// # Example
+///
+/// ```ignore
+/// use sha2::{Sha256, Digest};
+/// use asset_io::merkle_root;
+///
+/// // Hash chunks in parallel
+/// let chunk_hashes: Vec<[u8; 32]> = chunks
+///     .par_iter()
+///     .map(|c| sha256(&c.data))
+///     .collect();
+///
+/// // Compute Merkle root
+/// let root = merkle_root::<Sha256>(&chunk_hashes);
+/// ```
+#[cfg(feature = "parallel")]
+pub fn merkle_root<H>(leaves: &[[u8; 32]]) -> [u8; 32]
+where
+    H: sha2::Digest + Default,
+{
+    if leaves.is_empty() {
+        return [0u8; 32];
+    }
+    if leaves.len() == 1 {
+        return leaves[0];
+    }
+
+    let mut current_level: Vec<[u8; 32]> = leaves.to_vec();
+
+    while current_level.len() > 1 {
+        let mut next_level = Vec::with_capacity((current_level.len() + 1) / 2);
+
+        for pair in current_level.chunks(2) {
+            let mut hasher = H::new();
+            hasher.update(&pair[0]);
+            if pair.len() > 1 {
+                hasher.update(&pair[1]);
+            } else {
+                // Odd number: hash with itself
+                hasher.update(&pair[0]);
+            }
+            let result = hasher.finalize();
+            let mut hash = [0u8; 32];
+            hash.copy_from_slice(&result[..32]);
+            next_level.push(hash);
+        }
+
+        current_level = next_level;
+    }
+
+    current_level[0]
+}

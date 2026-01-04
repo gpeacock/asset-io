@@ -83,6 +83,12 @@ impl Structure {
         })
     }
 
+    /// Check if a memory map is available
+    #[cfg(feature = "memory-mapped")]
+    pub fn has_mmap(&self) -> bool {
+        self.mmap.is_some()
+    }
+
     /// Add a segment and update indices
     pub fn add_segment(&mut self, segment: Segment) {
         let index = self.segments.len();
@@ -555,8 +561,16 @@ impl Structure {
 
         let segment = &self.segments[segment_idx];
 
-        // Calculate total capacity across all ranges
-        let total_capacity: u64 = segment.ranges.iter().map(|r| r.size).sum();
+        // For BMFF C2PA segments, only the first range (JUMBF data) is writeable
+        // The second range (full UUID box) is for hash exclusions only
+        let writeable_ranges = if self.container == ContainerKind::Bmff && kind == SegmentKind::Jumbf {
+            &segment.ranges[..1]  // Only first range
+        } else {
+            &segment.ranges[..]  // All ranges
+        };
+
+        // Calculate total capacity across writeable ranges
+        let total_capacity: u64 = writeable_ranges.iter().map(|r| r.size).sum();
 
         // Validate size
         if data.len() as u64 > total_capacity {
@@ -571,9 +585,9 @@ impl Structure {
         let mut padded = data;
         padded.resize(total_capacity as usize, 0);
 
-        // For non-PNG formats, just write the data directly
+        // Write the data to the writeable ranges
         let mut offset = 0;
-        for range in &segment.ranges {
+        for range in writeable_ranges {
             writer.seek(SeekFrom::Start(range.offset))?;
             let to_write = (padded.len() - offset).min(range.size as usize);
             writer.write_all(&padded[offset..offset + to_write])?;
