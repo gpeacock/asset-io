@@ -106,6 +106,7 @@ dependencies = [
  "quick-xml",
  "rayon",
  "serde_bytes",
+ "serde_cbor",
  "sha2",
  "thiserror 1.0.69",
 ]
@@ -274,9 +275,7 @@ checksum = "b35204fbdc0b3f4446b89fc1ac2cf84a8a68971995d0bf2e925ec7cd960f9cb3"
 
 [[package]]
 name = "c2pa"
-version = "0.72.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "23a1739b7941557ac57c592eb87871b0a6486aebe01c852e233af2d7f3a7d9be"
+version = "0.73.1"
 dependencies = [
  "asn1-rs",
  "async-generic",
