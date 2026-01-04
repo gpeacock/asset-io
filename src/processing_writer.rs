@@ -102,6 +102,22 @@ impl<W: Write, F: FnMut(&[u8])> ProcessingWriter<W, F> {
     pub fn get_mut(&mut self) -> &mut W {
         &mut self.writer
     }
+
+    /// Process an offset value for BMFF V2 hashing without writing it
+    ///
+    /// In BMFF V2 hashing, top-level box offsets are hashed as 8-byte
+    /// big-endian values instead of hashing the box content itself.
+    /// This method adds the offset to the hash without writing it to the output.
+    ///
+    /// # Arguments
+    ///
+    /// * `offset` - The file offset to hash (as 8-byte big-endian)
+    #[allow(dead_code)]
+    pub fn process_offset(&mut self, offset: u64) {
+        if !self.exclude_mode {
+            (self.processor)(&offset.to_be_bytes());
+        }
+    }
 }
 
 impl<W: Write, F: FnMut(&[u8])> Write for ProcessingWriter<W, F> {

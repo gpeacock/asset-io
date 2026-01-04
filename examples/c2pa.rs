@@ -61,6 +61,7 @@ use c2pa::{
 };
 use sha2::{Digest, Sha256};
 use std::fs::OpenOptions;
+use std::io::{Seek, SeekFrom};
 
 /// Create a BmffHash with mandatory C2PA exclusions and dummy hash
 fn create_dummy_bmff_hash() -> BmffHash {
@@ -164,7 +165,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if is_bmff {
         // === BMFF WORKFLOW ===
-        println!("\n=== BmffHash Workflow ===");
+        println!("\n=== BmffHash Workflow (Using BmffHash::gen_hash_from_stream) ===");
         
         // Step 1: Create BmffHash with dummy hash
         println!("📦 Creating BmffHash with mandatory exclusions...");
@@ -177,35 +178,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let placeholder_manifest = builder.unsigned_manifest_placeholder(signer.reserve_size())?;
         println!("   Placeholder JUMBF: {} bytes", placeholder_manifest.len());
 
-        // Step 3: Write with placeholder and hash in single pass
+        // Step 3: Write with placeholder (no hashing yet)
         let updates = Updates::new()
-            .set_jumbf(placeholder_manifest.clone())
-            .exclude_from_processing(vec![SegmentKind::Jumbf], ExclusionMode::DataOnly);
+            .set_jumbf(placeholder_manifest.clone());
 
         let mut output_file = OpenOptions::new()
+            .read(true)   // Need read for hashing later
             .write(true)
             .create(true)
             .truncate(true)
             .open(&output_path)?;
 
-        println!("⚡ Writing and hashing in single pass...");
-        let mut hasher = Sha256::new();
-        let structure = asset.write_with_processing(
-            &mut output_file,
-            &updates,
-            &mut |chunk| hasher.update(chunk),
-        )?;
+        println!("⚡ Writing file...");
+        let structure = asset.write(&mut output_file, &updates)?;
+        output_file.flush()?;
+        println!("✅ Write complete!");
 
-        let hash = hasher.finalize().to_vec();
-        println!("✅ Write complete! Hash computed (C2PA boxes excluded).");
+        // Step 4: Compute hash using BmffHash::gen_hash_from_stream
+        // This method handles all the V2 offset logic internally!
+        println!("🔢 Computing BmffHash using BmffHash::gen_hash_from_stream...");
+        output_file.seek(SeekFrom::Start(0))?;  // Rewind to start
+        bmff_hash.gen_hash_from_stream(&mut output_file)?;
+        
+        let hash = bmff_hash.hash().ok_or("Failed to compute hash")?;
+        println!("✅ Hash computed with V2 offsets!");
+        println!("   DEBUG: Computed hash (first 16 bytes): {:02x?}", &hash[..16.min(hash.len())]);
 
-        // Step 4: Update BmffHash with real hash
-        println!("📐 Updating BmffHash with computed hash...");
-        bmff_hash.set_hash(hash);
+        // Step 5: Update assertion with computed hash
+        println!("📐 Updating BmffHash assertion...");
         builder.replace_assertion(BmffHash::LABEL, &bmff_hash)?;
-        println!("   ✅ BmffHash updated with real hash");
+        println!("   ✅ BmffHash updated");
 
-        // Step 5: Sign manifest
+        // Step 6: Sign manifest
         println!("🔏 Signing manifest with Builder::sign_manifest()...");
         let final_manifest = builder.sign_manifest()?;
         println!("   Final JUMBF: {} bytes", final_manifest.len());
@@ -217,13 +221,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "Manifest sizes must match"
         );
 
-        // Step 6: Update manifest in-place
+        // Step 7: Update manifest in-place using returned structure
         println!("✏️  Updating JUMBF in-place...");
         structure.update_segment(&mut output_file, SegmentKind::Jumbf, final_manifest)?;
 
         use std::io::Write;
         output_file.flush()?;
-        drop(output_file);
         println!("💾 File saved: {}", output_path);
         
     } else {
@@ -296,7 +299,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _verify_asset = Asset::open(&output_path)?;
     let mut verify_file = std::fs::File::open(&output_path)?;
     match Reader::from_stream(mime_type, &mut verify_file) {
-        Ok(_reader) => {
+        Ok(reader) => {
+            // Check validation results for hash mismatches
+            if let Some(validation) = reader.validation_status() {
+                let mut has_hash_error = false;
+                
+                for status in validation {
+                    if status.code().contains("hash.mismatch") 
+                        || status.code().contains("bmffHash.mismatch")
+                        || status.code().contains("dataHash.mismatch") {
+                        println!("⚠️  Hash validation error:");
+                        println!("   Code: {}", status.code());
+                        println!("   Explanation: {}", status.explanation().unwrap_or("No explanation"));
+                        has_hash_error = true;
+                    }
+                }
+                
+                if has_hash_error {
+                    println!("\n❌ Hash mismatch detected!");
+                    println!("   This indicates the computed hash doesn't match the asset.");
+                    println!("   Possible causes:");
+                    println!("   1. Exclusion ranges are incorrect");
+                    println!("   2. Hash computed over wrong bytes");
+                    println!("   3. File was modified after hashing");
+                    return Err("Hash validation failed".into());
+                }
+            }
+            
             println!("✅ Verification complete!");
             println!("\nSuccessfully created C2PA manifest!");
             println!("Output: {}", output_path);
@@ -311,7 +340,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("\n=== Performance Summary ===");
     println!("Traditional approach: write → close → reopen → hash → close → reopen → update");
-    println!("Streaming approach:   write+hash simultaneously → update (file still open!)");
+    println!("Our approach:         write → rewind → hash → update (file stays open!)");
     println!("Result: ~3x faster for large files! 🚀");
 
     Ok(())

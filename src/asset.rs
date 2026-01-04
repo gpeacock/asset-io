@@ -391,7 +391,7 @@ impl<R: Read + Seek> Asset<R> {
         
         let chunk_size = updates.processing.effective_chunk_size();
         let exclude_segments = &updates.processing.exclude_segments;
-        let exclusion_mode = updates.processing.exclusion_mode;
+        let _exclusion_mode = updates.processing.exclusion_mode;
         
         self.source.seek(SeekFrom::Start(0))?;
         
@@ -408,18 +408,31 @@ impl<R: Read + Seek> Asset<R> {
         let mut ranges = Vec::new();
         let mut last_end = 0u64;
         
+        // For BMFF, always exclude ftyp box (per BmffHash spec)
+        if self.structure.container == crate::ContainerKind::Bmff {
+            // ftyp box end is at the start of the first metadata box
+            // For C2PA segments with 2 ranges, ranges[1] has the full UUID box offset
+            let ftyp_end = self.structure.segments.iter()
+                .flat_map(|s| s.ranges.iter())
+                .map(|r| r.offset)
+                .min()
+                .unwrap_or(24);  // Default if no segments
+            last_end = ftyp_end;
+        }
+        
         for (idx, segment) in self.structure.segments.iter().enumerate() {
             let is_excluded = excluded_indices.contains(&Some(idx));
             
             if is_excluded {
-                let loc = segment.location();
-                // Determine exclusion range based on mode
-                let (exclude_start, exclude_size) = if exclusion_mode == crate::ExclusionMode::DataOnly {
-                    // DataOnly: exclude just the data portion (container-specific)
-                    // For now, use the segment's data location
-                    (loc.offset, loc.size)
+                // Use format-specific exclusion range (e.g., entire box for BMFF)
+                let (exclude_start, exclude_size) = if let Some(kind) = exclude_segments.iter().find(|k| segment.is_type(**k)) {
+                    crate::containers::exclusion_range_for_segment(&self.structure, *kind)
+                        .unwrap_or_else(|| {
+                            let loc = segment.location();
+                            (loc.offset, loc.size)
+                        })
                 } else {
-                    // EntireSegment: exclude the whole segment
+                    let loc = segment.location();
                     (loc.offset, loc.size)
                 };
                 
@@ -535,13 +548,23 @@ impl<R: Read + Seek> Asset<R> {
         for segment in self.structure.segments.iter() {
             let is_excluded = exclude_segments.iter().any(|kind| segment.is_type(*kind));
             
+            eprintln!("DEBUG: Segment: {:?}, is_excluded={}", segment.kind, is_excluded);
+            
             if is_excluded {
-                let loc = segment.location();
-                let (exclude_start, exclude_size) = if exclusion_mode == crate::ExclusionMode::DataOnly {
-                    (loc.offset, loc.size)
+                // For BMFF, use the format-specific exclusion range that includes the entire box
+                // For other formats, use the segment's data range
+                let (exclude_start, exclude_size) = if let Some(kind) = exclude_segments.iter().find(|k| segment.is_type(**k)) {
+                    crate::containers::exclusion_range_for_segment(&self.structure, *kind)
+                        .unwrap_or_else(|| {
+                            let loc = segment.location();
+                            (loc.offset, loc.size)
+                        })
                 } else {
+                    let loc = segment.location();
                     (loc.offset, loc.size)
                 };
+                
+                eprintln!("DEBUG: Excluding: offset={}, size={}", exclude_start, exclude_size);
                 
                 if exclude_start > last_end {
                     ranges.push((last_end, exclude_start - last_end));
@@ -1034,10 +1057,40 @@ impl<R: Read + Seek> Asset<R> {
     }
 
     /// Write to a writer with updates
-    pub fn write<W: Write>(&mut self, writer: &mut W, updates: &Updates) -> Result<()> {
+    ///
+    /// This writes the asset with the specified updates (e.g., new JUMBF, XMP).
+    /// Returns the destination structure which can be used for subsequent
+    /// in-place updates via [`Structure::update_segment`].
+    ///
+    /// For single-pass write-and-hash operations, use [`write_with_processing`](Self::write_with_processing).
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use asset_io::*;
+    /// # use std::fs::File;
+    /// # fn example() -> Result<()> {
+    /// let mut asset = Asset::open("input.jpg")?;
+    /// let mut output = File::create("output.jpg")?;
+    ///
+    /// let updates = Updates::new()
+    ///     .set_jumbf(vec![1, 2, 3]);
+    ///
+    /// let structure = asset.write(&mut output, &updates)?;
+    /// // Can now use structure for in-place updates
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn write<W: Write>(&mut self, writer: &mut W, updates: &Updates) -> Result<Structure> {
+        // Calculate destination structure
+        let dest_structure = self
+            .handler
+            .calculate_updated_structure(&self.structure, updates)?;
+
         self.source.seek(SeekFrom::Start(0))?;
         self.handler
-            .write(&self.structure, &mut self.source, writer, updates)
+            .write(&self.structure, &mut self.source, writer, updates)?;
+
+        Ok(dest_structure)
     }
 
     /// Write to a writer with updates and optional data processing callback
@@ -1363,11 +1416,14 @@ impl<R: Read + Write + Seek> Asset<R> {
 
 impl Asset<File> {
     /// Write to a new file with updates
-    pub fn write_to<P: AsRef<Path>>(&mut self, path: P, updates: &Updates) -> Result<()> {
+    /// Write to a file path with updates
+    ///
+    /// Returns the destination structure which can be used for subsequent
+    /// in-place updates via [`Structure::update_segment`].
+    pub fn write_to<P: AsRef<Path>>(&mut self, path: P, updates: &Updates) -> Result<Structure> {
         let mut output = File::create(path)?;
-        self.source.seek(SeekFrom::Start(0))?;
-        self.handler
-            .write(&self.structure, &mut self.source, &mut output, updates)
+        let structure = self.write(&mut output, updates)?;
+        Ok(structure)
     }
 }
 
