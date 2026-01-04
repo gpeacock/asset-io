@@ -1,0 +1,15 @@
+{
+  "claim_generator": "asset-io-benchmark/1.0",
+  "assertions": [
+    {
+      "label": "c2pa.actions",
+      "data": {
+        "actions": [
+          {
+            "action": "c2pa.created"
+          }
+        ]
+      }
+    }
+  ]
+}
