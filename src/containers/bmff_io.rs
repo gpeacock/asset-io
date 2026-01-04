@@ -1086,13 +1086,18 @@ impl ContainerIO for BmffIO {
         };
 
         // Start with ftyp box (assume it exists and comes first)
-        // In a real file, we'd parse to find ftyp, but for structure calculation we can estimate
-        let mut current_offset = 0u64;
-
-        // Add ftyp (typically ~32 bytes, but we should get this from source)
-        // For now, estimate based on common size
-        let ftyp_size = 32u64;
-        current_offset += ftyp_size;
+        // For BMFF, XMP/JUMBF boxes are written right after ftyp
+        // We can infer ftyp size from the first segment's offset in the source
+        let ftyp_end = if let Some(first_seg) = source_structure.segments.first() {
+            // The first segment (XMP or other) tells us where metadata starts
+            // This is right after ftyp in the source file
+            first_seg.location().offset
+        } else {
+            // No segments in source, ftyp is probably at the default size
+            32u64
+        };
+        
+        let mut current_offset = ftyp_end;
 
         // Add XMP UUID box if present
         if let Some(size) = xmp_box_size {
@@ -1120,8 +1125,16 @@ impl ContainerIO for BmffIO {
         }
 
         // Add remaining boxes size (moov, mdat, etc.)
-        // This is approximate - in reality we'd need to parse the full source structure
-        current_offset += source_structure.total_size - ftyp_size;
+        // The remaining file size minus what was already accounted for (ftyp + metadata)
+        let metadata_end_in_source = if let Some(last_seg) = source_structure.segments.last() {
+            let loc = last_seg.location();
+            loc.offset + loc.size
+        } else {
+            ftyp_end
+        };
+        
+        let remaining_size = source_structure.total_size.saturating_sub(metadata_end_in_source);
+        current_offset += remaining_size;
 
         new_structure.total_size = current_offset;
         Ok(new_structure)
