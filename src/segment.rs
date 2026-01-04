@@ -358,6 +358,8 @@ impl Segment {
 
     /// Create a new segment with multiple ranges
     ///
+    /// Returns an error if ranges is empty.
+    ///
     /// # Example
     ///
     /// ```
@@ -371,16 +373,20 @@ impl Segment {
     ///     ],
     ///     SegmentKind::ImageData,
     ///     Some("ifd0/strips".to_string())
-    /// );
+    /// )?;
+    /// # Ok::<(), asset_io::Error>(())
     /// ```
-    pub fn with_ranges(ranges: Vec<ByteRange>, kind: SegmentKind, path: Option<String>) -> Self {
-        Self {
+    pub fn with_ranges(ranges: Vec<ByteRange>, kind: SegmentKind, path: Option<String>) -> crate::Result<Self> {
+        if ranges.is_empty() {
+            return Err(crate::Error::InvalidFormat("Segment must have at least one range".into()));
+        }
+        Ok(Self {
             ranges,
             kind,
             path,
             data: LazyData::NotLoaded,
             metadata: None,
-        }
+        })
     }
 
     /// Add data to this segment

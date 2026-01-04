@@ -344,7 +344,7 @@ impl JpegIO {
                             vec![ByteRange::new(xmp_offset, xmp_size)],
                             SegmentKind::Xmp,
                             Some("app1".to_string()),
-                        ));
+                        )?);
                         let remaining = (data_size as usize) - sig_buf.len();
                         source.seek(SeekFrom::Current(remaining as i64))?;
                     } else if sig_buf.len() >= XMP_EXTENDED_SIGNATURE.len()
@@ -621,7 +621,7 @@ impl JpegIO {
                                 vec![ByteRange::new(jumbf_data_offset, jumbf_data_size)],
                                 SegmentKind::Jumbf,
                                 Some("app11".to_string()),
-                            ));
+                            )?);
                         }
 
                         // Skip remaining JUMBF data
@@ -1236,7 +1236,7 @@ impl ContainerIO for JpegIO {
                                 SegmentKind::Jumbf,
                                 ranges,
                                 segment.path.clone(),
-                            );
+                            )?;
                             jumbf_written = true;
                         }
                         MetadataUpdate::Set(new_jumbf) if !jumbf_written => {
@@ -1272,7 +1272,7 @@ impl ContainerIO for JpegIO {
                                 SegmentKind::Jumbf,
                                 ranges,
                                 Some("APP11/C2PA".to_string()),
-                            );
+                            )?;
                             jumbf_written = true;
                         }
                         MetadataUpdate::Remove | MetadataUpdate::Set(_) => {
@@ -1395,7 +1395,7 @@ impl ContainerIO for JpegIO {
                                         SegmentKind::Jumbf,
                                         ranges,
                                         Some("APP11/C2PA".to_string()),
-                                    );
+                                    )?;
                                 }
                                 jumbf_written = true;
                             }

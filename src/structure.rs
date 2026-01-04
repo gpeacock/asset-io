@@ -108,9 +108,9 @@ impl Structure {
         kind: SegmentKind,
         ranges: Vec<ByteRange>,
         path: Option<String>,
-    ) {
+    ) -> crate::Result<()> {
         let index = self.segments.len();
-        let segment = Segment::with_ranges(ranges, kind, path);
+        let segment = Segment::with_ranges(ranges, kind, path)?;
 
         if segment.is_xmp() {
             self.xmp_index = Some(index);
@@ -119,6 +119,7 @@ impl Structure {
         }
 
         self.segments.push(segment);
+        Ok(())
     }
 
     /// Get the XMP index (if any) - for internal use during parsing

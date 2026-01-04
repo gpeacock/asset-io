@@ -279,7 +279,7 @@ impl PngIO {
                             vec![ByteRange::new(xmp_offset, xmp_size)],
                             SegmentKind::Xmp,
                             Some("iTXt[xmp]".to_string()),
-                        ));
+                        )?);
 
                         // Skip remaining XMP data + CRC
                         let remaining = xmp_size + 4; // XMP data + CRC
@@ -304,7 +304,7 @@ impl PngIO {
                         vec![ByteRange::new(data_offset, chunk_len)],
                         SegmentKind::Jumbf,
                         Some("caBX".to_string()),
-                    ));
+                    )?);
                     source.seek(SeekFrom::Current((chunk_len + 4) as i64))?; // Skip data + CRC
                 }
 

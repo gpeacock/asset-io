@@ -842,27 +842,28 @@ impl<R: Read + Seek> Asset<R> {
         
         // Hash in parallel - each thread reads directly from mmap
         let structure = &self.structure;
-        let hashes: Vec<(usize, [u8; 32])> = chunks
+        let hash_results: Result<Vec<(usize, [u8; 32])>> = chunks
             .par_iter()
             .map(|(idx, range)| {
                 let slice = structure
                     .get_mmap_slice(*range)
-                    .expect("mmap slice should exist for computed range");
+                    .ok_or_else(|| Error::InvalidFormat("mmap slice not found for range".into()))?;
                 
                 let mut hasher = H::new();
                 hasher.update(slice);
                 let result = hasher.finalize();
                 let mut hash = [0u8; 32];
                 hash.copy_from_slice(&result[..32]);
-                (*idx, hash)
+                Ok((*idx, hash))
             })
             .collect();
         
-        // Sort by index to maintain order (parallel collect may be unordered)
-        let mut sorted = hashes;
-        sorted.sort_by_key(|(idx, _)| *idx);
+        let mut hashes = hash_results?;
         
-        Ok(sorted.into_iter().map(|(_, h)| h).collect())
+        // Sort by index to maintain order (parallel collect may be unordered)
+        hashes.sort_by_key(|(idx, _)| *idx);
+        
+        Ok(hashes.into_iter().map(|(_, h)| h).collect())
     }
 
     /// Get chunk specifications for parallel processing

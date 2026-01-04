@@ -876,7 +876,7 @@ impl BmffIO {
                             vec![ByteRange::new(data_offset, data_size)],
                             SegmentKind::Xmp,
                             Some("uuid/xmp".to_string()),
-                        ));
+                        )?);
                     } else if uuid.as_slice() == C2PA_UUID {
                         // C2PA UUID box found (contains JUMBF)
                         // Structure: header(8) + uuid(16) + version/flags(4) + purpose(var+\0) + merkle_offset(8) + data
@@ -932,7 +932,7 @@ impl BmffIO {
                                 "uuid/c2pa/{}",
                                 String::from_utf8_lossy(&purpose_bytes)
                             )),
-                        ));
+                        )?);
                     }
                 }
             }
@@ -955,7 +955,7 @@ impl BmffIO {
                                         vec![ByteRange::new(*offset, *size)],
                                         SegmentKind::Exif,
                                         Some("meta/Exif".to_string()),
-                                    ));
+                                    )?);
                                 }
                             }
                         }
@@ -1610,7 +1610,7 @@ impl ContainerIO for BmffIO {
                 vec![ByteRange::new(data_offset, data_size as u64)],
                 SegmentKind::Xmp,
                 Some("uuid/xmp".to_string()),
-            ));
+            )?);
             current_offset += size as u64;
         }
 
@@ -1630,7 +1630,7 @@ impl ContainerIO for BmffIO {
                 ],
                 SegmentKind::Jumbf,
                 Some("uuid/c2pa".to_string()),
-            ));
+            )?);
             current_offset += size as u64;
         }
 

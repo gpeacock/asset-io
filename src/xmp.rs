@@ -315,7 +315,9 @@ fn apply_updates_impl(xmp: &str, updates: &[(&str, Option<&str>)]) -> Result<Str
         let event = reader.read_event()?;
         match event {
             Event::Start(ref e) if e.name() == QName(RDF_DESCRIPTION) && !applied => {
-                let mut elem = BytesStart::new(std::str::from_utf8(RDF_DESCRIPTION).unwrap());
+                let elem_name = std::str::from_utf8(RDF_DESCRIPTION)
+                    .map_err(|_| crate::Error::InvalidFormat("Invalid RDF_DESCRIPTION constant".into()))?;
+                let mut elem = BytesStart::new(elem_name);
 
                 // Track which keys we've seen in the original attributes
                 let mut seen_keys = std::collections::HashSet::new();
@@ -365,7 +367,9 @@ fn apply_updates_impl(xmp: &str, updates: &[(&str, Option<&str>)]) -> Result<Str
                 writer.write_event(Event::Start(elem))?;
             }
             Event::Empty(ref e) if e.name() == QName(RDF_DESCRIPTION) && !applied => {
-                let mut elem = BytesStart::new(std::str::from_utf8(RDF_DESCRIPTION).unwrap());
+                let elem_name = std::str::from_utf8(RDF_DESCRIPTION)
+                    .map_err(|_| crate::Error::InvalidFormat("Invalid RDF_DESCRIPTION constant".into()))?;
+                let mut elem = BytesStart::new(elem_name);
 
                 // Track which keys we've seen in the original attributes
                 let mut seen_keys = std::collections::HashSet::new();
