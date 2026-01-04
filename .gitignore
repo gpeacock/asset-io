@@ -7,4 +7,8 @@
 tests/fixtures/huge_test.png
 tests/fixtures/large_test.png
 tests/fixtures/massive_test.png
+
+# Large test video files (don't commit)
+tears_of_steel_trailer.mp4
+tearsofsteel_4k.mov
 *.mov

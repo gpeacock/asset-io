@@ -230,6 +230,23 @@ pub trait ContainerIO: Send + Sync {
         structure: &Structure,
         source: &mut R,
     ) -> Result<Option<crate::tiff::ExifInfo>>;
+
+    /// Calculate the C2PA exclusion range for a segment kind
+    ///
+    /// This encapsulates container-specific details about what bytes must be excluded
+    /// from hashing when generating C2PA DataHash assertions. For example:
+    /// - PNG: Excludes data + CRC (4 extra bytes after data)
+    /// - JPEG: Excludes only the JUMBF data (headers are hashed)
+    /// - BMFF: Excludes only the manifest data (box headers are hashed)
+    ///
+    /// Returns (offset, size) for the range to exclude from the hash, or None
+    /// if the segment kind is not found.
+    fn exclusion_range_for_segment(
+        structure: &Structure,
+        kind: crate::segment::SegmentKind,
+    ) -> Option<(u64, u64)>
+    where
+        Self: Sized;
 }
 
 // ContainerKind I/O modules - pub(crate) so register_containers! macro can access them
@@ -386,6 +403,20 @@ macro_rules! register_containers {
                     )*
                 }
             }
+
+            #[allow(unreachable_patterns)]
+            pub(crate) fn exclusion_range_for_segment(
+                &self,
+                structure: &$crate::Structure,
+                kind: $crate::segment::SegmentKind,
+            ) -> Option<(u64, u64)> {
+                match self {
+                    $(
+                        $(#[$meta])*
+                        Handler::$variant(_) => $module::$io::exclusion_range_for_segment(structure, kind),
+                    )*
+                }
+            }
         }
 
         /// Detect container from file header
@@ -522,4 +553,32 @@ register_containers! {
 
     #[cfg(feature = "bmff")]
     Bmff => bmff_io::BmffIO,
+}
+
+/// Calculate the C2PA exclusion range for a segment in a structure
+///
+/// This encapsulates container-specific details about what bytes must be excluded
+/// from hashing when generating C2PA DataHash assertions. For example:
+/// - PNG: Excludes data + CRC (4 extra bytes after data)
+/// - JPEG: Excludes only the JUMBF data (headers are hashed)
+/// - BMFF: Excludes only the manifest data (box headers are hashed)
+///
+/// # Returns
+/// Some((offset, size)) for the range to exclude from the hash, or None
+/// if the segment kind is not found.
+///
+/// # Example
+/// ```ignore
+/// use asset_io::SegmentKind;
+///
+/// let structure = asset.write_with_processing(&updates, |chunk| hasher.update(chunk))?;
+/// let (offset, size) = exclusion_range_for_segment(&structure, SegmentKind::Jumbf)
+///     .expect("JUMBF segment not found");
+/// ```
+pub fn exclusion_range_for_segment(
+    structure: &crate::Structure,
+    kind: crate::segment::SegmentKind,
+) -> Option<(u64, u64)> {
+    let handler = get_handler(structure.container).ok()?;
+    handler.exclusion_range_for_segment(structure, kind)
 }

@@ -1063,6 +1063,25 @@ impl ContainerIO for PngIO {
         // PNG eXIf chunk: just raw TIFF data (no Exif\0\0 prefix)
         crate::tiff::parse_exif_info(&data)
     }
+
+    fn exclusion_range_for_segment(
+        structure: &Structure,
+        kind: SegmentKind,
+    ) -> Option<(u64, u64)> {
+        let segment = match kind {
+            SegmentKind::Jumbf => structure
+                .c2pa_jumbf_index()
+                .map(|i| &structure.segments()[i]),
+            SegmentKind::Xmp => structure.xmp_index().map(|i| &structure.segments()[i]),
+            _ => None,
+        }?;
+
+        let location = segment.location();
+        // PNG chunks: length(4) + type(4) + data(N) + CRC(4)
+        // Segment stores data offset/size. CRC immediately follows data.
+        // For C2PA: exclude data + CRC (CRC depends on data, so it changes too)
+        Some((location.offset, location.size + 4))
+    }
 }
 
 /// Update a PNG segment in-place with proper CRC recalculation

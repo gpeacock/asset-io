@@ -203,56 +203,14 @@ fn generate_data_hash_from_structure(
     structure: &asset_io::Structure,
     hash: Vec<u8>,
 ) -> Result<DataHash, Box<dyn std::error::Error>> {
-    // Find the C2PA JUMBF segment
-    let manifest_segment_idx = structure
-        .c2pa_jumbf_index()
-        .ok_or("No C2PA JUMBF segment found in output structure")?;
-    let manifest_segment = &structure.segments[manifest_segment_idx];
-
-    // The segment stores the DATA offset and size, but the exclusion must cover
-    // the entire container wrapper that was excluded during hashing.
-    //
-    // For PNG: The excluded bytes are: length(4) + type(4) + data + CRC(4)
-    //   - Segment offset points to data start (after length + type)
-    //   - Exclusion start = offset - 8, size = data_size + 12
-    //
-    // For JPEG: The excluded bytes are all APP11 segments including markers and headers
-    //   - Segment offset already accounts for JPEG XT overhead in calculate_updated_structure
-    //   - Each segment has: marker(2) + length(2) + JPEG XT header(13) overhead
-    //   - For simplicity, use the segment ranges which are calculated to include proper offsets
-
-    let data_offset = manifest_segment.ranges[0].offset;
-    let data_size: u64 = manifest_segment.ranges.iter().map(|r| r.size).sum();
-
-    // Calculate exclusion range based on container type
-    let (exclusion_offset, exclusion_size) = match structure.container {
-        asset_io::ContainerKind::Png => {
-            // Per C2PA spec: Include headers in hash, exclude only data+CRC
-            // PNG caBX chunk structure: length(4) + type(4) + data(N) + CRC(4)
-            //
-            // The CRC is computed from type+data, so when manifest data changes,
-            // CRC also changes. Therefore CRC must be excluded along with data.
-            //
-            // Include in hash: length(4) + type(4) = 8 bytes (before data_offset)
-            // Exclude from hash: data(N) + CRC(4)
-            //
-            // Segment stores data_offset (after length+type) and data_size
-            (data_offset, data_size + 4) // +4 for CRC
-        }
-        asset_io::ContainerKind::Jpeg => {
-            // Per C2PA spec: Only exclude the manifest DATA, not the APP11 headers.
-            // The headers (marker, length, JPEG XT fields) must be included in the hash
-            // to prevent insertion attacks.
-            //
-            // The segment's data_offset already points to where the JUMBF data starts
-            // (after all headers), and data_size is just the JUMBF data size.
-            (data_offset, data_size)
-        }
-        _ => {
-            // Default: use segment as-is (may not be correct for all formats)
-            (data_offset, data_size)
-        }
-    };
+    // Get the exclusion range for the JUMBF segment
+    // Container-specific details are handled internally:
+    // - PNG: includes CRC in exclusion (data + 4 bytes)
+    // - JPEG: excludes only data (headers are hashed)
+    // - BMFF: excludes only manifest data (box headers are hashed)
+    let (exclusion_offset, exclusion_size) =
+        asset_io::exclusion_range_for_segment(structure, asset_io::SegmentKind::Jumbf)
+            .ok_or("No JUMBF segment found for exclusion range")?;
 
     // Create DataHash with exclusion
     let mut dh = DataHash::new("jumbf_manifest", "sha256");

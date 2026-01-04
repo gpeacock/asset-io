@@ -863,8 +863,10 @@ impl BmffIO {
                     if uuid.as_slice() == XMP_UUID {
                         // XMP UUID box found
                         // XMP boxes DON'T have version/flags, data starts right after UUID
-                        let data_offset = box_info.data.offset + HEADER_SIZE + 16;
-                        let data_size = box_info.data.size - HEADER_SIZE - 16;
+                        // box_info.data.offset points to START of box (before size+type header)
+                        // After header (8) + UUID (16) = 24 bytes, XMP data starts
+                        let data_offset = box_info.data.offset + 8 + 16;
+                        let data_size = box_info.data.size - 8 - 16;
                         structure.add_segment(Segment::with_ranges(
                             vec![ByteRange::new(data_offset, data_size)],
                             SegmentKind::Xmp,
@@ -872,13 +874,54 @@ impl BmffIO {
                         ));
                     } else if uuid.as_slice() == C2PA_UUID {
                         // C2PA UUID box found (contains JUMBF)
-                        // C2PA boxes DO have version/flags + purpose string
-                        let data_offset = box_info.data.offset + HEADER_SIZE + 16 + 4;
-                        let data_size = box_info.data.size - HEADER_SIZE - 16 - 4;
+                        // Structure: header(8) + uuid(16) + version/flags(4) + purpose(var+\0) + merkle_offset(8) + data
+                        //
+                        // box_info.data.offset points to START of box (before size+type header)
+                        // After header (8) + UUID (16) + version/flags (4) = 28 bytes, we have:
+                        // - purpose string (variable, null-terminated)
+                        // - merkle offset (8 bytes)
+                        // - JUMBF data
+
+                        let box_offset = box_info.data.offset;
+                        let box_size = box_info.data.size;
+
+                        // Seek to after header + UUID + version/flags
+                        let version_flags_offset = box_offset + 8 + 16 + 4;
+                        source.seek(SeekFrom::Start(version_flags_offset))?;
+
+                        // Read purpose string (null-terminated)
+                        let mut purpose_bytes = Vec::new();
+                        loop {
+                            let mut byte = [0u8; 1];
+                            if source.read_exact(&mut byte).is_err() {
+                                break;
+                            }
+                            if byte[0] == 0 {
+                                break; // Found null terminator
+                            }
+                            purpose_bytes.push(byte[0]);
+                            // Sanity check: purpose string shouldn't be longer than 256 bytes
+                            if purpose_bytes.len() > 256 {
+                                break;
+                            }
+                        }
+
+                        // Skip merkle offset (8 bytes)
+                        source.seek(SeekFrom::Current(8))?;
+
+                        // Current position is start of JUMBF data
+                        let data_offset = source.stream_position()?;
+                        let header_overhead = (data_offset - box_offset) as u64;
+                        let data_size = box_size.saturating_sub(header_overhead);
+
+                        // Store JUMBF data location (for reading/writing manifest)
                         structure.add_segment(Segment::with_ranges(
                             vec![ByteRange::new(data_offset, data_size)],
                             SegmentKind::Jumbf,
-                            Some("uuid/c2pa".to_string()),
+                            Some(format!(
+                                "uuid/c2pa/{}",
+                                String::from_utf8_lossy(&purpose_bytes)
+                            )),
                         ));
                     }
                 }
@@ -1241,13 +1284,18 @@ impl ContainerIO for BmffIO {
         };
 
         // Start with ftyp box (assume it exists and comes first)
-        // In a real file, we'd parse to find ftyp, but for structure calculation we can estimate
-        let mut current_offset = 0u64;
-
-        // Add ftyp (typically ~32 bytes, but we should get this from source)
-        // For now, estimate based on common size
-        let ftyp_size = 32u64;
-        current_offset += ftyp_size;
+        // For BMFF, XMP/JUMBF boxes are written right after ftyp
+        // We can infer ftyp size from the first segment's offset in the source
+        let ftyp_end = if let Some(first_seg) = source_structure.segments.first() {
+            // The first segment (XMP or other) tells us where metadata starts
+            // This is right after ftyp in the source file
+            first_seg.location().offset
+        } else {
+            // No segments in source, ftyp is probably at the default size
+            32u64
+        };
+        
+        let mut current_offset = ftyp_end;
 
         // Add XMP UUID box if present
         if let Some(size) = xmp_box_size {
@@ -1275,8 +1323,16 @@ impl ContainerIO for BmffIO {
         }
 
         // Add remaining boxes size (moov, mdat, etc.)
-        // This is approximate - in reality we'd need to parse the full source structure
-        current_offset += source_structure.total_size - ftyp_size;
+        // The remaining file size minus what was already accounted for (ftyp + metadata)
+        let metadata_end_in_source = if let Some(last_seg) = source_structure.segments.last() {
+            let loc = last_seg.location();
+            loc.offset + loc.size
+        } else {
+            ftyp_end
+        };
+        
+        let remaining_size = source_structure.total_size.saturating_sub(metadata_end_in_source);
+        current_offset += remaining_size;
 
         new_structure.total_size = current_offset;
         Ok(new_structure)
@@ -1334,6 +1390,24 @@ impl ContainerIO for BmffIO {
         };
 
         crate::tiff::parse_exif_info(exif_data)
+    }
+
+    fn exclusion_range_for_segment(
+        structure: &Structure,
+        kind: SegmentKind,
+    ) -> Option<(u64, u64)> {
+        let segment = match kind {
+            SegmentKind::Jumbf => structure
+                .c2pa_jumbf_index()
+                .map(|i| &structure.segments()[i]),
+            SegmentKind::Xmp => structure.xmp_index().map(|i| &structure.segments()[i]),
+            _ => None,
+        }?;
+
+        // Return the data range (ranges[0])
+        // Box headers are included in hash per C2PA spec
+        let location = segment.location();
+        Some((location.offset, location.size))
     }
 }
 
