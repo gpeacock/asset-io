@@ -409,6 +409,7 @@ impl<R: Read + Seek> Asset<R> {
         let mut last_end = 0u64;
         
         // For BMFF, always exclude ftyp box (per BmffHash spec)
+        #[cfg(feature = "bmff")]
         if self.structure.container == crate::ContainerKind::Bmff {
             // ftyp box end is at the start of the first metadata box
             // For C2PA segments with 2 ranges, ranges[1] has the full UUID box offset
@@ -539,7 +540,7 @@ impl<R: Read + Seek> Asset<R> {
         
         let chunk_size = updates.processing.effective_chunk_size().max(DEFAULT_CHUNK_SIZE);
         let exclude_segments = &updates.processing.exclude_segments;
-        let exclusion_mode = updates.processing.exclusion_mode;
+        let _exclusion_mode = updates.processing.exclusion_mode;
         
         // Calculate ranges to process (same logic as read_with_processing)
         let mut ranges = Vec::new();

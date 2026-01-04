@@ -563,11 +563,15 @@ impl Structure {
 
         // For BMFF C2PA segments, only the first range (JUMBF data) is writeable
         // The second range (full UUID box) is for hash exclusions only
+        #[cfg(feature = "bmff")]
         let writeable_ranges = if self.container == ContainerKind::Bmff && kind == SegmentKind::Jumbf {
             &segment.ranges[..1]  // Only first range
         } else {
             &segment.ranges[..]  // All ranges
         };
+        
+        #[cfg(not(feature = "bmff"))]
+        let writeable_ranges = &segment.ranges[..];
 
         // Calculate total capacity across writeable ranges
         let total_capacity: u64 = writeable_ranges.iter().map(|r| r.size).sum();
