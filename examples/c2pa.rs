@@ -92,7 +92,7 @@ fn sign_with_bmff_hash_parallel_v3<R: Read + Seek, W: Read + Write + Seek>(
         alg: Some("sha256".to_string()),
         init_hash: None,
         hashes: c2pa::assertions::VecByteBuf(vec![serde_bytes::ByteBuf::from(vec![0u8; 32])]),
-        fixed_block_size: Some(1024 * 1024),
+        fixed_block_size: Some(1024 * 1024),  // 1MB chunks - IMPORTANT for V3!
         variable_block_sizes: None,
     };
     bmff_hash.set_merkle(vec![dummy_merkle_map]);
@@ -101,7 +101,7 @@ fn sign_with_bmff_hash_parallel_v3<R: Read + Seek, W: Read + Write + Seek>(
     
     // Create placeholder manifest with Merkle map size included
     let placeholder = builder.unsigned_manifest_placeholder(signer.reserve_size())?;
-    println!("   Placeholder: {} bytes", placeholder.len());
+    println!("   Placeholder: {} bytes (with Merkle map)", placeholder.len());
 
     // Write file with placeholder
     println!("⚡ Writing file...");
@@ -116,27 +116,28 @@ fn sign_with_bmff_hash_parallel_v3<R: Read + Seek, W: Read + Write + Seek>(
     drop(output); // Close so we can open with mmap
     
     // Open output with mmap for parallel hashing
-    println!("🚀 Parallel hashing with Merkle tree (zero-copy mmap)...");
+    println!("🚀 Parallel hashing mdat boxes only (true V3 Merkle)...");
     let output_asset = unsafe { Asset::open_with_mmap(output_path)? };
     
-    // Hash with JUMBF exclusion in parallel using rayon + mmap
-    let hash_updates = Updates::new()
-        .with_chunk_size(1024 * 1024)  // 1MB chunks for V3
-        .exclude_from_processing(vec![SegmentKind::Jumbf], ExclusionMode::DataOnly);
+    // Hash ONLY mdat boxes (ImageData segments) in 1MB chunks
+    // This is the correct V3 behavior per C2PA spec
+    let chunk_hashes = output_asset.parallel_hash_segments::<Sha256>(
+        SegmentKind::ImageData,  // Only hash mdat boxes
+        1024 * 1024,              // 1MB fixed blocks
+    )?;
     
-    let chunk_hashes = output_asset.parallel_hash_mmap::<Sha256>(&hash_updates)?;
-    println!("   📦 Computed {} chunk hashes in parallel", chunk_hashes.len());
+    println!("   📦 Computed {} chunk hashes from mdat boxes", chunk_hashes.len());
     
     // Build Merkle tree root
     let merkle_root_hash = merkle_root::<Sha256>(&chunk_hashes);
     println!("   🌳 Merkle root: {:02x?}...", &merkle_root_hash[..8]);
     
     // Update BmffHash with real V3 Merkle data
-    println!("📦 Updating BmffHash V3 with computed hash...");
+    println!("📦 Updating BmffHash V3 with computed Merkle tree...");
     let mut bmff_hash = create_bmff_hash();
     bmff_hash.set_hash(merkle_root_hash.to_vec());
     
-    // Create real Merkle map with actual count
+    // Create real Merkle map with actual count and fixed_block_size
     let real_merkle_map = c2pa::assertions::MerkleMap {
         unique_id: 0,
         local_id: 0,
@@ -144,7 +145,7 @@ fn sign_with_bmff_hash_parallel_v3<R: Read + Seek, W: Read + Write + Seek>(
         alg: Some("sha256".to_string()),
         init_hash: None,
         hashes: c2pa::assertions::VecByteBuf(vec![serde_bytes::ByteBuf::from(merkle_root_hash.to_vec())]),
-        fixed_block_size: Some(1024 * 1024),  // 1MB chunks
+        fixed_block_size: Some(1024 * 1024),  // CRITICAL: This enables true V3!
         variable_block_sizes: None,
     };
     bmff_hash.set_merkle(vec![real_merkle_map]);

@@ -878,6 +878,134 @@ impl<R: Read + Seek> Asset<R> {
         Ok(hashes.into_iter().map(|(_, h)| h).collect())
     }
 
+    /// Hash specific segment types in parallel with memory-mapped I/O (for BMFF V3 Merkle)
+    ///
+    /// This is specifically designed for BMFF V3 fixed-block Merkle hashing where we need
+    /// to hash only certain segments (e.g., mdat boxes) in fixed-size chunks.
+    ///
+    /// # Arguments
+    /// * `segment_kind` - Type of segments to hash (e.g., `SegmentKind::ImageData` for mdat)
+    /// * `chunk_size` - Size of each chunk in bytes (e.g., 1MB for V3)
+    ///
+    /// # Returns
+    /// Vector of 32-byte hashes, one per chunk, in order
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use asset_io::{Asset, SegmentKind};
+    /// use sha2::Sha256;
+    ///
+    /// // Open with mmap for zero-copy hashing
+    /// let asset = unsafe { Asset::open_with_mmap("video.mp4")? };
+    ///
+    /// // Hash only mdat boxes in 1MB chunks (BMFF V3 Merkle)
+    /// let chunk_hashes = asset.parallel_hash_segments::<Sha256>(
+    ///     SegmentKind::ImageData,  // mdat boxes
+    ///     1024 * 1024,             // 1MB chunks
+    /// )?;
+    ///
+    /// // Build Merkle tree from chunk hashes
+    /// let merkle_root = merkle_root::<Sha256>(&chunk_hashes);
+    /// ```
+    #[cfg(all(feature = "memory-mapped", feature = "parallel"))]
+    pub fn parallel_hash_segments<H>(
+        &self,
+        segment_kind: crate::segment::SegmentKind,
+        chunk_size: usize,
+    ) -> Result<Vec<[u8; 32]>>
+    where
+        H: sha2::Digest + Clone + Send + Sync + Default,
+    {
+        use crate::segment::ByteRange;
+        use rayon::prelude::*;
+        
+        // Check if mmap is available
+        if !self.structure.has_mmap() {
+            return Err(crate::Error::InvalidFormat(
+                "No memory map available - use open_with_mmap()".into(),
+            ));
+        }
+        
+        // Find all segments of the requested type
+        let mut hash_ranges: Vec<ByteRange> = Vec::new();
+        
+        for segment in self.structure.segments.iter() {
+            if segment.is_type(segment_kind) {
+                // Collect all ranges for this segment
+                for range in &segment.ranges {
+                    hash_ranges.push(*range);
+                }
+            }
+        }
+        
+        if hash_ranges.is_empty() {
+            return Ok(Vec::new());
+        }
+        
+        // Split ranges into fixed-size chunks (virtual continuous data)
+        let mut chunks: Vec<(usize, Vec<ByteRange>)> = Vec::new();
+        let mut chunk_idx = 0;
+        let mut current_chunk_ranges: Vec<ByteRange> = Vec::new();
+        let mut current_chunk_size = 0u64;
+        
+        for range in hash_ranges {
+            let mut offset = range.offset;
+            let end = range.offset + range.size;
+            
+            while offset < end {
+                let remaining_in_range = end - offset;
+                let space_in_chunk = chunk_size as u64 - current_chunk_size;
+                let bytes_to_take = remaining_in_range.min(space_in_chunk);
+                
+                current_chunk_ranges.push(ByteRange::new(offset, bytes_to_take));
+                current_chunk_size += bytes_to_take;
+                offset += bytes_to_take;
+                
+                // When chunk is full, save it and start a new one
+                if current_chunk_size >= chunk_size as u64 {
+                    chunks.push((chunk_idx, std::mem::take(&mut current_chunk_ranges)));
+                    chunk_idx += 1;
+                    current_chunk_size = 0;
+                }
+            }
+        }
+        
+        // Don't forget the last partial chunk
+        if !current_chunk_ranges.is_empty() {
+            chunks.push((chunk_idx, current_chunk_ranges));
+        }
+        
+        // Hash in parallel - each thread reads from multiple ranges if needed
+        let structure = &self.structure;
+        let hash_results: Result<Vec<(usize, [u8; 32])>> = chunks
+            .par_iter()
+            .map(|(idx, ranges)| {
+                let mut hasher = H::new();
+                
+                // Hash all ranges in this chunk
+                for range in ranges {
+                    let slice = structure
+                        .get_mmap_slice(*range)
+                        .ok_or_else(|| crate::Error::InvalidFormat("mmap slice not found for range".into()))?;
+                    hasher.update(slice);
+                }
+                
+                let result = hasher.finalize();
+                let mut hash = [0u8; 32];
+                hash.copy_from_slice(&result[..32]);
+                Ok((*idx, hash))
+            })
+            .collect();
+        
+        let mut hashes = hash_results?;
+        
+        // Sort by index to maintain order (parallel collect may be unordered)
+        hashes.sort_by_key(|(idx, _)| *idx);
+        
+        Ok(hashes.into_iter().map(|(_, h)| h).collect())
+    }
+
     /// Get chunk specifications for parallel processing
     ///
     /// Returns a list of [`ChunkSpec`] describing the chunks to process,

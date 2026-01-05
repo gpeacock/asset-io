@@ -938,6 +938,30 @@ impl BmffIO {
             }
         }
 
+        // TODO: Find mdat boxes (media data) for V3 Merkle hashing
+        // Temporarily disabled - need to ensure it doesn't break write logic
+        /*
+        if let Some(mdat_list) = bmff_map.get("/mdat") {
+            for mdat_token in mdat_list {
+                let box_info = &bmff_tree[*mdat_token];
+                let box_offset = box_info.data.offset;
+                let box_size = box_info.data.size;
+                
+                // mdat header is 8 bytes (or 16 for large size)
+                let header_size = if box_size > u32::MAX as u64 { 16 } else { 8 };
+                let data_offset = box_offset + header_size;
+                let data_size = box_size.saturating_sub(header_size);
+                
+                // Store mdat as ImageData segment for V3 hashing
+                structure.add_segment(Segment::with_ranges(
+                    vec![ByteRange::new(data_offset, data_size)],
+                    SegmentKind::ImageData,
+                    Some(format!("mdat#{}", structure.segments.len())),
+                )?);
+            }
+        }
+        */
+
         // Find EXIF items in HEIF structure (if exif feature enabled)
         #[cfg(feature = "exif")]
         {
