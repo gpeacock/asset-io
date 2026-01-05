@@ -22,6 +22,10 @@ use std::{
 const HEADER_SIZE: u64 = 8; // 4 byte type + 4 byte size
 const HEADER_SIZE_LARGE: u64 = 16; // 4 byte type + 4 byte size + 8 byte large size
 
+// Maximum size for a single buffer allocation to prevent OOM attacks
+// Set to 256MB - reasonable for legitimate BMFF boxes while preventing abuse
+const MAX_BOX_ALLOCATION: u64 = 256 * 1024 * 1024;
+
 const C2PA_UUID: [u8; 16] = [
     0xd8, 0xfe, 0xc3, 0xd6, 0x1b, 0x0e, 0x48, 0x3c, 0x92, 0x97, 0x58, 0x28, 0x87, 0x7e, 0xc4, 0x81,
 ];
@@ -1016,6 +1020,12 @@ impl ContainerIO for BmffIO {
         // Read XMP data from ranges
         if segment.ranges.len() == 1 {
             let range = segment.ranges[0];
+            if range.size > MAX_BOX_ALLOCATION {
+                return Err(Error::InvalidFormat(format!(
+                    "XMP data size too large: {} bytes (max: {} bytes)",
+                    range.size, MAX_BOX_ALLOCATION
+                )));
+            }
             source.seek(SeekFrom::Start(range.offset))?;
             let mut xmp_data = vec![0u8; range.size as usize];
             source.read_exact(&mut xmp_data)?;
@@ -1173,6 +1183,12 @@ impl ContainerIO for BmffIO {
         source.seek(SeekFrom::Start(0))?;
 
         // Copy ftyp box
+        if ftyp_end > MAX_BOX_ALLOCATION {
+            return Err(Error::InvalidFormat(format!(
+                "ftyp box size too large: {} bytes (max: {} bytes)",
+                ftyp_end, MAX_BOX_ALLOCATION
+            )));
+        }
         let mut buffer = vec![0u8; ftyp_end as usize];
         source.read_exact(&mut buffer)?;
         writer.write_all(&buffer)?;
@@ -1186,6 +1202,12 @@ impl ContainerIO for BmffIO {
             // Keep existing XMP
             if let Some(token) = existing_xmp_token {
                 let box_info = &bmff_tree[token].data;
+                if box_info.size > MAX_BOX_ALLOCATION {
+                    return Err(Error::InvalidFormat(format!(
+                        "XMP box size too large: {} bytes (max: {} bytes)",
+                        box_info.size, MAX_BOX_ALLOCATION
+                    )));
+                }
                 source.seek(SeekFrom::Start(box_info.offset))?;
                 let mut box_data = vec![0u8; box_info.size as usize];
                 source.read_exact(&mut box_data)?;
@@ -1202,6 +1224,12 @@ impl ContainerIO for BmffIO {
             // Keep existing C2PA
             if let Some(token) = existing_c2pa_token {
                 let box_info = &bmff_tree[token].data;
+                if box_info.size > MAX_BOX_ALLOCATION {
+                    return Err(Error::InvalidFormat(format!(
+                        "C2PA box size too large: {} bytes (max: {} bytes)",
+                        box_info.size, MAX_BOX_ALLOCATION
+                    )));
+                }
                 source.seek(SeekFrom::Start(box_info.offset))?;
                 let mut box_data = vec![0u8; box_info.size as usize];
                 source.read_exact(&mut box_data)?;
@@ -1235,6 +1263,12 @@ impl ContainerIO for BmffIO {
                 source.seek(SeekFrom::Start(box_start + header.size))?;
             } else {
                 // Copy this box
+                if header.size > MAX_BOX_ALLOCATION {
+                    return Err(Error::InvalidFormat(format!(
+                        "Box size too large: {} bytes (max: {} bytes)",
+                        header.size, MAX_BOX_ALLOCATION
+                    )));
+                }
                 source.seek(SeekFrom::Start(box_start))?;
                 let mut box_data = vec![0u8; header.size as usize];
                 source.read_exact(&mut box_data)?;
@@ -1421,6 +1455,12 @@ impl ContainerIO for BmffIO {
             // Keep existing XMP
             if let Some(token) = existing_xmp_token {
                 let box_info = &bmff_tree[token].data;
+                if box_info.size > MAX_BOX_ALLOCATION {
+                    return Err(Error::InvalidFormat(format!(
+                        "XMP box size too large: {} bytes (max: {} bytes)",
+                        box_info.size, MAX_BOX_ALLOCATION
+                    )));
+                }
                 source.seek(SeekFrom::Start(box_info.offset))?;
                 let mut box_data = vec![0u8; box_info.size as usize];
                 source.read_exact(&mut box_data)?;
@@ -1464,6 +1504,12 @@ impl ContainerIO for BmffIO {
             // Keep existing C2PA
             if let Some(token) = existing_c2pa_token {
                 let box_info = &bmff_tree[token].data;
+                if box_info.size > MAX_BOX_ALLOCATION {
+                    return Err(Error::InvalidFormat(format!(
+                        "C2PA box size too large: {} bytes (max: {} bytes)",
+                        box_info.size, MAX_BOX_ALLOCATION
+                    )));
+                }
                 source.seek(SeekFrom::Start(box_info.offset))?;
                 let mut box_data = vec![0u8; box_info.size as usize];
                 source.read_exact(&mut box_data)?;
@@ -1500,6 +1546,12 @@ impl ContainerIO for BmffIO {
                 source.seek(SeekFrom::Start(box_start + header.size))?;
             } else {
                 // Copy this box
+                if header.size > MAX_BOX_ALLOCATION {
+                    return Err(Error::InvalidFormat(format!(
+                        "Box size too large: {} bytes (max: {} bytes)",
+                        header.size, MAX_BOX_ALLOCATION
+                    )));
+                }
                 source.seek(SeekFrom::Start(box_start))?;
                 let mut box_data = vec![0u8; header.size as usize];
                 source.read_exact(&mut box_data)?;
@@ -1682,6 +1734,12 @@ impl ContainerIO for BmffIO {
 
         // Read the EXIF data
         let location = segment.location();
+        if location.size > MAX_BOX_ALLOCATION {
+            return Err(Error::InvalidFormat(format!(
+                "EXIF data size too large: {} bytes (max: {} bytes)",
+                location.size, MAX_BOX_ALLOCATION
+            )));
+        }
         source.seek(SeekFrom::Start(location.offset))?;
         let mut data = vec![0u8; location.size as usize];
         source.read_exact(&mut data)?;
