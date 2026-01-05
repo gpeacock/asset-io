@@ -662,7 +662,6 @@ impl<R: Read + Seek> Asset<R> {
         
         let chunk_size = updates.processing.effective_chunk_size().max(DEFAULT_CHUNK_SIZE);
         let exclude_segments = &updates.processing.exclude_segments;
-        let exclusion_mode = updates.processing.exclusion_mode;
         
         // Calculate exclusion ranges
         let exclusion_ranges: Vec<ByteRange> = exclude_segments
@@ -670,16 +669,7 @@ impl<R: Read + Seek> Asset<R> {
             .filter_map(|kind| {
                 self.structure.segments.iter().find(|s| s.is_type(*kind))
             })
-            .map(|segment| {
-                let loc = segment.location();
-                if exclusion_mode == crate::ExclusionMode::DataOnly {
-                    // For DataOnly, use the data portion
-                    loc
-                } else {
-                    // For EntireSegment, use the full segment
-                    loc
-                }
-            })
+            .map(|segment| segment.location())
             .collect();
         
         // Read all chunks
@@ -847,7 +837,7 @@ impl<R: Read + Seek> Asset<R> {
             .map(|(idx, range)| {
                 let slice = structure
                     .get_mmap_slice(*range)
-                    .ok_or_else(|| Error::InvalidFormat("mmap slice not found for range".into()))?;
+                    .ok_or_else(|| crate::Error::InvalidFormat("mmap slice not found for range".into()))?;
                 
                 let mut hasher = H::new();
                 hasher.update(slice);
@@ -910,7 +900,6 @@ impl<R: Read + Seek> Asset<R> {
         
         let chunk_size = updates.processing.effective_chunk_size().max(DEFAULT_CHUNK_SIZE);
         let exclude_segments = &updates.processing.exclude_segments;
-        let exclusion_mode = updates.processing.exclusion_mode;
         
         // Calculate exclusion ranges
         let exclusion_ranges: Vec<ByteRange> = exclude_segments
@@ -918,14 +907,7 @@ impl<R: Read + Seek> Asset<R> {
             .filter_map(|kind| {
                 self.structure.segments.iter().find(|s| s.is_type(*kind))
             })
-            .map(|segment| {
-                let loc = segment.location();
-                if exclusion_mode == crate::ExclusionMode::DataOnly {
-                    loc
-                } else {
-                    loc
-                }
-            })
+            .map(|segment| segment.location())
             .collect();
         
         // Build chunk specs

@@ -702,16 +702,16 @@ where
     let mut current_level: Vec<[u8; 32]> = leaves.to_vec();
 
     while current_level.len() > 1 {
-        let mut next_level = Vec::with_capacity((current_level.len() + 1) / 2);
+        let mut next_level = Vec::with_capacity(current_level.len().div_ceil(2));
 
         for pair in current_level.chunks(2) {
             let mut hasher = H::new();
-            hasher.update(&pair[0]);
+            hasher.update(pair[0]);
             if pair.len() > 1 {
-                hasher.update(&pair[1]);
+                hasher.update(pair[1]);
             } else {
                 // Odd number: hash with itself
-                hasher.update(&pair[0]);
+                hasher.update(pair[0]);
             }
             let result = hasher.finalize();
             let mut hash = [0u8; 32];

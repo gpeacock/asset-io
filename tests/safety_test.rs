@@ -4,7 +4,7 @@
 //! Comprehensive testing should be done with fuzzing (cargo-fuzz).
 
 #[cfg(feature = "memory-mapped")]
-use asset_io::{ByteRange, ContainerKind};
+use asset_io::ByteRange;
 
 // MAX_SEGMENT_SIZE is now internal - tests should verify behavior not constants
 #[test]

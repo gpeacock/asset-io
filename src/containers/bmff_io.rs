@@ -608,11 +608,7 @@ impl BmffFragment {
 
     /// Get the size of media data (excluding mdat header)
     pub fn data_size(&self) -> u64 {
-        if self.mdat_size >= 8 {
-            self.mdat_size - 8
-        } else {
-            0
-        }
+        self.mdat_size.saturating_sub(8)
     }
 
     /// Get the total size of this fragment (moof + mdat)
@@ -920,7 +916,7 @@ impl BmffIO {
 
                         // Current position is start of JUMBF data
                         let data_offset = source.stream_position()?;
-                        let header_overhead = (data_offset - box_offset) as u64;
+                        let header_overhead = data_offset - box_offset;
                         let data_size = box_size.saturating_sub(header_overhead);
 
                         // Store TWO ranges for C2PA segments:

@@ -140,7 +140,7 @@ impl MediaType {
     /// assert_eq!(media.to_mime(), "image/jpeg");
     /// # }
     /// ```
-    pub fn to_mime(&self) -> &'static str {
+    pub fn to_mime(self) -> &'static str {
         match self {
             #[cfg(feature = "jpeg")]
             MediaType::Jpeg => "image/jpeg",
@@ -174,7 +174,7 @@ impl MediaType {
     /// assert_eq!(media.to_extension(), "jpg");
     /// # }
     /// ```
-    pub fn to_extension(&self) -> &'static str {
+    pub fn to_extension(self) -> &'static str {
         match self {
             #[cfg(feature = "jpeg")]
             MediaType::Jpeg => "jpg",

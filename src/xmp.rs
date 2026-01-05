@@ -115,7 +115,7 @@ impl MiniXmp {
     ///
     /// Returns `None` if the bytes are not valid UTF-8.
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        std::str::from_utf8(bytes).ok().map(|s| Self::new(s))
+        std::str::from_utf8(bytes).ok().map(Self::new)
     }
 
     /// Get the XMP as a string slice
