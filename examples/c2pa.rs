@@ -207,6 +207,31 @@ fn verify_asset(path: &str, mime_type: &str) -> Result<(), Box<dyn std::error::E
         }
     }
 
+    // Display manifest info if available
+    if let Some(manifest) = reader.active_manifest() {
+        // Check for BmffHash assertion with Merkle tree
+        match manifest.find_assertion::<BmffHash>(BmffHash::LABEL) {
+            Ok(bmff_hash) => {
+                println!("   📦 BmffHash V{}", bmff_hash.bmff_version());
+                if let Some(merkle) = bmff_hash.merkle() {
+                    println!("   🌳 Merkle tree detected:");
+                    for (i, mm) in merkle.iter().enumerate() {
+                        println!("      Map {}: {} leaves", i, mm.count);
+                        if let Some(block_size) = mm.fixed_block_size {
+                            println!("         Fixed block size: {} KB", block_size / 1024);
+                        }
+                    }
+                }
+            }
+            Err(_) => {
+                // Check for DataHash
+                if let Ok(_data_hash) = manifest.find_assertion::<DataHash>(DataHash::LABEL) {
+                    println!("   📦 DataHash (JPEG/PNG workflow)");
+                }
+            }
+        }
+    }
+
     println!("✅ Verification complete!");
     Ok(())
 }
@@ -220,7 +245,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let source_path = &args[1];
 
-    // Load settings and signer
+    // Load settings and signer (includes V3 Merkle tree settings)
     let settings_str = std::fs::read_to_string("tests/fixtures/test_settings.json")?;
     Settings::from_string(&settings_str, "json")?;
     let signer = Settings::signer()?;
