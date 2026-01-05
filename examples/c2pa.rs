@@ -48,14 +48,135 @@ fn sign_asset_with_c2pa<R: Read + Seek, W: Read + Write + Seek>(
 }
 
 /// Sign BMFF asset (HEIC, HEIF, M4A, AVIF) with BmffHash
+/// 
+/// For V3 Merkle tree hashing with parallel+memory-mapped features enabled,
+/// uses asset-io's fast parallel hashing. Otherwise falls back to c2pa-rs sequential.
 fn sign_with_bmff_hash<R: Read + Seek, W: Read + Write + Seek>(
     asset: &mut Asset<R>,
     builder: &mut Builder,
     signer: &dyn Signer,
     output: &mut W,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    println!("\n=== BmffHash Workflow ===");
+    #[cfg(all(feature = "parallel", feature = "memory-mapped"))]
+    {
+        println!("\n=== BmffHash V3 Workflow (Parallel) ===");
+        sign_with_bmff_hash_parallel_v3(asset, builder, signer, output)
+    }
+    
+    #[cfg(not(all(feature = "parallel", feature = "memory-mapped")))]
+    {
+        println!("\n=== BmffHash Workflow (Sequential) ===");
+        sign_with_bmff_hash_sequential(asset, builder, signer, output)
+    }
+}
 
+/// BMFF V3 signing with parallel hashing (requires parallel+memory-mapped features)
+#[cfg(all(feature = "parallel", feature = "memory-mapped"))]
+fn sign_with_bmff_hash_parallel_v3<R: Read + Seek, W: Read + Write + Seek>(
+    asset: &mut Asset<R>,
+    builder: &mut Builder,
+    signer: &dyn Signer,
+    output: &mut W,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use asset_io::merkle_root;
+    
+    // Create BmffHash with dummy Merkle map for size reservation
+    println!("📦 Creating BmffHash V3 placeholder...");
+    let mut bmff_hash = create_bmff_hash();
+    
+    // Pre-allocate Merkle map space (dummy entry for size calculation)
+    let dummy_merkle_map = c2pa::assertions::MerkleMap {
+        unique_id: 0,
+        local_id: 0,
+        count: 1,  // Will be updated with actual count
+        alg: Some("sha256".to_string()),
+        init_hash: None,
+        hashes: c2pa::assertions::VecByteBuf(vec![serde_bytes::ByteBuf::from(vec![0u8; 32])]),
+        fixed_block_size: Some(1024 * 1024),
+        variable_block_sizes: None,
+    };
+    bmff_hash.set_merkle(vec![dummy_merkle_map]);
+    bmff_hash.set_hash(vec![0u8; 32]);  // Dummy hash
+    builder.add_assertion(BmffHash::LABEL, &bmff_hash)?;
+    
+    // Create placeholder manifest with Merkle map size included
+    let placeholder = builder.unsigned_manifest_placeholder(signer.reserve_size())?;
+    println!("   Placeholder: {} bytes", placeholder.len());
+
+    // Write file with placeholder
+    println!("⚡ Writing file...");
+    let updates = Updates::new().set_jumbf(placeholder.clone());
+    
+    let structure = asset.write(output, &updates)?;
+    output.flush()?;
+    
+    // We need the output path to open with mmap
+    // For now, use the known path from main - TODO: pass this as parameter
+    let output_path = std::path::Path::new("target/output_c2pa.heif");
+    drop(output); // Close so we can open with mmap
+    
+    // Open output with mmap for parallel hashing
+    println!("🚀 Parallel hashing with Merkle tree (zero-copy mmap)...");
+    let output_asset = unsafe { Asset::open_with_mmap(output_path)? };
+    
+    // Hash with JUMBF exclusion in parallel using rayon + mmap
+    let hash_updates = Updates::new()
+        .with_chunk_size(1024 * 1024)  // 1MB chunks for V3
+        .exclude_from_processing(vec![SegmentKind::Jumbf], ExclusionMode::DataOnly);
+    
+    let chunk_hashes = output_asset.parallel_hash_mmap::<Sha256>(&hash_updates)?;
+    println!("   📦 Computed {} chunk hashes in parallel", chunk_hashes.len());
+    
+    // Build Merkle tree root
+    let merkle_root_hash = merkle_root::<Sha256>(&chunk_hashes);
+    println!("   🌳 Merkle root: {:02x?}...", &merkle_root_hash[..8]);
+    
+    // Update BmffHash with real V3 Merkle data
+    println!("📦 Updating BmffHash V3 with computed hash...");
+    let mut bmff_hash = create_bmff_hash();
+    bmff_hash.set_hash(merkle_root_hash.to_vec());
+    
+    // Create real Merkle map with actual count
+    let real_merkle_map = c2pa::assertions::MerkleMap {
+        unique_id: 0,
+        local_id: 0,
+        count: chunk_hashes.len(),
+        alg: Some("sha256".to_string()),
+        init_hash: None,
+        hashes: c2pa::assertions::VecByteBuf(vec![serde_bytes::ByteBuf::from(merkle_root_hash.to_vec())]),
+        fixed_block_size: Some(1024 * 1024),  // 1MB chunks
+        variable_block_sizes: None,
+    };
+    bmff_hash.set_merkle(vec![real_merkle_map]);
+    
+    builder.replace_assertion(BmffHash::LABEL, &bmff_hash)?;
+    
+    // Sign manifest
+    println!("🔏 Signing manifest...");
+    let signed = builder.sign_manifest()?;
+    
+    assert_eq!(placeholder.len(), signed.len(), "Size mismatch");
+
+    // Reopen output for in-place update
+    println!("✏️  Updating manifest in-place...");
+    let mut output_file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(output_path)?;
+    structure.update_segment(&mut output_file, SegmentKind::Jumbf, signed)?;
+    output_file.flush()?;
+
+    Ok(())
+}
+
+/// BMFF signing with sequential hashing (fallback)
+#[cfg(not(all(feature = "parallel", feature = "memory-mapped")))]
+fn sign_with_bmff_hash_sequential<R: Read + Seek, W: Read + Write + Seek>(
+    asset: &mut Asset<R>,
+    builder: &mut Builder,
+    signer: &dyn Signer,
+    output: &mut W,
+) -> Result<(), Box<dyn std::error::Error>> {
     // Create BmffHash with mandatory exclusions
     println!("📦 Creating BmffHash...");
     let mut bmff_hash = create_bmff_hash();
@@ -71,13 +192,13 @@ fn sign_with_bmff_hash<R: Read + Seek, W: Read + Write + Seek>(
     let structure = asset.write(output, &updates)?;
     output.flush()?;
 
-    // Compute hash using c2pa-rs (handles V2 offset hashing)
+    // Compute hash using c2pa-rs (handles V2/V3 hashing based on settings)
     println!("🔢 Computing hash...");
     output.seek(SeekFrom::Start(0))?;
     bmff_hash.gen_hash_from_stream(output)?;
     println!("   ✅ Hash: {:02x?}...", &bmff_hash.hash().unwrap()[..8]);
 
-    // Sign and update
+    // Update hash assertion and sign
     builder.replace_assertion(BmffHash::LABEL, &bmff_hash)?;
     let signed = builder.sign_manifest()?;
     
@@ -99,9 +220,11 @@ fn sign_with_data_hash<R: Read + Seek, W: Read + Write + Seek>(
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("\n=== DataHash Workflow ===");
 
-    // Create dummy DataHash (will be replaced with real one)
-    println!("📦 Creating DataHash...");
-    let (dummy_dh, dummy_size) = create_dummy_data_hash()?;
+    // Create dummy DataHash for size reservation
+    println!("📦 Creating DataHash placeholder...");
+    let mut dummy_dh = DataHash::new("jumbf_manifest", "sha256");
+    dummy_dh.add_exclusion(HashRange::new(u32::MAX as u64, u32::MAX as u64));
+    dummy_dh.set_hash(vec![0; 32]);
     builder.add_assertion(DataHash::LABEL, &dummy_dh)?;
 
     // Create placeholder manifest
@@ -123,9 +246,25 @@ fn sign_with_data_hash<R: Read + Seek, W: Read + Write + Seek>(
     println!("   ✅ Hash: {:02x?}...", &hash[..8]);
 
     // Create real DataHash with exclusion range
-    let real_dh = create_real_data_hash(&structure, hash, dummy_size)?;
+    let manifest_segment_idx = structure
+        .c2pa_jumbf_index()
+        .ok_or("No C2PA JUMBF found")?;
+    let manifest_segment = &structure.segments[manifest_segment_idx];
+    let data_offset = manifest_segment.ranges[0].offset;
+    let data_size: u64 = manifest_segment.ranges.iter().map(|r| r.size).sum();
 
-    // Sign and update
+    let (exclusion_offset, exclusion_size) = match structure.container {
+        ContainerKind::Png => (data_offset, data_size + 4), // +4 for CRC
+        ContainerKind::Jpeg => (data_offset, data_size),
+        _ => return Err("Unsupported container for DataHash".into()),
+    };
+
+    let mut real_dh = DataHash::new("jumbf_manifest", "sha256");
+    let hr = HashRange::new(exclusion_offset, exclusion_size);
+    real_dh.add_exclusion(hr);
+    real_dh.set_hash(hash);
+
+    // Replace hash assertion and sign
     builder.replace_assertion(DataHash::LABEL, &real_dh)?;
     let signed = builder.sign_manifest()?;
     
@@ -158,33 +297,6 @@ fn create_bmff_hash() -> BmffHash {
 
     bmff_hash.set_hash(vec![0; 32]); // Placeholder
     bmff_hash
-}
-
-/// Create dummy DataHash for size reservation
-fn create_dummy_data_hash() -> Result<(DataHash, usize), Box<dyn std::error::Error>> {
-    let mut dummy = DataHash::new("jumbf_manifest", "sha256");
-    dummy.add_exclusion(HashRange::new(u32::MAX as u64, u32::MAX as u64));
-    dummy.set_hash(vec![0; 32]);
-
-    let size = serde_cbor::to_vec(&dummy)?.len();
-    Ok((dummy, size))
-}
-
-/// Create real DataHash with actual exclusion range
-fn create_real_data_hash(
-    structure: &Structure,
-    hash: Vec<u8>,
-    target_size: usize,
-) -> Result<DataHash, Box<dyn std::error::Error>> {
-    let (offset, size) = asset_io::exclusion_range_for_segment(structure, SegmentKind::Jumbf)
-        .ok_or("No JUMBF segment found")?;
-
-    let mut data_hash = DataHash::new("jumbf_manifest", "sha256");
-    data_hash.add_exclusion(HashRange::new(offset, size));
-    data_hash.set_hash(hash);
-    data_hash.pad_to_size(target_size)?;
-
-    Ok(data_hash)
 }
 
 /// Verify signed asset
@@ -250,7 +362,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Settings::from_string(&settings_str, "json")?;
     let signer = Settings::signer()?;
 
-    // Open asset
+    // Open asset - use mmap for parallel hashing if features enabled
+    #[cfg(all(feature = "parallel", feature = "memory-mapped"))]
+    let mut asset = unsafe { Asset::open_with_mmap(source_path)? };
+    
+    #[cfg(not(all(feature = "parallel", feature = "memory-mapped")))]
     let mut asset = Asset::open(source_path)?;
     let mime_type = asset.media_type().to_mime();
     let extension = asset.media_type().to_extension();
