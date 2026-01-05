@@ -938,9 +938,10 @@ impl BmffIO {
             }
         }
 
-        // TODO: Find mdat boxes (media data) for V3 Merkle hashing
-        // Temporarily disabled - need to ensure it doesn't break write logic
-        /*
+        // Find mdat boxes (media data) for V3 Merkle hashing
+        // These contain the actual media content (video/audio/image data)
+        // NOTE: These are tracked separately from metadata (XMP/JUMBF) and should NOT
+        // be considered when calculating metadata_end_in_source in calculate_updated_structure
         if let Some(mdat_list) = bmff_map.get("/mdat") {
             for mdat_token in mdat_list {
                 let box_info = &bmff_tree[*mdat_token];
@@ -948,6 +949,7 @@ impl BmffIO {
                 let box_size = box_info.data.size;
                 
                 // mdat header is 8 bytes (or 16 for large size)
+                // For V3 Merkle hashing, we hash the DATA, not the header
                 let header_size = if box_size > u32::MAX as u64 { 16 } else { 8 };
                 let data_offset = box_offset + header_size;
                 let data_size = box_size.saturating_sub(header_size);
@@ -960,7 +962,6 @@ impl BmffIO {
                 )?);
             }
         }
-        */
 
         // Find EXIF items in HEIF structure (if exif feature enabled)
         #[cfg(feature = "exif")]
@@ -1663,24 +1664,29 @@ impl ContainerIO for BmffIO {
 
         // Start with ftyp box (assume it exists and comes first)
         // For BMFF, XMP/JUMBF boxes are written right after ftyp
-        // If source has segments, infer ftyp size from first segment's offset
+        // If source has metadata segments, infer ftyp size from first metadata segment's offset
+        // Only consider XMP/JUMBF/EXIF segments, not ImageData (mdat boxes)
         // Otherwise, we need to make an educated guess based on typical sizes
-        let ftyp_end = if let Some(first_seg) = source_structure.segments.first() {
-            // The first segment (XMP or other) tells us where metadata starts
-            // This is right after ftyp in the source file
-            first_seg.location().offset
-        } else {
-            // No segments in source - use typical ftyp size for each format
-            // These are empirically determined from common files
-            match source_structure.media_type {
-                crate::MediaType::QuickTime => 20u64,  // QuickTime .mov files
-                crate::MediaType::Heif => 24u64,        // HEIF images  
-                crate::MediaType::Heic => 24u64,        // HEIC images
-                crate::MediaType::Avif => 32u64,        // AVIF images (larger ftyp!)
-                crate::MediaType::Mp4Audio => 32u64,    // M4A audio files
-                _ => 24u64,                             // Generic MP4 default
-            }
-        };
+        let ftyp_end = source_structure.segments
+            .iter()
+            .filter(|seg| {
+                // Only metadata segments that appear near the start
+                seg.is_xmp() || seg.is_jumbf() || seg.is_exif()
+            })
+            .map(|seg| seg.location().offset)
+            .min()  // Get the earliest metadata segment
+            .unwrap_or_else(|| {
+                // No segments in source - use typical ftyp size for each format
+                // These are empirically determined from common files
+                match source_structure.media_type {
+                    crate::MediaType::QuickTime => 20u64,  // QuickTime .mov files
+                    crate::MediaType::Heif => 24u64,        // HEIF images  
+                    crate::MediaType::Heic => 24u64,        // HEIC images
+                    crate::MediaType::Avif => 32u64,        // AVIF images (larger ftyp!)
+                    crate::MediaType::Mp4Audio => 32u64,    // M4A audio files
+                    _ => 24u64,                             // Generic MP4 default
+                }
+            });
         
         let mut current_offset = ftyp_end;
 
@@ -1718,12 +1724,19 @@ impl ContainerIO for BmffIO {
 
         // Add remaining boxes size (moov, mdat, etc.)
         // The remaining file size minus what was already accounted for (ftyp + metadata)
-        let metadata_end_in_source = if let Some(last_seg) = source_structure.segments.last() {
-            let loc = last_seg.location();
-            loc.offset + loc.size
-        } else {
-            ftyp_end
-        };
+        // Only consider metadata segments (XMP/JUMBF/EXIF), not ImageData (mdat boxes)
+        let metadata_end_in_source = source_structure.segments
+            .iter()
+            .filter(|seg| {
+                // Only metadata segments, not actual media data
+                seg.is_xmp() || seg.is_jumbf() || seg.is_exif()
+            })
+            .last()
+            .map(|seg| {
+                let loc = seg.location();
+                loc.offset + loc.size
+            })
+            .unwrap_or(ftyp_end);
         
         let remaining_size = source_structure.total_size.saturating_sub(metadata_end_in_source);
         current_offset += remaining_size;
