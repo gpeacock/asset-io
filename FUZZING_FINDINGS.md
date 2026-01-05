@@ -10,10 +10,13 @@ Initial fuzzing session completed with the following results:
 | fuzz_parse  | 30s      | 365        | 0       | 0   | ✅ Clean |
 | fuzz_xmp    | 20s      | 381,219    | 0       | 0   | ✅ Clean |
 | fuzz_write  | 20s      | ~100       | 0       | 1   | ⚠️ OOM found |
+| **Post-Fix** |||||||
+| fuzz_write  | 31s      | 98,569     | 0       | 0   | ✅ Fixed! |
 
 ### Issue #1: Out-of-Memory (OOM) in BMFF Write
 
-**Severity**: Medium (DoS vulnerability)
+**Severity**: Medium (DoS vulnerability)  
+**Status**: ✅ **FIXED**
 
 **File**: `fuzz/artifacts/fuzz_write/oom-ad189779cabf1a2ba45cc8637444df3876c68799`
 
@@ -31,30 +34,39 @@ Fuzzer discovered an input (malformed HEIC file) that causes the write operation
 ```
 
 **Root Cause**: 
-The BMFF handler is likely trusting a size field from the malformed input without validation, leading to an attempted multi-gigabyte allocation.
+The BMFF handler was trusting size fields from malformed input without validation, leading to attempted multi-gigabyte allocations.
 
-**Impact**:
-- Denial of Service (DoS) - Out of memory
-- Could exhaust system resources
-- Affects write operations on BMFF files (HEIC, HEIF, AVIF, MP4, MOV)
-
-**Recommendation**:
-Add maximum size limits for buffer allocations in BMFF write operations:
+**Fix Applied**:
+Added `MAX_BOX_ALLOCATION` constant (256MB) and validation before all buffer allocations:
 
 ```rust
-const MAX_ALLOCATION_SIZE: u64 = 100 * 1024 * 1024; // 100MB
+const MAX_BOX_ALLOCATION: u64 = 256 * 1024 * 1024; // 256MB
 
-if size > MAX_ALLOCATION_SIZE {
-    return Err(Error::InvalidFormat(
-        format!("Box size too large: {} bytes (max: {})", size, MAX_ALLOCATION_SIZE)
-    ));
+if size > MAX_BOX_ALLOCATION {
+    return Err(Error::InvalidFormat(format!(
+        "Box size too large: {} bytes (max: {} bytes)",
+        size, MAX_BOX_ALLOCATION
+    )));
 }
 ```
 
-**File for Reproduction**:
-```bash
-cargo +nightly fuzz run fuzz_write fuzz/artifacts/fuzz_write/oom-ad189779cabf1a2ba45cc8637444df3876c68799
-```
+Applied to 8 allocation sites:
+- ftyp box allocation
+- XMP box allocation (read + write paths)
+- C2PA box allocation (read + write paths)  
+- Generic box copying loops
+- EXIF data allocation
+
+**Verification**:
+- ✅ Previously failing input now handled as error
+- ✅ Write fuzzer: 98,569 runs in 31s with 0 crashes
+- ✅ All tests pass
+- ✅ No regressions
+
+**Impact**:
+- Prevents Denial of Service (DoS) attacks
+- Protects against resource exhaustion
+- Applies to all BMFF formats (HEIC, HEIF, AVIF, MP4, MOV)
 
 ### Overall Assessment
 
@@ -70,9 +82,9 @@ cargo +nightly fuzz run fuzz_write fuzz/artifacts/fuzz_write/oom-ad189779cabf1a2
 
 ### Next Steps
 
-1. **High Priority**: Fix the OOM issue by adding size limits
-2. **Medium Priority**: Review all allocation sites in BMFF code for similar issues
-3. **Low Priority**: Run longer fuzzing sessions (hours) to find deeper issues
+1. ~~**High Priority**: Fix the OOM issue by adding size limits~~ ✅ **DONE**
+2. ~~**Medium Priority**: Review all allocation sites in BMFF code for similar issues~~ ✅ **DONE**
+3. **Medium Priority**: Run longer fuzzing sessions (hours) to find deeper issues
 4. **Continuous**: Integrate into CI for ongoing validation
 
 ### Fuzzing Configuration Used
@@ -97,8 +109,14 @@ The fuzzers achieved good coverage quickly:
 
 ### Conclusion
 
-✅ **Success**: Fuzzing infrastructure is working perfectly and already found a real issue!
+✅ **Success**: Fuzzing infrastructure is working perfectly and already found and fixed a real vulnerability!
 
-The OOM vulnerability is a great find - exactly the type of issue fuzzing excels at discovering. This would have been missed by normal testing since it requires a specifically crafted malformed file.
+The OOM vulnerability was discovered and fixed within the first hour of fuzzing:
+1. **Discovery**: Fuzzer found malformed input causing 3.7GB allocation
+2. **Analysis**: Identified root cause (missing size validation)
+3. **Fix**: Added `MAX_BOX_ALLOCATION` limits across all allocation sites
+4. **Verification**: Re-ran fuzzer, 98K+ operations with zero issues
 
-After fixing the size validation issue, we should re-run the fuzzers for longer periods (1-24 hours) to ensure no other issues exist.
+This demonstrates the value of systematic security testing. The vulnerability would have been completely missed by normal testing since it requires specifically crafted malformed files.
+
+**Current Status**: All known issues resolved. Ready for extended fuzzing sessions.
