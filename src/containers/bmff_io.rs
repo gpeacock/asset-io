@@ -1193,6 +1193,11 @@ impl ContainerIO for BmffIO {
         source.read_exact(&mut buffer)?;
         writer.write_all(&buffer)?;
 
+        // ===== C2PA Spec Compliance: Box Ordering =====
+        // Per C2PA spec A.5.1: XMP UUID boxes SHALL be placed immediately after ftyp
+        // and BEFORE any C2PA UUID boxes. This ensures proper manifest discovery.
+        // Order: ftyp → XMP (optional) → C2PA (optional) → other boxes
+
         // Write new XMP UUID if needed
         if write_xmp {
             if let MetadataUpdate::Set(ref xmp_data) = updates.xmp {
@@ -1437,6 +1442,11 @@ impl ContainerIO for BmffIO {
 
         // Track current write position for V2 offset calculations
         let xmp_box_start = ftyp_end;
+
+        // ===== C2PA Spec Compliance: Box Ordering =====
+        // Per C2PA spec A.5.1: XMP UUID boxes SHALL be placed immediately after ftyp
+        // and BEFORE any C2PA UUID boxes. This ensures proper manifest discovery.
+        // Order: ftyp → XMP (optional) → C2PA (optional) → other boxes
 
         // Write new XMP UUID if needed
         if write_xmp {
