@@ -41,42 +41,21 @@ fn sign_asset_with_c2pa<R: Read + Seek, W: Read + Write + Seek>(
     let is_bmff = matches!(container, ContainerKind::Bmff);
 
     if is_bmff {
-        sign_with_bmff_hash(asset, builder, signer, output)
+        println!("\n=== BmffHash Workflow (Sequential) ===");
+        sign_with_bmff_hash_sequential(asset, builder, signer, output)
     } else {
         sign_with_data_hash(asset, builder, signer, output)
     }
 }
 
-/// Sign BMFF asset (HEIC, HEIF, M4A, AVIF) with BmffHash
-/// 
-/// For V3 Merkle tree hashing with parallel+memory-mapped features enabled,
-/// uses asset-io's fast parallel hashing. Otherwise falls back to c2pa-rs sequential.
-fn sign_with_bmff_hash<R: Read + Seek, W: Read + Write + Seek>(
-    asset: &mut Asset<R>,
-    builder: &mut Builder,
-    signer: &dyn Signer,
-    output: &mut W,
-) -> Result<(), Box<dyn std::error::Error>> {
-    #[cfg(all(feature = "parallel", feature = "memory-mapped"))]
-    {
-        println!("\n=== BmffHash V3 Workflow (Parallel) ===");
-        sign_with_bmff_hash_parallel_v3(asset, builder, signer, output)
-    }
-    
-    #[cfg(not(all(feature = "parallel", feature = "memory-mapped")))]
-    {
-        println!("\n=== BmffHash Workflow (Sequential) ===");
-        sign_with_bmff_hash_sequential(asset, builder, signer, output)
-    }
-}
-
 /// BMFF V3 signing with parallel hashing (requires parallel+memory-mapped features)
+/// Takes output path directly and manages file handles internally
 #[cfg(all(feature = "parallel", feature = "memory-mapped"))]
-fn sign_with_bmff_hash_parallel_v3<R: Read + Seek, W: Read + Write + Seek>(
+fn sign_with_bmff_hash_parallel_v3<R: Read + Seek>(
     asset: &mut Asset<R>,
     builder: &mut Builder,
     signer: &dyn Signer,
-    output: &mut W,
+    output_path: &std::path::Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use asset_io::merkle_root;
     
@@ -103,21 +82,29 @@ fn sign_with_bmff_hash_parallel_v3<R: Read + Seek, W: Read + Write + Seek>(
     let placeholder = builder.unsigned_manifest_placeholder(signer.reserve_size())?;
     println!("   Placeholder: {} bytes (with Merkle map)", placeholder.len());
 
-    // Write file with placeholder
+    // Write file with placeholder to the output path
     println!("⚡ Writing file...");
     let updates = Updates::new().set_jumbf(placeholder.clone());
     
-    let structure = asset.write(output, &updates)?;
-    output.flush()?;
+    let mut output_file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(output_path)?;
     
-    // We need the output path to open with mmap
-    // For now, use the known path from main - TODO: pass this as parameter
-    let output_path = std::path::Path::new("target/output_c2pa.heif");
-    drop(output); // Close so we can open with mmap
+    let structure = asset.write(&mut output_file, &updates)?;
+    output_file.flush()?;
+    drop(output_file); // Close so we can open with mmap
     
     // Open output with mmap for parallel hashing
     println!("🚀 Parallel hashing mdat boxes only (true V3 Merkle)...");
     let output_asset = unsafe { Asset::open_with_mmap(output_path)? };
+    
+    println!("   📊 Output file has {} segments", output_asset.structure().segments().len());
+    for seg in output_asset.structure().segments() {
+        println!("      - {:?} at offset={}, size={}", seg.kind, seg.location().offset, seg.location().size);
+    }
     
     // Hash ONLY mdat boxes (ImageData segments) in 1MB chunks
     // This is the correct V3 behavior per C2PA spec
@@ -127,6 +114,10 @@ fn sign_with_bmff_hash_parallel_v3<R: Read + Seek, W: Read + Write + Seek>(
     )?;
     
     println!("   📦 Computed {} chunk hashes from mdat boxes", chunk_hashes.len());
+    
+    if chunk_hashes.is_empty() {
+        return Err("No mdat boxes found in output file! Cannot compute V3 Merkle hash.".into());
+    }
     
     // Build Merkle tree root
     let merkle_root_hash = merkle_root::<Sha256>(&chunk_hashes);
@@ -170,8 +161,8 @@ fn sign_with_bmff_hash_parallel_v3<R: Read + Seek, W: Read + Write + Seek>(
     Ok(())
 }
 
-/// BMFF signing with sequential hashing (fallback)
-#[cfg(not(all(feature = "parallel", feature = "memory-mapped")))]
+/// BMFF signing with sequential hashing
+/// Used as fallback when parallel features are not enabled, or called directly
 fn sign_with_bmff_hash_sequential<R: Read + Seek, W: Read + Write + Seek>(
     asset: &mut Asset<R>,
     builder: &mut Builder,
@@ -385,16 +376,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .add_action(Action::new(c2pa_action::CREATED)
             .set_source_type(DigitalSourceType::Empty))?;
 
-    // Open output with read+write (keeps handle open throughout)
-    let mut output_file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(&output_path)?;
-
-    // Sign asset (unified function handles both workflows)
-    sign_asset_with_c2pa(&mut asset, &mut builder, signer.as_ref(), &mut output_file)?;
+    // For BMFF with parallel features, call parallel function directly (needs output path)
+    #[cfg(all(feature = "parallel", feature = "memory-mapped", feature = "bmff"))]
+    if asset.structure().container == asset_io::ContainerKind::Bmff {
+        println!("\n=== BmffHash V3 Workflow (Parallel) ===");
+        sign_with_bmff_hash_parallel_v3(&mut asset, &mut builder, signer.as_ref(), std::path::Path::new(&output_path))?;
+    } else {
+        // Open output for non-BMFF workflows
+        let mut output_file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&output_path)?;
+        sign_asset_with_c2pa(&mut asset, &mut builder, signer.as_ref(), &mut output_file)?;
+    }
+    
+    // For non-parallel or non-BMFF, use unified function
+    #[cfg(not(all(feature = "parallel", feature = "memory-mapped", feature = "bmff")))]
+    {
+        let mut output_file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&output_path)?;
+        sign_asset_with_c2pa(&mut asset, &mut builder, signer.as_ref(), &mut output_file)?;
+    }
 
     println!("💾 Saved: {}", output_path);
 
