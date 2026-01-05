@@ -1,0 +1,37 @@
+[package]
+name = "asset-io-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.asset-io]
+path = ".."
+features = ["all-formats", "xmp", "exif"]
+
+# Fuzz targets
+[[bin]]
+name = "fuzz_parse"
+path = "fuzz_targets/fuzz_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_write"
+path = "fuzz_targets/fuzz_write.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_xmp"
+path = "fuzz_targets/fuzz_xmp.rs"
+test = false
+doc = false
+bench = false
