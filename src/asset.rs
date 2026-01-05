@@ -813,34 +813,56 @@ impl<R: Read + Seek> Asset<R> {
             hash_ranges.push(ByteRange::new(last_end, self.structure.total_size - last_end));
         }
         
-        // Split ranges into chunks
-        let mut chunks: Vec<(usize, ByteRange)> = Vec::new();
+        // Split ranges into chunks based on VIRTUAL CONTINUOUS DATA
+        // For Merkle tree hashing, we need fixed-size chunks of the hashable data,
+        // treating excluded segments as if they don't exist
+        let mut chunks: Vec<(usize, Vec<ByteRange>)> = Vec::new();
         let mut chunk_idx = 0;
+        let mut current_chunk_ranges: Vec<ByteRange> = Vec::new();
+        let mut current_chunk_size = 0u64;
         
         for range in hash_ranges {
             let mut offset = range.offset;
             let end = range.offset + range.size;
             
             while offset < end {
-                let remaining = end - offset;
-                let size = remaining.min(chunk_size as u64);
-                chunks.push((chunk_idx, ByteRange::new(offset, size)));
-                offset += size;
-                chunk_idx += 1;
+                let remaining_in_range = end - offset;
+                let space_in_chunk = chunk_size as u64 - current_chunk_size;
+                let bytes_to_take = remaining_in_range.min(space_in_chunk);
+                
+                current_chunk_ranges.push(ByteRange::new(offset, bytes_to_take));
+                current_chunk_size += bytes_to_take;
+                offset += bytes_to_take;
+                
+                // When chunk is full, save it and start a new one
+                if current_chunk_size >= chunk_size as u64 {
+                    chunks.push((chunk_idx, std::mem::take(&mut current_chunk_ranges)));
+                    chunk_idx += 1;
+                    current_chunk_size = 0;
+                }
             }
         }
         
-        // Hash in parallel - each thread reads directly from mmap
+        // Don't forget the last partial chunk
+        if !current_chunk_ranges.is_empty() {
+            chunks.push((chunk_idx, current_chunk_ranges));
+        }
+        
+        // Hash in parallel - each thread reads from multiple ranges if needed
         let structure = &self.structure;
         let hash_results: Result<Vec<(usize, [u8; 32])>> = chunks
             .par_iter()
-            .map(|(idx, range)| {
-                let slice = structure
-                    .get_mmap_slice(*range)
-                    .ok_or_else(|| crate::Error::InvalidFormat("mmap slice not found for range".into()))?;
-                
+            .map(|(idx, ranges)| {
                 let mut hasher = H::new();
-                hasher.update(slice);
+                
+                // Hash all ranges in this chunk
+                for range in ranges {
+                    let slice = structure
+                        .get_mmap_slice(*range)
+                        .ok_or_else(|| crate::Error::InvalidFormat("mmap slice not found for range".into()))?;
+                    hasher.update(slice);
+                }
+                
                 let result = hasher.finalize();
                 let mut hash = [0u8; 32];
                 hash.copy_from_slice(&result[..32]);
