@@ -54,6 +54,10 @@ name = "c2pa"
 required-features = ["xmp"]
 
 [[example]]
+name = "c2pa_embeddable"
+required-features = ["xmp"]
+
+[[example]]
 name = "inspect"
 required-features = ["all-formats", "xmp", "exif"]
 

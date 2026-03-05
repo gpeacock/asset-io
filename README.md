@@ -176,8 +176,11 @@ cargo run --example inspect --features all-formats,xmp,exif -- image.jpg
 # Test all metadata operation combinations
 cargo run --example test_all_combinations --features jpeg,png,test-utils
 
-# C2PA signing workflow demo
+# C2PA signing workflow demo (classic API)
 cargo run --example c2pa --features jpeg,png
+
+# C2PA signing with new embeddable API (0.77.0+)
+cargo run --example c2pa_embeddable --features all-formats,xmp -- input.jpg output.jpg
 
 # Update XMP field in-place
 cargo run --example update_xmp_field --features jpeg,xmp -- photo.jpg dc:title "New Title"
