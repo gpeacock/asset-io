@@ -1288,17 +1288,27 @@ impl ContainerIO for BmffIO {
                 // Skip this box
                 source.seek(SeekFrom::Start(box_start + header.size))?;
             } else {
-                // Copy this box
-                if header.size > MAX_BOX_ALLOCATION {
-                    return Err(Error::InvalidFormat(format!(
-                        "Box size too large: {} bytes (max: {} bytes)",
-                        header.size, MAX_BOX_ALLOCATION
-                    )));
-                }
+                // Copy this box - use streaming for large boxes (mdat, moov, etc.)
                 source.seek(SeekFrom::Start(box_start))?;
-                let mut box_data = vec![0u8; header.size as usize];
-                source.read_exact(&mut box_data)?;
-                writer.write_all(&box_data)?;
+                
+                if header.size > MAX_BOX_ALLOCATION {
+                    // Stream large boxes (e.g., mdat) without loading into memory
+                    // This is crucial for large video files where mdat can be gigabytes
+                    let mut remaining = header.size;
+                    let mut buffer = vec![0u8; 8 * 1024 * 1024]; // 8MB buffer
+                    
+                    while remaining > 0 {
+                        let to_read = remaining.min(buffer.len() as u64) as usize;
+                        source.read_exact(&mut buffer[..to_read])?;
+                        writer.write_all(&buffer[..to_read])?;
+                        remaining -= to_read as u64;
+                    }
+                } else {
+                    // Small boxes can be loaded for efficiency
+                    let mut box_data = vec![0u8; header.size as usize];
+                    source.read_exact(&mut box_data)?;
+                    writer.write_all(&box_data)?;
+                }
             }
 
             current_pos = box_start + header.size;
@@ -1576,16 +1586,8 @@ impl ContainerIO for BmffIO {
                 // Skip this box
                 source.seek(SeekFrom::Start(box_start + header.size))?;
             } else {
-                // Copy this box
-                if header.size > MAX_BOX_ALLOCATION {
-                    return Err(Error::InvalidFormat(format!(
-                        "Box size too large: {} bytes (max: {} bytes)",
-                        header.size, MAX_BOX_ALLOCATION
-                    )));
-                }
+                // Copy this box - use streaming for large boxes
                 source.seek(SeekFrom::Start(box_start))?;
-                let mut box_data = vec![0u8; header.size as usize];
-                source.read_exact(&mut box_data)?;
                 
                 // Check if this is a top-level box (for V2 hashing)
                 let is_top_level = use_bmff_v2 && top_level_offsets.contains(&box_start);
@@ -1593,20 +1595,50 @@ impl ContainerIO for BmffIO {
                 // Determine if this box should be excluded from hash
                 let is_excluded_box = header.name == BoxType::MfraBox;
                 
-                if is_top_level && !is_excluded_box {
-                    // BMFF V2: Hash the offset of this top-level box, then exclude content
-                    pw.process_offset(box_start);
-                    pw.set_exclude_mode(true);
-                    pw.write_all(&box_data)?;
-                    pw.set_exclude_mode(false);
-                } else if is_excluded_box {
-                    // Always exclude certain boxes (mfra) entirely
-                    pw.set_exclude_mode(true);
-                    pw.write_all(&box_data)?;
-                    pw.set_exclude_mode(false);
+                if header.size > MAX_BOX_ALLOCATION {
+                    // Stream large boxes (e.g., mdat) without loading into memory
+                    let mut remaining = header.size;
+                    let mut buffer = vec![0u8; 8 * 1024 * 1024]; // 8MB buffer
+                    
+                    if is_top_level && !is_excluded_box {
+                        // BMFF V2: Hash the offset of this top-level box, then exclude content
+                        pw.process_offset(box_start);
+                        pw.set_exclude_mode(true);
+                    } else if is_excluded_box {
+                        // Always exclude certain boxes (mfra) entirely
+                        pw.set_exclude_mode(true);
+                    }
+                    
+                    while remaining > 0 {
+                        let to_read = remaining.min(buffer.len() as u64) as usize;
+                        source.read_exact(&mut buffer[..to_read])?;
+                        pw.write_all(&buffer[..to_read])?;
+                        remaining -= to_read as u64;
+                    }
+                    
+                    if is_top_level || is_excluded_box {
+                        pw.set_exclude_mode(false);
+                    }
                 } else {
-                    // Normal copy (V1 style, or non-top-level boxes)
-                    pw.write_all(&box_data)?;
+                    // Small boxes can be loaded for efficiency
+                    let mut box_data = vec![0u8; header.size as usize];
+                    source.read_exact(&mut box_data)?;
+                    
+                    if is_top_level && !is_excluded_box {
+                        // BMFF V2: Hash the offset of this top-level box, then exclude content
+                        pw.process_offset(box_start);
+                        pw.set_exclude_mode(true);
+                        pw.write_all(&box_data)?;
+                        pw.set_exclude_mode(false);
+                    } else if is_excluded_box {
+                        // Always exclude certain boxes (mfra) entirely
+                        pw.set_exclude_mode(true);
+                        pw.write_all(&box_data)?;
+                        pw.set_exclude_mode(false);
+                    } else {
+                        // Normal copy (V1 style, or non-top-level boxes)
+                        pw.write_all(&box_data)?;
+                    }
                 }
             }
 
