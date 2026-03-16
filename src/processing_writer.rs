@@ -111,7 +111,10 @@ impl ProcessChunk for MdatChunk<'_> {
 /// let hash = hasher.finalize();
 /// # Ok::<(), std::io::Error>(())
 /// ```
-pub struct ProcessingWriter<'a, W: Write, F> {
+pub struct ProcessingWriter<'a, W: Write, F>
+where
+    F: for<'b> FnMut(&'b (dyn ProcessChunk + 'b)),
+{
     writer: W,
     processor: &'a mut F,
     exclude_mode: bool,
@@ -126,7 +129,7 @@ where
     /// # Arguments
     ///
     /// * `writer` - The underlying writer to forward data to
-    /// * `processor` - Processor that receives each chunk of data
+    /// * `processor` - Callback that receives each chunk of data
     pub fn new(writer: W, processor: &'a mut F) -> Self {
         Self {
             writer,

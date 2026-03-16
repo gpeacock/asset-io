@@ -61,10 +61,6 @@ name = "inspect"
 required-features = ["all-formats", "xmp", "exif"]
 
 [[example]]
-name = "c2pa_streaming"
-required-features = ["xmp"]
-
-[[example]]
 name = "parallel_hash"
 required-features = ["all-formats", "parallel"]
 

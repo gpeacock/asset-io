@@ -318,7 +318,10 @@ impl RiffIO {
         data: &[u8],
         should_exclude: bool,
         data_only: bool,
-    ) -> Result<()> {
+    ) -> Result<()>
+    where
+        F: for<'a> FnMut(&'a (dyn crate::ProcessChunk + 'a)),
+    {
         if should_exclude {
             if data_only {
                 // Include header in hash, exclude data+padding

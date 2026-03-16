@@ -426,7 +426,10 @@ impl PngIO {
         chunk_type: &[u8],
         data: &[u8],
         should_exclude: bool,
-    ) -> Result<()> {
+    ) -> Result<()>
+    where
+        F: for<'a> FnMut(&'a (dyn crate::ProcessChunk + 'a)),
+    {
         // Write length (included in hash)
         pw.write_u32::<BigEndian>(data.len() as u32)?;
 
