@@ -32,9 +32,10 @@ fi
 MANIFEST_JSON="tests/fixtures/minimal_manifest.json"
 SETTINGS_JSON="tests/fixtures/test_settings.json"
 
-# Test files (add your own)
+# Test files (add your own; use tearsofsteel_4k.mov for large-file benchmarks)
 TEST_FILES=(
-    "tearsofsteel_4k.mov:video/quicktime:6.7GB"
+    "tests/fixtures/sample1.heic:image/heic:293KB"
+    "tests/fixtures/FireflyTrain.jpg:image/jpeg:165KB"
 )
 
 # Build the example in release mode
@@ -158,7 +159,7 @@ for test_file_spec in "${TEST_FILES[@]}"; do
     echo "   - Re-read for hashing"
     echo "   - Full file rewrite with manifest"
     echo ""
-    benchmark_tool "c2patool" "$file" "output_c2patool.${file##*.}" "$format"
+    benchmark_tool "c2patool" "$file" "target/benchmark_c2patool.${file##*.}" "$format"
     
     # Benchmark embeddable
     echo "2️⃣  c2pa_embeddable (streaming workflow)"
@@ -166,25 +167,25 @@ for test_file_spec in "${TEST_FILES[@]}"; do
     echo "   - Hash during write"
     echo "   - In-place JUMBF update"
     echo ""
-    benchmark_tool "embeddable" "$file" "output_embeddable.${file##*.}" "$format"
+    benchmark_tool "embeddable" "$file" "target/benchmark_embeddable.${file##*.}" "$format"
     
     # Compare file sizes
     echo "📊 Comparison"
-    echo "   c2patool output:     $(format_bytes $(get_file_size "output_c2patool.${file##*.}"))"
-    echo "   embeddable output:   $(format_bytes $(get_file_size "output_embeddable.${file##*.}"))"
+    echo "   c2patool output:     $(format_bytes $(get_file_size "target/benchmark_c2patool.${file##*.}"))"
+    echo "   embeddable output:   $(format_bytes $(get_file_size "target/benchmark_embeddable.${file##*.}"))"
     
     # Verify both files
     echo ""
     echo "🔍 Verification"
     echo "   Checking c2patool output..."
-    if c2patool "output_c2patool.${file##*.}" --info > /dev/null 2>&1; then
+    if c2patool "target/benchmark_c2patool.${file##*.}" --info > /dev/null 2>&1; then
         echo -e "   ${GREEN}✓ c2patool output verified${NC}"
     else
         echo -e "   ${RED}✗ c2patool output invalid${NC}"
     fi
     
     echo "   Checking embeddable output..."
-    if c2patool "output_embeddable.${file##*.}" --info > /dev/null 2>&1; then
+    if c2patool "target/benchmark_embeddable.${file##*.}" --info > /dev/null 2>&1; then
         echo -e "   ${GREEN}✓ embeddable output verified${NC}"
     else
         echo -e "   ${RED}✗ embeddable output invalid${NC}"

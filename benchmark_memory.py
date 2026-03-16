@@ -224,9 +224,10 @@ def main():
         print(f"{Colors.YELLOW}Building c2pa_embeddable in release mode...{Colors.NC}")
         subprocess.run(['cargo', 'build', '--release', '--example', 'c2pa_embeddable', '--features', 'all-formats,xmp'])
     
-    # Run benchmarks
-    c2patool_output = 'output_c2patool_mem.' + input_file.split('.')[-1]
-    embeddable_output = 'output_embeddable_mem.' + input_file.split('.')[-1]
+    # Run benchmarks (write to target/ so outputs are gitignored)
+    ext = input_file.split('.')[-1]
+    c2patool_output = f'target/benchmark_c2patool_mem.{ext}'
+    embeddable_output = f'target/benchmark_embeddable_mem.{ext}'
     
     # Clean up old outputs
     for f in [c2patool_output, embeddable_output]:
