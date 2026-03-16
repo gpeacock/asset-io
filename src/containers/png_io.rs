@@ -3,7 +3,7 @@
 use super::{ContainerIO, ContainerKind};
 use crate::{
     error::{Error, Result},
-    segment::{ByteRange, Segment, SegmentKind},
+    segment::{ByteRange, Segment, SegmentKind, DEFAULT_CHUNK_SIZE},
     structure::Structure,
     Updates,
 };
@@ -376,14 +376,12 @@ impl PngIO {
     /// Efficiently copy bytes from source to writer using chunked I/O
     /// This avoids large allocations for big segments
     fn copy_bytes<R: Read, W: Write>(source: &mut R, writer: &mut W, size: u64) -> Result<()> {
-        const CHUNK_SIZE: usize = 8 * 1024 * 1024; // 8MB chunks
-
-        if size > CHUNK_SIZE as u64 {
-            let mut buffer = vec![0u8; CHUNK_SIZE];
+        if size > DEFAULT_CHUNK_SIZE as u64 {
+            let mut buffer = vec![0u8; DEFAULT_CHUNK_SIZE];
             let mut remaining = size;
 
             while remaining > 0 {
-                let to_copy = remaining.min(CHUNK_SIZE as u64) as usize;
+                let to_copy = remaining.min(DEFAULT_CHUNK_SIZE as u64) as usize;
                 source.read_exact(&mut buffer[..to_copy])?;
                 writer.write_all(&buffer[..to_copy])?;
                 remaining -= to_copy as u64;
