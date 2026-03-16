@@ -61,7 +61,7 @@ let structure = asset.write(&mut output_file, &updates)?;
 ### Step 5: Set Exclusions (DataHash only)
 ```rust
 // Use asset-io's helper which handles format-specific details (PNG CRC, etc.)
-let (offset, size) = exclusion_range_for_segment(&structure, SegmentKind::Jumbf)?;
+let (offset, size) = structure.exclusion_range_for_segment(SegmentKind::Jumbf)?;
 builder.set_data_hash_exclusions(vec![HashRange::new(offset, size)])?;
 // BMFF auto-excludes C2PA uuid boxes
 ```

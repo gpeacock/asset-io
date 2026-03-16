@@ -37,8 +37,9 @@ fn main() -> asset_io::Result<()> {
         .set_jumbf(placeholder)
         .exclude_from_processing(vec![SegmentKind::Jumbf], ExclusionMode::DataOnly);
 
-    // Step 4: Open output file with write+seek (no read needed with true single-pass!)
+    // Step 4: Open output file (read+write+seek for BMFF chunk offset adjustment)
     let mut output = OpenOptions::new()
+        .read(true)
         .write(true)
         .create(true)
         .truncate(true)
@@ -49,12 +50,9 @@ fn main() -> asset_io::Result<()> {
     // This is the key optimization - we hash while writing!
     println!("\n⚡ Writing and hashing in single pass...");
     let mut hasher = Sha256::new();
+    let mut processor = |chunk: &dyn asset_io::ProcessChunk| hasher.update(chunk.data());
 
-    let structure = asset.write_with_processing(
-        &mut output,
-        &updates,
-        &mut |chunk| hasher.update(chunk),
-    )?;
+    let structure = asset.write_with_processing(&mut output, &updates, &mut processor)?;
 
     let hash = hasher.finalize();
     println!("✅ Write complete!");
@@ -68,7 +66,8 @@ fn main() -> asset_io::Result<()> {
 
     // Step 7: Update JUMBF in-place (file still open!)
     println!("\n✏️  Updating JUMBF in-place...");
-    let bytes_written = structure.update_segment(&mut output, SegmentKind::Jumbf, final_manifest)?;
+    let bytes_written =
+        structure.update_segment(&mut output, SegmentKind::Jumbf, final_manifest)?;
     println!("✅ Updated {} bytes", bytes_written);
 
     // Step 8: Close output (automatic on drop)

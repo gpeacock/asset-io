@@ -57,7 +57,7 @@
 //!     .exclude_from_processing(vec![SegmentKind::Jumbf], ExclusionMode::DataOnly);
 //!
 //! let mut hasher = Sha256::new();
-//! asset.read_with_processing(&updates, &mut |chunk| hasher.update(chunk))?;
+//! asset.read_with_processing(&updates, &mut |chunk| hasher.update(chunk))?;  // read uses &[u8]
 //! let hash = hasher.finalize();
 //! println!("Asset hash: {:x}", hash);
 //!
@@ -71,7 +71,7 @@
 //! let dest_structure = asset.write_with_processing(
 //!     &mut output,
 //!     &updates,
-//!     &mut |chunk| hasher.update(chunk),
+//!     &mut |chunk: &dyn asset_io::ProcessChunk| hasher.update(chunk.data()),
 //! )?;
 //! // Now you have the hash and can update the JUMBF in-place
 //! # Ok(())
@@ -86,28 +86,29 @@ mod processing_writer;
 mod segment;
 mod structure;
 mod thumbnail;
-mod updates;
 #[cfg(feature = "exif")]
 mod tiff;
+mod updates;
 #[cfg(feature = "xmp")]
 mod xmp;
 
 // Public exports
 pub use asset::{Asset, AssetBuilder};
-pub use containers::{exclusion_range_for_segment, ContainerKind};
-pub use error::{Error, Result};
-pub use segment::{ByteRange, ChunkSpec, ExclusionMode, ProcessingChunk, Segment, SegmentKind};
 #[cfg(feature = "bmff")]
-pub use containers::bmff_io::{BmffFragment, BmffIO};
-pub use structure::Structure;
-pub use thumbnail::{Thumbnail, ThumbnailKind};
-pub use updates::Updates;
-#[cfg(feature = "exif")]
-pub use tiff::ExifInfo;
-#[cfg(feature = "xmp")]
-pub use xmp::MiniXmp;
+pub use containers::bmff_io::{bmff_adjust_chunk_offsets, BmffFragment, BmffIO};
+pub use containers::ContainerKind;
+pub use error::{Error, Result};
+pub use processing_writer::{MdatChunk, ProcessChunk, SimpleChunk};
 #[cfg(feature = "parallel")]
 pub use segment::merkle_root;
+pub use segment::{ByteRange, ChunkSpec, ExclusionMode, ProcessingChunk, Segment, SegmentKind};
+pub use structure::Structure;
+pub use thumbnail::{Thumbnail, ThumbnailKind};
+#[cfg(feature = "exif")]
+pub use tiff::ExifInfo;
+pub use updates::Updates;
+#[cfg(feature = "xmp")]
+pub use xmp::MiniXmp;
 
 // Internal re-exports
 pub(crate) use containers::{detect_container, get_handler, Handler};

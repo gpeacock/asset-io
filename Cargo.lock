@@ -148,7 +148,9 @@ dependencies = [
  "byteorder",
  "c2pa",
  "criterion",
+ "env_logger",
  "fs2",
+ "log",
  "md5",
  "memmap2",
  "quick-xml 0.38.4",
@@ -323,7 +325,7 @@ checksum = "1e748733b7cbc798e1434b6ac524f0c1ff2ab456fe201501e6497c8417a4fc33"
 
 [[package]]
 name = "c2pa"
-version = "0.77.0"
+version = "0.78.0"
 dependencies = [
  "asn1-rs",
  "async-generic",

@@ -227,8 +227,8 @@ asset.read_with_processing(callback, &options)?
 asset.write_with_processing(writer, &updates, callback)?
 
 // In-place updates (when size permits)
-asset.update_xmp_in_place(new_xmp)?
-asset.update_jumbf_in_place(new_jumbf)?
+asset.update_segment_in_place(asset_io::SegmentKind::Xmp, new_xmp)?
+asset.update_segment_in_place(asset_io::SegmentKind::Jumbf, new_jumbf)?
 ```
 
 ## Use Cases

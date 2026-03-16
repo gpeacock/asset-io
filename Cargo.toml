@@ -13,6 +13,7 @@ categories = ["multimedia", "parsing"]
 # Core I/O
 thiserror = "1.0"
 byteorder = "1.5"
+log = "0.4"
 
 # Optional dependencies - tied to specific features
 md5 = { version = "0.7", optional = true }
@@ -29,17 +30,19 @@ sha2 = "0.10"  # For examples only
 serde_bytes = "0.11"  # For BMFF hash example
 serde_cbor = "0.11"  # For DataHash padding
 criterion = { version = "0.5", features = ["html_reports"] }
+env_logger = "0.11"
 
 [features]
 default = ["jpeg"]
 jpeg = ["md5"]
 png = []
 bmff = ["atree"]
+riff = []
 exif = []
 xmp = ["quick-xml", "md5"]
 memory-mapped = ["memmap2", "fs2"]
 parallel = ["rayon", "sha2"]
-all-formats = ["jpeg", "png", "bmff"]
+all-formats = ["jpeg", "png", "bmff", "riff"]
 
 # Note: At least one format feature (jpeg, png) must be enabled for the library to compile.
 
@@ -48,10 +51,6 @@ all-formats = ["jpeg", "png", "bmff"]
 # test-utils: Make test utilities available (for examples and integration tests)
 embed-fixtures = []
 test-utils = []
-
-[[example]]
-name = "c2pa"
-required-features = ["xmp"]
 
 [[example]]
 name = "c2pa_embeddable"
@@ -78,8 +77,8 @@ name = "safety_test"
 
 [profile.release]
 opt-level = 3
-lto = true
-codegen-units = 1
+lto = "thin"
+codegen-units = 4
 
 [profile.bench]
 inherits = "release"

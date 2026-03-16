@@ -234,7 +234,7 @@ impl JpegIO {
                         ),
                     });
                 }
-                
+
                 source.seek(SeekFrom::Start(range.offset))?;
                 let mut buf = vec![0u8; range.size as usize];
                 source.read_exact(&mut buf)?;
@@ -922,20 +922,23 @@ impl ContainerIO for JpegIO {
         Ok(())
     }
 
-    fn write_with_processor<R: Read + Seek, W: Write, F: FnMut(&[u8])>(
+    fn write_with_processor<R: Read + Seek, W: Write, F>(
         &self,
         structure: &Structure,
         source: &mut R,
         writer: &mut W,
         updates: &Updates,
-        mut processor: F,
-    ) -> Result<()> {
+        processor: &mut F,
+    ) -> Result<()>
+    where
+        F: for<'a> FnMut(&'a (dyn crate::ProcessChunk + 'a)),
+    {
         use crate::processing_writer::ProcessingWriter;
 
         let exclude_segments = &updates.processing.exclude_segments;
         let exclusion_mode = updates.processing.exclusion_mode;
 
-        let mut pw = ProcessingWriter::new(writer, |data| processor(data));
+        let mut pw = ProcessingWriter::new(writer, processor);
         let should_exclude_jumbf = exclude_segments.contains(&SegmentKind::Jumbf);
         let data_only_mode = exclusion_mode == crate::ExclusionMode::DataOnly;
 
@@ -955,95 +958,86 @@ impl ContainerIO for JpegIO {
                     continue;
                 }
 
-                seg if seg.is_xmp() => {
-                    match &updates.xmp {
-                        crate::MetadataUpdate::Set(new_xmp) => {
-                            write_xmp_segment(&mut pw, new_xmp)?;
-                        }
-                        crate::MetadataUpdate::Keep => {
-                            if let Some(source_seg) = structure.segments.iter().find(|s| s.is_xmp())
-                            {
-                                if let Some(meta) = &source_seg.metadata {
-                                    if let Some((guid, chunk_offsets, _total_size)) =
-                                        meta.as_jpeg_extended_xmp()
-                                    {
-                                        if !source_seg.ranges.is_empty() {
-                                            pw.write_u8(0xFF)?;
-                                            pw.write_u8(APP1)?;
-                                            pw.write_u16::<BigEndian>(
-                                                (source_seg.ranges[0].size
-                                                    + XMP_SIGNATURE.len() as u64
-                                                    + 2)
-                                                    as u16,
-                                            )?;
-                                            pw.write_all(XMP_SIGNATURE)?;
-
-                                            source.seek(SeekFrom::Start(
-                                                source_seg.ranges[0].offset,
-                                            ))?;
-                                            let mut limited =
-                                                source.take(source_seg.ranges[0].size);
-                                            copy(&mut limited, &mut pw)?;
-                                        }
-
-                                        for (i, range) in source_seg.ranges[1..].iter().enumerate()
-                                        {
-                                            let chunk_offset =
-                                                chunk_offsets.get(i).copied().unwrap_or(0);
-
-                                            pw.write_u8(0xFF)?;
-                                            pw.write_u8(APP1)?;
-
-                                            let seg_size = XMP_EXTENDED_SIGNATURE.len()
-                                                + 32
-                                                + 4
-                                                + 4
-                                                + range.size as usize
-                                                + 2;
-                                            pw.write_u16::<BigEndian>(seg_size as u16)?;
-
-                                            pw.write_all(XMP_EXTENDED_SIGNATURE)?;
-
-                                            let guid_bytes = guid.as_bytes();
-                                            pw.write_all(
-                                                &guid_bytes[..guid_bytes.len().min(32)],
-                                            )?;
-                                            for _ in guid_bytes.len()..32 {
-                                                pw.write_u8(0)?;
-                                            }
-
-                                            pw.write_u32::<BigEndian>(
-                                                source_seg.ranges[1..]
-                                                    .iter()
-                                                    .map(|r| r.size as u32)
-                                                    .sum(),
-                                            )?;
-                                            pw.write_u32::<BigEndian>(chunk_offset)?;
-
-                                            source.seek(SeekFrom::Start(range.offset))?;
-                                            let mut limited = source.take(range.size);
-                                            copy(&mut limited, &mut pw)?;
-                                        }
-                                        continue;
-                                    }
-                                }
-
-                                pw.write_u8(0xFF)?;
-                                pw.write_u8(APP1)?;
-                                pw.write_u16::<BigEndian>(
-                                    (source_seg.ranges[0].size + XMP_SIGNATURE.len() as u64 + 2)
-                                        as u16,
-                                )?;
-                                pw.write_all(XMP_SIGNATURE)?;
-
-                                source.seek(SeekFrom::Start(source_seg.ranges[0].offset))?;
-                                let mut limited = source.take(source_seg.ranges[0].size);
-                                copy(&mut limited, &mut pw)?;
-                            }
-                        }
-                        crate::MetadataUpdate::Remove => {}
+                seg if seg.is_xmp() => match &updates.xmp {
+                    crate::MetadataUpdate::Set(new_xmp) => {
+                        write_xmp_segment(&mut pw, new_xmp)?;
                     }
-                }
+                    crate::MetadataUpdate::Keep => {
+                        if let Some(source_seg) = structure.segments.iter().find(|s| s.is_xmp()) {
+                            if let Some(meta) = &source_seg.metadata {
+                                if let Some((guid, chunk_offsets, _total_size)) =
+                                    meta.as_jpeg_extended_xmp()
+                                {
+                                    if !source_seg.ranges.is_empty() {
+                                        pw.write_u8(0xFF)?;
+                                        pw.write_u8(APP1)?;
+                                        pw.write_u16::<BigEndian>(
+                                            (source_seg.ranges[0].size
+                                                + XMP_SIGNATURE.len() as u64
+                                                + 2)
+                                                as u16,
+                                        )?;
+                                        pw.write_all(XMP_SIGNATURE)?;
+
+                                        source
+                                            .seek(SeekFrom::Start(source_seg.ranges[0].offset))?;
+                                        let mut limited = source.take(source_seg.ranges[0].size);
+                                        copy(&mut limited, &mut pw)?;
+                                    }
+
+                                    for (i, range) in source_seg.ranges[1..].iter().enumerate() {
+                                        let chunk_offset =
+                                            chunk_offsets.get(i).copied().unwrap_or(0);
+
+                                        pw.write_u8(0xFF)?;
+                                        pw.write_u8(APP1)?;
+
+                                        let seg_size = XMP_EXTENDED_SIGNATURE.len()
+                                            + 32
+                                            + 4
+                                            + 4
+                                            + range.size as usize
+                                            + 2;
+                                        pw.write_u16::<BigEndian>(seg_size as u16)?;
+
+                                        pw.write_all(XMP_EXTENDED_SIGNATURE)?;
+
+                                        let guid_bytes = guid.as_bytes();
+                                        pw.write_all(&guid_bytes[..guid_bytes.len().min(32)])?;
+                                        for _ in guid_bytes.len()..32 {
+                                            pw.write_u8(0)?;
+                                        }
+
+                                        pw.write_u32::<BigEndian>(
+                                            source_seg.ranges[1..]
+                                                .iter()
+                                                .map(|r| r.size as u32)
+                                                .sum(),
+                                        )?;
+                                        pw.write_u32::<BigEndian>(chunk_offset)?;
+
+                                        source.seek(SeekFrom::Start(range.offset))?;
+                                        let mut limited = source.take(range.size);
+                                        copy(&mut limited, &mut pw)?;
+                                    }
+                                    continue;
+                                }
+                            }
+
+                            pw.write_u8(0xFF)?;
+                            pw.write_u8(APP1)?;
+                            pw.write_u16::<BigEndian>(
+                                (source_seg.ranges[0].size + XMP_SIGNATURE.len() as u64 + 2) as u16,
+                            )?;
+                            pw.write_all(XMP_SIGNATURE)?;
+
+                            source.seek(SeekFrom::Start(source_seg.ranges[0].offset))?;
+                            let mut limited = source.take(source_seg.ranges[0].size);
+                            copy(&mut limited, &mut pw)?;
+                        }
+                    }
+                    crate::MetadataUpdate::Remove => {}
+                },
 
                 seg if seg.is_jumbf() => {
                     // Handle JUMBF based on exclusion mode:
@@ -1052,7 +1046,11 @@ impl ContainerIO for JpegIO {
                     match &updates.jumbf {
                         crate::MetadataUpdate::Set(new_jumbf) => {
                             if data_only_mode {
-                                write_jumbf_with_exclusion(&mut pw, new_jumbf, should_exclude_jumbf)?;
+                                write_jumbf_with_exclusion(
+                                    &mut pw,
+                                    new_jumbf,
+                                    should_exclude_jumbf,
+                                )?;
                             } else {
                                 // EntireSegment mode: exclude everything
                                 if should_exclude_jumbf {
@@ -1082,7 +1080,11 @@ impl ContainerIO for JpegIO {
                                 }
 
                                 if data_only_mode {
-                                    write_jumbf_with_exclusion(&mut pw, &jumbf_data, should_exclude_jumbf)?;
+                                    write_jumbf_with_exclusion(
+                                        &mut pw,
+                                        &jumbf_data,
+                                        should_exclude_jumbf,
+                                    )?;
                                 } else {
                                     // EntireSegment mode: exclude everything
                                     if should_exclude_jumbf {
@@ -1475,10 +1477,7 @@ impl ContainerIO for JpegIO {
         crate::tiff::parse_exif_info(exif_data)
     }
 
-    fn exclusion_range_for_segment(
-        structure: &Structure,
-        kind: SegmentKind,
-    ) -> Option<(u64, u64)> {
+    fn exclusion_range_for_segment(structure: &Structure, kind: SegmentKind) -> Option<(u64, u64)> {
         let segment = match kind {
             SegmentKind::Jumbf => structure
                 .c2pa_jumbf_index()
@@ -1699,11 +1698,14 @@ fn write_jumbf_segments<W: Write>(writer: &mut W, jumbf: &[u8]) -> Result<()> {
 /// 2. Enables exclude mode
 /// 3. Writes the JUMBF data with processing DISABLED
 /// 4. Disables exclude mode
-fn write_jumbf_with_exclusion<W: Write, F: FnMut(&[u8])>(
-    pw: &mut crate::processing_writer::ProcessingWriter<W, F>,
+fn write_jumbf_with_exclusion<W: Write, F>(
+    pw: &mut crate::processing_writer::ProcessingWriter<'_, W, F>,
     jumbf: &[u8],
     should_exclude: bool,
-) -> Result<()> {
+) -> Result<()>
+where
+    F: for<'a> FnMut(&'a (dyn crate::ProcessChunk + 'a)),
+{
     // Check if already in APP11 format
     let is_complete_app11 = jumbf.len() >= 2 && jumbf[0] == 0xFF && jumbf[1] == APP11;
     if is_complete_app11 {

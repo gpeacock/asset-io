@@ -147,7 +147,10 @@ impl MiniXmp {
     ///
     /// Returns `None` if the key is not found.
     pub fn get(&self, key: &str) -> Option<String> {
-        get_keys_impl(&self.data, &[key]).into_iter().next().flatten()
+        get_keys_impl(&self.data, &[key])
+            .into_iter()
+            .next()
+            .flatten()
     }
 
     /// Get multiple values from the XMP in a single pass
@@ -315,8 +318,9 @@ fn apply_updates_impl(xmp: &str, updates: &[(&str, Option<&str>)]) -> Result<Str
         let event = reader.read_event()?;
         match event {
             Event::Start(ref e) if e.name() == QName(RDF_DESCRIPTION) && !applied => {
-                let elem_name = std::str::from_utf8(RDF_DESCRIPTION)
-                    .map_err(|_| crate::Error::InvalidFormat("Invalid RDF_DESCRIPTION constant".into()))?;
+                let elem_name = std::str::from_utf8(RDF_DESCRIPTION).map_err(|_| {
+                    crate::Error::InvalidFormat("Invalid RDF_DESCRIPTION constant".into())
+                })?;
                 let mut elem = BytesStart::new(elem_name);
 
                 // Track which keys we've seen in the original attributes
@@ -367,8 +371,9 @@ fn apply_updates_impl(xmp: &str, updates: &[(&str, Option<&str>)]) -> Result<Str
                 writer.write_event(Event::Start(elem))?;
             }
             Event::Empty(ref e) if e.name() == QName(RDF_DESCRIPTION) && !applied => {
-                let elem_name = std::str::from_utf8(RDF_DESCRIPTION)
-                    .map_err(|_| crate::Error::InvalidFormat("Invalid RDF_DESCRIPTION constant".into()))?;
+                let elem_name = std::str::from_utf8(RDF_DESCRIPTION).map_err(|_| {
+                    crate::Error::InvalidFormat("Invalid RDF_DESCRIPTION constant".into())
+                })?;
                 let mut elem = BytesStart::new(elem_name);
 
                 // Track which keys we've seen in the original attributes
@@ -448,7 +453,10 @@ mod tests {
     fn test_get_key() {
         let xmp = MiniXmp::new(TEST_XMP);
         assert_eq!(xmp.get("dc:format"), Some("image/jpeg".to_string()));
-        assert_eq!(xmp.get("xmpMM:DocumentID"), Some("xmp.did:1234".to_string()));
+        assert_eq!(
+            xmp.get("xmpMM:DocumentID"),
+            Some("xmp.did:1234".to_string())
+        );
         assert_eq!(xmp.get("nonexistent"), None);
     }
 
@@ -627,7 +635,10 @@ mod tests {
         );
 
         // These should succeed
-        assert!(xmp.set("dc:title", "value").is_ok(), "Normal key should work");
+        assert!(
+            xmp.set("dc:title", "value").is_ok(),
+            "Normal key should work"
+        );
         assert!(
             xmp.set("dc:subject", "value").is_ok(),
             "Another normal key should work"
@@ -693,19 +704,26 @@ mod tests {
         // Test single-key access too
         assert_eq!(xmp.get("dc:title"), Some("Second Block Title".to_string()));
         assert_eq!(xmp.get("dc:creator"), Some("Alice".to_string()));
-        assert_eq!(xmp.get("photoshop:DateCreated"), Some("2024-01-15".to_string()));
+        assert_eq!(
+            xmp.get("photoshop:DateCreated"),
+            Some("2024-01-15".to_string())
+        );
     }
 
     #[test]
     fn test_write_only_modifies_first_block() {
         // XMP with multiple blocks
-        let xmp = MiniXmp::new(r#"<rdf:RDF>
+        let xmp = MiniXmp::new(
+            r#"<rdf:RDF>
   <rdf:Description dc:title="First" dc:creator="Alice" />
   <rdf:Description photoshop:DateCreated="2024-01-15" />
-</rdf:RDF>"#);
+</rdf:RDF>"#,
+        );
 
         // Modify a key
-        let updated = xmp.apply_updates(&[("dc:title", Some("Modified"))]).unwrap();
+        let updated = xmp
+            .apply_updates(&[("dc:title", Some("Modified"))])
+            .unwrap();
 
         // First block should be modified
         assert!(
@@ -715,7 +733,9 @@ mod tests {
 
         // Second block should be unchanged
         assert!(
-            updated.as_ref().contains("photoshop:DateCreated=\"2024-01-15\""),
+            updated
+                .as_ref()
+                .contains("photoshop:DateCreated=\"2024-01-15\""),
             "Second block should be preserved"
         );
 

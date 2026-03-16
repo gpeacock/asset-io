@@ -376,9 +376,15 @@ impl Segment {
     /// )?;
     /// # Ok::<(), asset_io::Error>(())
     /// ```
-    pub fn with_ranges(ranges: Vec<ByteRange>, kind: SegmentKind, path: Option<String>) -> crate::Result<Self> {
+    pub fn with_ranges(
+        ranges: Vec<ByteRange>,
+        kind: SegmentKind,
+        path: Option<String>,
+    ) -> crate::Result<Self> {
         if ranges.is_empty() {
-            return Err(crate::Error::InvalidFormat("Segment must have at least one range".into()));
+            return Err(crate::Error::InvalidFormat(
+                "Segment must have at least one range".into(),
+            ));
         }
         Ok(Self {
             ranges,

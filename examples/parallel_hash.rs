@@ -32,7 +32,7 @@ fn main() -> asset_io::Result<()> {
         structure.total_size as f64 / 1_073_741_824.0
     );
     println!("Segments: {}", structure.segments.len());
-    
+
     // Show fragment info for BMFF files
     #[cfg(feature = "bmff")]
     if structure.container == asset_io::ContainerKind::Bmff {
@@ -97,27 +97,31 @@ fn main() -> asset_io::Result<()> {
         sequential_time = elapsed;
 
         println!("  Hash: {:x}", hash);
-        println!("  Bytes: {} ({:.2} GB)", bytes, bytes as f64 / 1_073_741_824.0);
+        println!(
+            "  Bytes: {} ({:.2} GB)",
+            bytes,
+            bytes as f64 / 1_073_741_824.0
+        );
         println!("  Time: {:?}", elapsed);
         println!(
             "  Throughput: {:.2} GB/s",
             (bytes as f64 / 1_073_741_824.0) / elapsed.as_secs_f64()
         );
     }
-    
+
     // Overlapped I/O hash using read_with_processing_overlapped
     println!("\n--- Overlapped I/O Hash (read_with_processing_overlapped) ---");
     {
         use std::sync::{Arc, Mutex};
-        
+
         let mut asset = Asset::open(&input)?;
         let start = Instant::now();
         let hasher = Arc::new(Mutex::new(sha2::Sha256::new()));
         let bytes = Arc::new(Mutex::new(0u64));
-        
+
         let hasher_clone = hasher.clone();
         let bytes_clone = bytes.clone();
-        
+
         asset.read_with_processing_overlapped(&updates, move |chunk| {
             let mut h = hasher_clone.lock().unwrap();
             sha2::Digest::update(&mut *h, chunk);
@@ -129,13 +133,17 @@ fn main() -> asset_io::Result<()> {
         let total_bytes = *bytes.lock().unwrap();
 
         println!("  Hash: {:x}", hash);
-        println!("  Bytes: {} ({:.2} GB)", total_bytes, total_bytes as f64 / 1_073_741_824.0);
+        println!(
+            "  Bytes: {} ({:.2} GB)",
+            total_bytes,
+            total_bytes as f64 / 1_073_741_824.0
+        );
         println!("  Time: {:?}", elapsed);
         println!(
             "  Throughput: {:.2} GB/s",
             (total_bytes as f64 / 1_073_741_824.0) / elapsed.as_secs_f64()
         );
-        
+
         let speedup = sequential_time.as_secs_f64() / elapsed.as_secs_f64();
         println!("  Speedup: {:.2}x vs sequential", speedup);
     }
@@ -158,7 +166,11 @@ fn main() -> asset_io::Result<()> {
         let total_bytes: u64 = chunks.iter().map(|c| c.data.len() as u64).sum();
         let included_chunks: Vec<_> = chunks.iter().filter(|c| !c.excluded).collect();
 
-        println!("  Chunks: {} total, {} included", chunks.len(), included_chunks.len());
+        println!(
+            "  Chunks: {} total, {} included",
+            chunks.len(),
+            included_chunks.len()
+        );
         println!("  I/O time: {:?}", io_time);
 
         // Hash in parallel (parallel CPU)
@@ -209,20 +221,19 @@ fn main() -> asset_io::Result<()> {
         {
             let asset = Asset::open(&input)?;
             let input_path = input.clone();
-            
+
             let start = Instant::now();
-            let hashes = asset.parallel_hash_with::<Sha256, _, _>(
-                &updates,
-                || std::fs::File::open(&input_path),
-            )?;
+            let hashes = asset.parallel_hash_with::<Sha256, _, _>(&updates, || {
+                std::fs::File::open(&input_path)
+            })?;
             let hash_time = start.elapsed();
-            
+
             let merkle_start = Instant::now();
             let root3 = merkle_root::<Sha256>(&hashes);
             let merkle_time = merkle_start.elapsed();
-            
+
             let elapsed = start.elapsed();
-            
+
             println!("  Merkle root: {:02x?}...", &root3[..8]);
             println!("  Chunks: {}", hashes.len());
             println!("  Hash time: {:?}", hash_time);
@@ -232,30 +243,30 @@ fn main() -> asset_io::Result<()> {
                 "  Throughput: {:.2} GB/s",
                 (total_bytes as f64 / 1_073_741_824.0) / elapsed.as_secs_f64()
             );
-            
+
             let speedup = sequential_time.as_secs_f64() / elapsed.as_secs_f64();
             println!("  Speedup: {:.2}x vs sequential", speedup);
         }
-        
+
         // Memory-mapped parallel hash (true parallel I/O)
         #[cfg(feature = "memory-mapped")]
         {
             println!("\n--- Memory-Mapped Parallel Hash (parallel_hash_mmap) ---");
-            
+
             let start = Instant::now();
             let asset = unsafe { Asset::open_with_mmap(&input)? };
             let open_time = start.elapsed();
-            
+
             let hash_start = Instant::now();
             let hashes = asset.parallel_hash_mmap::<Sha256>(&updates)?;
             let hash_time = hash_start.elapsed();
-            
+
             let merkle_start = Instant::now();
             let root3 = merkle_root::<Sha256>(&hashes);
             let merkle_time = merkle_start.elapsed();
-            
+
             let elapsed = start.elapsed();
-            
+
             println!("  Merkle root: {:02x?}...", &root3[..8]);
             println!("  Chunks: {}", hashes.len());
             println!("  Open time: {:?}", open_time);
@@ -266,7 +277,7 @@ fn main() -> asset_io::Result<()> {
                 "  Throughput: {:.2} GB/s",
                 (total_bytes as f64 / 1_073_741_824.0) / elapsed.as_secs_f64()
             );
-            
+
             let speedup = sequential_time.as_secs_f64() / elapsed.as_secs_f64();
             println!("  Speedup: {:.2}x vs sequential", speedup);
         }

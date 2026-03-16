@@ -130,7 +130,7 @@ impl PngIO {
             if segment.is_jumbf() {
                 // PNG stores JUMBF directly in caBX chunks - no format-specific headers to strip
                 let location = segment.location();
-                
+
                 // Validate size to prevent memory exhaustion attacks
                 if location.size > crate::segment::MAX_SEGMENT_SIZE {
                     return Err(Error::InvalidSegment {
@@ -142,7 +142,7 @@ impl PngIO {
                         ),
                     });
                 }
-                
+
                 source.seek(SeekFrom::Start(location.offset))?;
                 let mut buf = vec![0u8; location.size as usize];
                 source.read_exact(&mut buf)?;
@@ -421,8 +421,8 @@ impl PngIO {
     /// Per C2PA spec, only the manifest DATA (and CRC which depends on data)
     /// should be excluded from hashing. The length and type fields must be
     /// included in the hash to prevent insertion attacks.
-    fn write_chunk_with_exclusion<W: Write, F: FnMut(&[u8])>(
-        pw: &mut crate::processing_writer::ProcessingWriter<W, F>,
+    fn write_chunk_with_exclusion<W: Write, F>(
+        pw: &mut crate::processing_writer::ProcessingWriter<'_, W, F>,
         chunk_type: &[u8],
         data: &[u8],
         should_exclude: bool,
@@ -669,20 +669,23 @@ impl ContainerIO for PngIO {
         Ok(())
     }
 
-    fn write_with_processor<R: Read + Seek, W: Write, F: FnMut(&[u8])>(
+    fn write_with_processor<R: Read + Seek, W: Write, F>(
         &self,
         structure: &Structure,
         source: &mut R,
         writer: &mut W,
         updates: &Updates,
-        mut processor: F,
-    ) -> Result<()> {
+        processor: &mut F,
+    ) -> Result<()>
+    where
+        F: for<'a> FnMut(&'a (dyn crate::ProcessChunk + 'a)),
+    {
         use crate::processing_writer::ProcessingWriter;
 
         let exclude_segments = &updates.processing.exclude_segments;
         let exclusion_mode = updates.processing.exclusion_mode;
 
-        let mut pw = ProcessingWriter::new(writer, |data| processor(data));
+        let mut pw = ProcessingWriter::new(writer, processor);
         let should_exclude_jumbf = exclude_segments.contains(&SegmentKind::Jumbf);
         let data_only_mode = exclusion_mode == crate::ExclusionMode::DataOnly;
 
@@ -716,26 +719,23 @@ impl ContainerIO for PngIO {
                     continue;
                 }
 
-                seg if seg.is_xmp() => {
-                    match &updates.xmp {
-                        crate::MetadataUpdate::Set(new_xmp) => {
-                            Self::write_xmp_chunk(&mut pw, new_xmp)?;
-                        }
-                        crate::MetadataUpdate::Keep => {
-                            if let Some(source_seg) = structure.segments.iter().find(|s| s.is_xmp())
-                            {
-                                let location = source_seg.location();
-                                source.seek(SeekFrom::Start(location.offset))?;
-
-                                let mut xmp_data = vec![0u8; location.size as usize];
-                                source.read_exact(&mut xmp_data)?;
-
-                                Self::write_xmp_chunk(&mut pw, &xmp_data)?;
-                            }
-                        }
-                        crate::MetadataUpdate::Remove => {}
+                seg if seg.is_xmp() => match &updates.xmp {
+                    crate::MetadataUpdate::Set(new_xmp) => {
+                        Self::write_xmp_chunk(&mut pw, new_xmp)?;
                     }
-                }
+                    crate::MetadataUpdate::Keep => {
+                        if let Some(source_seg) = structure.segments.iter().find(|s| s.is_xmp()) {
+                            let location = source_seg.location();
+                            source.seek(SeekFrom::Start(location.offset))?;
+
+                            let mut xmp_data = vec![0u8; location.size as usize];
+                            source.read_exact(&mut xmp_data)?;
+
+                            Self::write_xmp_chunk(&mut pw, &xmp_data)?;
+                        }
+                    }
+                    crate::MetadataUpdate::Remove => {}
+                },
 
                 seg if seg.is_jumbf() => {
                     // Handle JUMBF based on exclusion mode:
@@ -1064,10 +1064,7 @@ impl ContainerIO for PngIO {
         crate::tiff::parse_exif_info(&data)
     }
 
-    fn exclusion_range_for_segment(
-        structure: &Structure,
-        kind: SegmentKind,
-    ) -> Option<(u64, u64)> {
+    fn exclusion_range_for_segment(structure: &Structure, kind: SegmentKind) -> Option<(u64, u64)> {
         let segment = match kind {
             SegmentKind::Jumbf => structure
                 .c2pa_jumbf_index()
@@ -1140,7 +1137,7 @@ pub fn update_png_segment_in_stream<W: Write + Seek>(
             // caBX chunk layout:
             // [length:4][type:4][data:N][crc:4]
             // data_offset points to start of data (after type)
-            
+
             // Write the data
             writer.seek(SeekFrom::Start(data_offset))?;
             writer.write_all(&padded_data)?;
@@ -1165,7 +1162,8 @@ pub fn update_png_segment_in_stream<W: Write + Seek>(
 
             // Build complete chunk data for CRC calculation
             // iTXt chunk data = keyword + flags + XMP data
-            let mut chunk_data = Vec::with_capacity(ITXT_XMP_HEADER_SIZE as usize + padded_data.len());
+            let mut chunk_data =
+                Vec::with_capacity(ITXT_XMP_HEADER_SIZE as usize + padded_data.len());
             chunk_data.extend_from_slice(XMP_KEYWORD); // 18 bytes
             chunk_data.push(0); // compression flag
             chunk_data.push(0); // compression method
