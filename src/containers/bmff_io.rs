@@ -389,6 +389,17 @@ pub(crate) fn build_bmff_tree<R: Read + Seek + ?Sized>(
             break;
         }
 
+        // Reject boxes whose size would overflow u64 or extend past the parent boundary.
+        // `current` equals `box_start(...)` since BoxHeaderLite::read() consumes exactly
+        // HEADER_SIZE / HEADER_SIZE_LARGE bytes and box_start subtracts that back out.
+        let box_end = match current.checked_add(s) {
+            Some(e) => e,
+            None => break, // malformed: size overflows u64
+        };
+        if box_end > end {
+            break; // box claims to extend past our boundary
+        }
+
         // Match and parse the supported atom boxes.
         match header.name {
             BoxType::UuidBox => {
@@ -2174,7 +2185,10 @@ fn find_meta_box<R: Read + Seek>(source: &mut R, file_size: u64) -> Result<Optio
         if actual_size == 0 {
             break;
         }
-        pos += actual_size;
+        match pos.checked_add(actual_size) {
+            Some(next) => pos = next,
+            None => break, // malformed: size overflows u64
+        }
     }
 
     Ok(None)

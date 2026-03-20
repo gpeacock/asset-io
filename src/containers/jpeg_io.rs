@@ -296,8 +296,9 @@ impl JpegIO {
                     let size = source.read_u16::<BigEndian>()? as u64;
                     let sos_start = offset; // Start of FF DA marker
 
-                    // Skip SOS header
-                    source.seek(SeekFrom::Current((size - 2) as i64))?;
+                    // Skip SOS header (size includes its own 2-byte length field)
+                    let skip = size.saturating_sub(2);
+                    source.seek(SeekFrom::Current(skip as i64))?;
 
                     // Find end of image data (scan for FFD9)
                     let image_end = find_eoi(source)?;
@@ -325,7 +326,7 @@ impl JpegIO {
 
                 APP1 => {
                     let size = source.read_u16::<BigEndian>()? as u64;
-                    let data_size = size - 2;
+                    let data_size = size.saturating_sub(2);
                     let segment_start = offset;
 
                     // Read enough bytes to check both standard and extended XMP signatures
@@ -542,7 +543,7 @@ impl JpegIO {
 
                 APP11 => {
                     let size = source.read_u16::<BigEndian>()? as u64;
-                    let data_size = size - 2;
+                    let data_size = size.saturating_sub(2);
                     let data_start = offset + 4;
                     let segment_start = offset;
 
