@@ -214,8 +214,7 @@ impl<R: Read + Seek> Asset<R> {
 
     /// Get JUMBF data (loads and assembles lazily)
     pub fn jumbf(&mut self) -> Result<Option<Vec<u8>>> {
-        self.handler
-            .read_jumbf(&self.structure, &mut self.source)
+        self.handler.read_jumbf(&self.structure, &mut self.source)
     }
 
     /// Extract an embedded thumbnail if available
@@ -254,18 +253,19 @@ impl<R: Read + Seek> Asset<R> {
         #[cfg(feature = "exif")]
         {
             use std::io::SeekFrom;
-            
+
             // Get thumbnail location info
-            let info = self.handler
+            let info = self
+                .handler
                 .read_embedded_thumbnail_info(&self.structure, &mut self.source)?;
-            
+
             match info {
                 Some(info) => {
                     // Read the actual thumbnail data
                     self.source.seek(SeekFrom::Start(info.offset))?;
                     let mut data = vec![0u8; info.size as usize];
                     self.source.read_exact(&mut data)?;
-                    
+
                     Ok(Some(crate::Thumbnail {
                         data,
                         format: info.format,
@@ -305,7 +305,8 @@ impl<R: Read + Seek> Asset<R> {
     #[cfg(feature = "exif")]
     pub fn exif_info(&mut self) -> Result<Option<crate::tiff::ExifInfo>> {
         // Delegate to container-specific handler
-        self.handler.read_exif_info(&self.structure, &mut self.source)
+        self.handler
+            .read_exif_info(&self.structure, &mut self.source)
     }
 
     /// Get the file structure
@@ -379,64 +380,68 @@ impl<R: Read + Seek> Asset<R> {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn read_with_processing<F>(
-        &mut self,
-        updates: &Updates,
-        processor: &mut F,
-    ) -> Result<()>
+    pub fn read_with_processing<F>(&mut self, updates: &Updates, processor: &mut F) -> Result<()>
     where
         F: FnMut(&[u8]),
     {
         use crate::segment::DEFAULT_CHUNK_SIZE;
-        
+
         let chunk_size = updates.processing.effective_chunk_size();
         let exclude_segments = &updates.processing.exclude_segments;
         let _exclusion_mode = updates.processing.exclusion_mode;
-        
+
         self.source.seek(SeekFrom::Start(0))?;
-        
+
         // Build list of segment indices to exclude
         let excluded_indices: Vec<Option<usize>> = exclude_segments
             .iter()
             .filter_map(|kind| {
-                self.structure.segments.iter().position(|s| s.is_type(*kind))
+                self.structure
+                    .segments
+                    .iter()
+                    .position(|s| s.is_type(*kind))
             })
             .map(Some)
             .collect();
-        
+
         // Calculate ranges to process (everything except excluded segments)
         let mut ranges = Vec::new();
         let mut last_end = 0u64;
-        
+
         // For BMFF, always exclude ftyp box (per BmffHash spec)
         #[cfg(feature = "bmff")]
         if self.structure.container == crate::ContainerKind::Bmff {
             // ftyp box end is at the start of the first metadata box
             // For C2PA segments with 2 ranges, ranges[1] has the full UUID box offset
-            let ftyp_end = self.structure.segments.iter()
+            let ftyp_end = self
+                .structure
+                .segments
+                .iter()
                 .flat_map(|s| s.ranges.iter())
                 .map(|r| r.offset)
                 .min()
-                .unwrap_or(24);  // Default if no segments
+                .unwrap_or(24); // Default if no segments
             last_end = ftyp_end;
         }
-        
+
         for (idx, segment) in self.structure.segments.iter().enumerate() {
             let is_excluded = excluded_indices.contains(&Some(idx));
-            
+
             if is_excluded {
                 // Use format-specific exclusion range (e.g., entire box for BMFF)
-                let (exclude_start, exclude_size) = if let Some(kind) = exclude_segments.iter().find(|k| segment.is_type(**k)) {
-                    crate::containers::exclusion_range_for_segment(&self.structure, *kind)
-                        .unwrap_or_else(|| {
-                            let loc = segment.location();
-                            (loc.offset, loc.size)
-                        })
-                } else {
-                    let loc = segment.location();
-                    (loc.offset, loc.size)
-                };
-                
+                let (exclude_start, exclude_size) =
+                    if let Some(kind) = exclude_segments.iter().find(|k| segment.is_type(**k)) {
+                        self.structure
+                            .exclusion_range_for_segment(*kind)
+                            .unwrap_or_else(|| {
+                                let loc = segment.location();
+                                (loc.offset, loc.size)
+                            })
+                    } else {
+                        let loc = segment.location();
+                        (loc.offset, loc.size)
+                    };
+
                 // Add range before this excluded segment
                 if exclude_start > last_end {
                     ranges.push((last_end, exclude_start - last_end));
@@ -444,49 +449,49 @@ impl<R: Read + Seek> Asset<R> {
                 last_end = exclude_start + exclude_size;
             }
         }
-        
+
         // Add final range after last exclusion
         if last_end < self.structure.total_size {
             ranges.push((last_end, self.structure.total_size - last_end));
         }
-        
+
         // Process each range with overlapped I/O
         // We use double-buffering: read next chunk while processing current
         let buffer_size = chunk_size.min(DEFAULT_CHUNK_SIZE);
-        
+
         for (offset, size) in ranges {
             self.source.seek(SeekFrom::Start(offset))?;
             let mut remaining = size;
-            
+
             // Read first chunk
             let first_read = remaining.min(buffer_size as u64) as usize;
             let mut current_buffer = vec![0u8; first_read];
             self.source.read_exact(&mut current_buffer)?;
             remaining -= first_read as u64;
-            
+
             // Process with double-buffering
             while remaining > 0 {
                 // Prepare next buffer
                 let next_read = remaining.min(buffer_size as u64) as usize;
                 let mut next_buffer = vec![0u8; next_read];
-                
+
                 // Read next chunk (I/O)
                 self.source.read_exact(&mut next_buffer)?;
-                
+
                 // Process current chunk (CPU) - happens after read completes
                 // Note: True overlap would require threading, but for now
                 // this at least structures the code for easy threading later
                 processor(&current_buffer);
-                
+
                 // Swap buffers
                 current_buffer = next_buffer;
                 remaining -= next_read as u64;
             }
-            
+
             // Process the last chunk
             processor(&current_buffer);
         }
-        
+
         Ok(())
     }
 
@@ -537,52 +542,63 @@ impl<R: Read + Seek> Asset<R> {
         use crate::segment::DEFAULT_CHUNK_SIZE;
         use std::sync::mpsc;
         use std::thread;
-        
-        let chunk_size = updates.processing.effective_chunk_size().max(DEFAULT_CHUNK_SIZE);
+
+        let chunk_size = updates
+            .processing
+            .effective_chunk_size()
+            .max(DEFAULT_CHUNK_SIZE);
         let exclude_segments = &updates.processing.exclude_segments;
         let _exclusion_mode = updates.processing.exclusion_mode;
-        
+
         // Calculate ranges to process (same logic as read_with_processing)
         let mut ranges = Vec::new();
         let mut last_end = 0u64;
-        
+
         for segment in self.structure.segments.iter() {
             let is_excluded = exclude_segments.iter().any(|kind| segment.is_type(*kind));
-            
-            eprintln!("DEBUG: Segment: {:?}, is_excluded={}", segment.kind, is_excluded);
-            
+
+            eprintln!(
+                "DEBUG: Segment: {:?}, is_excluded={}",
+                segment.kind, is_excluded
+            );
+
             if is_excluded {
                 // For BMFF, use the format-specific exclusion range that includes the entire box
                 // For other formats, use the segment's data range
-                let (exclude_start, exclude_size) = if let Some(kind) = exclude_segments.iter().find(|k| segment.is_type(**k)) {
-                    crate::containers::exclusion_range_for_segment(&self.structure, *kind)
-                        .unwrap_or_else(|| {
-                            let loc = segment.location();
-                            (loc.offset, loc.size)
-                        })
-                } else {
-                    let loc = segment.location();
-                    (loc.offset, loc.size)
-                };
-                
-                eprintln!("DEBUG: Excluding: offset={}, size={}", exclude_start, exclude_size);
-                
+                let (exclude_start, exclude_size) =
+                    if let Some(kind) = exclude_segments.iter().find(|k| segment.is_type(**k)) {
+                        self.structure
+                            .exclusion_range_for_segment(*kind)
+                            .unwrap_or_else(|| {
+                                let loc = segment.location();
+                                (loc.offset, loc.size)
+                            })
+                    } else {
+                        let loc = segment.location();
+                        (loc.offset, loc.size)
+                    };
+
+                eprintln!(
+                    "DEBUG: Excluding: offset={}, size={}",
+                    exclude_start, exclude_size
+                );
+
                 if exclude_start > last_end {
                     ranges.push((last_end, exclude_start - last_end));
                 }
                 last_end = exclude_start + exclude_size;
             }
         }
-        
+
         if last_end < self.structure.total_size {
             ranges.push((last_end, self.structure.total_size - last_end));
         }
-        
+
         // Use a sync channel with capacity 2 for double-buffering
         // This lets us read the next chunk while processing the current one
         let (work_tx, work_rx) = mpsc::sync_channel::<Option<Vec<u8>>>(2);
         let (done_tx, done_rx) = mpsc::sync_channel::<()>(1);
-        
+
         // Spawn processor thread
         let processor_handle = thread::spawn(move || {
             let mut proc = processor;
@@ -591,34 +607,34 @@ impl<R: Read + Seek> Asset<R> {
             }
             done_tx.send(()).ok();
         });
-        
+
         // Read and send chunks in main thread
         for (offset, size) in ranges {
             self.source.seek(SeekFrom::Start(offset))?;
             let mut remaining = size;
-            
+
             while remaining > 0 {
                 let to_read = remaining.min(chunk_size as u64) as usize;
                 let mut buffer = vec![0u8; to_read];
                 self.source.read_exact(&mut buffer)?;
-                
+
                 // Send to processor thread (blocks if channel full - backpressure)
                 if work_tx.send(Some(buffer)).is_err() {
                     break;
                 }
-                
+
                 remaining -= to_read as u64;
             }
         }
-        
+
         // Signal end of data
         work_tx.send(None).ok();
         drop(work_tx);
-        
+
         // Wait for processor to finish
         done_rx.recv().ok();
         processor_handle.join().ok();
-        
+
         Ok(())
     }
 
@@ -659,33 +675,34 @@ impl<R: Read + Seek> Asset<R> {
     /// ```
     pub fn read_chunks(&mut self, updates: &Updates) -> Result<Vec<crate::ProcessingChunk>> {
         use crate::segment::{ByteRange, ProcessingChunk, DEFAULT_CHUNK_SIZE};
-        
-        let chunk_size = updates.processing.effective_chunk_size().max(DEFAULT_CHUNK_SIZE);
+
+        let chunk_size = updates
+            .processing
+            .effective_chunk_size()
+            .max(DEFAULT_CHUNK_SIZE);
         let exclude_segments = &updates.processing.exclude_segments;
-        
+
         // Calculate exclusion ranges
         let exclusion_ranges: Vec<ByteRange> = exclude_segments
             .iter()
-            .filter_map(|kind| {
-                self.structure.segments.iter().find(|s| s.is_type(*kind))
-            })
+            .filter_map(|kind| self.structure.segments.iter().find(|s| s.is_type(*kind)))
             .map(|segment| segment.location())
             .collect();
-        
+
         // Read all chunks
         let mut chunks = Vec::new();
         let mut offset = 0u64;
         let mut index = 0usize;
-        
+
         self.source.seek(SeekFrom::Start(0))?;
-        
+
         while offset < self.structure.total_size {
             let remaining = self.structure.total_size - offset;
             let read_size = chunk_size.min(remaining as usize);
-            
+
             let mut buffer = vec![0u8; read_size];
             self.source.read_exact(&mut buffer)?;
-            
+
             // Check if this chunk overlaps with any exclusion range
             let chunk_range = ByteRange::new(offset, read_size as u64);
             let excluded = exclusion_ranges.iter().any(|excl| {
@@ -693,13 +710,13 @@ impl<R: Read + Seek> Asset<R> {
                 let excl_end = excl.offset + excl.size;
                 chunk_range.offset < excl_end && chunk_end > excl.offset
             });
-            
+
             chunks.push(ProcessingChunk::new(index, offset, buffer, excluded));
-            
+
             offset += read_size as u64;
             index += 1;
         }
-        
+
         Ok(chunks)
     }
 
@@ -731,9 +748,9 @@ impl<R: Read + Seek> Asset<R> {
         H: sha2::Digest + Clone + Send + Sync + Default,
     {
         use rayon::prelude::*;
-        
+
         let chunks = self.read_chunks(updates)?;
-        
+
         let mut hashes: Vec<(usize, [u8; 32])> = chunks
             .par_iter()
             .filter(|c| !c.excluded)
@@ -746,10 +763,10 @@ impl<R: Read + Seek> Asset<R> {
                 (c.index, hash)
             })
             .collect();
-        
+
         // Sort by index to maintain order
         hashes.sort_by_key(|(idx, _)| *idx);
-        
+
         Ok(hashes.into_iter().map(|(_, h)| h).collect())
     }
 
@@ -782,24 +799,27 @@ impl<R: Read + Seek> Asset<R> {
     {
         use crate::segment::{ByteRange, DEFAULT_CHUNK_SIZE};
         use rayon::prelude::*;
-        
+
         // Check if mmap is available
         if !self.structure.has_mmap() {
             return Err(crate::Error::InvalidFormat(
                 "No memory map available - use open_with_mmap()".into(),
             ));
         }
-        
-        let chunk_size = updates.processing.effective_chunk_size().max(DEFAULT_CHUNK_SIZE);
+
+        let chunk_size = updates
+            .processing
+            .effective_chunk_size()
+            .max(DEFAULT_CHUNK_SIZE);
         let exclude_segments = &updates.processing.exclude_segments;
-        
+
         // Calculate ranges to hash (everything except excluded segments)
         let mut hash_ranges: Vec<ByteRange> = Vec::new();
         let mut last_end = 0u64;
-        
+
         for segment in self.structure.segments.iter() {
             let is_excluded = exclude_segments.iter().any(|kind| segment.is_type(*kind));
-            
+
             if is_excluded {
                 let loc = segment.location();
                 if loc.offset > last_end {
@@ -808,11 +828,14 @@ impl<R: Read + Seek> Asset<R> {
                 last_end = loc.offset + loc.size;
             }
         }
-        
+
         if last_end < self.structure.total_size {
-            hash_ranges.push(ByteRange::new(last_end, self.structure.total_size - last_end));
+            hash_ranges.push(ByteRange::new(
+                last_end,
+                self.structure.total_size - last_end,
+            ));
         }
-        
+
         // Split ranges into chunks based on VIRTUAL CONTINUOUS DATA
         // For Merkle tree hashing, we need fixed-size chunks of the hashable data,
         // treating excluded segments as if they don't exist
@@ -820,148 +843,20 @@ impl<R: Read + Seek> Asset<R> {
         let mut chunk_idx = 0;
         let mut current_chunk_ranges: Vec<ByteRange> = Vec::new();
         let mut current_chunk_size = 0u64;
-        
-        for range in hash_ranges {
-            let mut offset = range.offset;
-            let end = range.offset + range.size;
-            
-            while offset < end {
-                let remaining_in_range = end - offset;
-                let space_in_chunk = chunk_size as u64 - current_chunk_size;
-                let bytes_to_take = remaining_in_range.min(space_in_chunk);
-                
-                current_chunk_ranges.push(ByteRange::new(offset, bytes_to_take));
-                current_chunk_size += bytes_to_take;
-                offset += bytes_to_take;
-                
-                // When chunk is full, save it and start a new one
-                if current_chunk_size >= chunk_size as u64 {
-                    chunks.push((chunk_idx, std::mem::take(&mut current_chunk_ranges)));
-                    chunk_idx += 1;
-                    current_chunk_size = 0;
-                }
-            }
-        }
-        
-        // Don't forget the last partial chunk
-        if !current_chunk_ranges.is_empty() {
-            chunks.push((chunk_idx, current_chunk_ranges));
-        }
-        
-        // Hash in parallel - each thread reads from multiple ranges if needed
-        let structure = &self.structure;
-        let hash_results: Result<Vec<(usize, [u8; 32])>> = chunks
-            .par_iter()
-            .map(|(idx, ranges)| {
-                let mut hasher = H::new();
-                
-                // Hash all ranges in this chunk
-                for range in ranges {
-                    let slice = structure
-                        .get_mmap_slice(*range)
-                        .ok_or_else(|| crate::Error::InvalidFormat("mmap slice not found for range".into()))?;
-                    hasher.update(slice);
-                }
-                
-                let result = hasher.finalize();
-                let mut hash = [0u8; 32];
-                hash.copy_from_slice(&result[..32]);
-                Ok((*idx, hash))
-            })
-            .collect();
-        
-        let mut hashes = hash_results?;
-        
-        // Sort by index to maintain order (parallel collect may be unordered)
-        hashes.sort_by_key(|(idx, _)| *idx);
-        
-        Ok(hashes.into_iter().map(|(_, h)| h).collect())
-    }
 
-    /// Hash specific segment types in parallel with memory-mapped I/O (for BMFF V3 Merkle)
-    ///
-    /// This is specifically designed for BMFF V3 fixed-block Merkle hashing where we need
-    /// to hash only certain segments (e.g., mdat boxes) in fixed-size chunks.
-    ///
-    /// # Arguments
-    /// * `segment_kind` - Type of segments to hash (e.g., `SegmentKind::ImageData` for mdat)
-    /// * `chunk_size` - Size of each chunk in bytes (e.g., 1MB for V3)
-    ///
-    /// # Returns
-    /// Vector of 32-byte hashes, one per chunk, in order
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// use asset_io::{Asset, SegmentKind};
-    /// use sha2::Sha256;
-    ///
-    /// // Open with mmap for zero-copy hashing
-    /// let asset = unsafe { Asset::open_with_mmap("video.mp4")? };
-    ///
-    /// // Hash only mdat boxes in 1MB chunks (BMFF V3 Merkle)
-    /// let chunk_hashes = asset.parallel_hash_segments::<Sha256>(
-    ///     SegmentKind::ImageData,  // mdat boxes
-    ///     1024 * 1024,             // 1MB chunks
-    /// )?;
-    ///
-    /// // Build Merkle tree from chunk hashes
-    /// let merkle_root = merkle_root::<Sha256>(&chunk_hashes);
-    /// ```
-    #[cfg(all(feature = "memory-mapped", feature = "parallel"))]
-    pub fn parallel_hash_segments<H>(
-        &self,
-        segment_kind: crate::segment::SegmentKind,
-        chunk_size: usize,
-    ) -> Result<Vec<[u8; 32]>>
-    where
-        H: sha2::Digest + Clone + Send + Sync + Default,
-    {
-        use crate::segment::ByteRange;
-        use rayon::prelude::*;
-        
-        // Check if mmap is available
-        if !self.structure.has_mmap() {
-            return Err(crate::Error::InvalidFormat(
-                "No memory map available - use open_with_mmap()".into(),
-            ));
-        }
-        
-        // Find all segments of the requested type
-        let mut hash_ranges: Vec<ByteRange> = Vec::new();
-        
-        for segment in self.structure.segments.iter() {
-            if segment.is_type(segment_kind) {
-                // Collect all ranges for this segment
-                for range in &segment.ranges {
-                    hash_ranges.push(*range);
-                }
-            }
-        }
-        
-        if hash_ranges.is_empty() {
-            return Ok(Vec::new());
-        }
-        
-        // Split ranges into fixed-size chunks (virtual continuous data)
-        let mut chunks: Vec<(usize, Vec<ByteRange>)> = Vec::new();
-        let mut chunk_idx = 0;
-        let mut current_chunk_ranges: Vec<ByteRange> = Vec::new();
-        let mut current_chunk_size = 0u64;
-        
         for range in hash_ranges {
             let mut offset = range.offset;
             let end = range.offset + range.size;
-            
+
             while offset < end {
                 let remaining_in_range = end - offset;
                 let space_in_chunk = chunk_size as u64 - current_chunk_size;
                 let bytes_to_take = remaining_in_range.min(space_in_chunk);
-                
+
                 current_chunk_ranges.push(ByteRange::new(offset, bytes_to_take));
                 current_chunk_size += bytes_to_take;
                 offset += bytes_to_take;
-                
+
                 // When chunk is full, save it and start a new one
                 if current_chunk_size >= chunk_size as u64 {
                     chunks.push((chunk_idx, std::mem::take(&mut current_chunk_ranges)));
@@ -970,39 +865,39 @@ impl<R: Read + Seek> Asset<R> {
                 }
             }
         }
-        
+
         // Don't forget the last partial chunk
         if !current_chunk_ranges.is_empty() {
             chunks.push((chunk_idx, current_chunk_ranges));
         }
-        
+
         // Hash in parallel - each thread reads from multiple ranges if needed
         let structure = &self.structure;
         let hash_results: Result<Vec<(usize, [u8; 32])>> = chunks
             .par_iter()
             .map(|(idx, ranges)| {
                 let mut hasher = H::new();
-                
+
                 // Hash all ranges in this chunk
                 for range in ranges {
-                    let slice = structure
-                        .get_mmap_slice(*range)
-                        .ok_or_else(|| crate::Error::InvalidFormat("mmap slice not found for range".into()))?;
+                    let slice = structure.get_mmap_slice(*range).ok_or_else(|| {
+                        crate::Error::InvalidFormat("mmap slice not found for range".into())
+                    })?;
                     hasher.update(slice);
                 }
-                
+
                 let result = hasher.finalize();
                 let mut hash = [0u8; 32];
                 hash.copy_from_slice(&result[..32]);
                 Ok((*idx, hash))
             })
             .collect();
-        
+
         let mut hashes = hash_results?;
-        
+
         // Sort by index to maintain order (parallel collect may be unordered)
         hashes.sort_by_key(|(idx, _)| *idx);
-        
+
         Ok(hashes.into_iter().map(|(_, h)| h).collect())
     }
 
@@ -1047,28 +942,29 @@ impl<R: Read + Seek> Asset<R> {
     /// ```
     pub fn chunk_specs(&self, updates: &Updates) -> Vec<crate::ChunkSpec> {
         use crate::segment::{ByteRange, ChunkSpec, DEFAULT_CHUNK_SIZE};
-        
-        let chunk_size = updates.processing.effective_chunk_size().max(DEFAULT_CHUNK_SIZE);
+
+        let chunk_size = updates
+            .processing
+            .effective_chunk_size()
+            .max(DEFAULT_CHUNK_SIZE);
         let exclude_segments = &updates.processing.exclude_segments;
-        
+
         // Calculate exclusion ranges
         let exclusion_ranges: Vec<ByteRange> = exclude_segments
             .iter()
-            .filter_map(|kind| {
-                self.structure.segments.iter().find(|s| s.is_type(*kind))
-            })
+            .filter_map(|kind| self.structure.segments.iter().find(|s| s.is_type(*kind)))
             .map(|segment| segment.location())
             .collect();
-        
+
         // Build chunk specs
         let mut specs = Vec::new();
         let mut offset = 0u64;
         let mut index = 0usize;
-        
+
         while offset < self.structure.total_size {
             let remaining = self.structure.total_size - offset;
             let size = chunk_size.min(remaining as usize);
-            
+
             // Check if this chunk overlaps with any exclusion range
             let chunk_range = ByteRange::new(offset, size as u64);
             let excluded = exclusion_ranges.iter().any(|excl| {
@@ -1076,13 +972,13 @@ impl<R: Read + Seek> Asset<R> {
                 let excl_end = excl.offset + excl.size;
                 chunk_range.offset < excl_end && chunk_end > excl.offset
             });
-            
+
             specs.push(ChunkSpec::new(index, offset, size, excluded));
-            
+
             offset += size as u64;
             index += 1;
         }
-        
+
         specs
     }
 
@@ -1128,20 +1024,22 @@ impl<R: Read + Seek> Asset<R> {
         S: Read + Seek + Send,
     {
         use rayon::prelude::*;
-        
+
         let specs = self.chunk_specs(updates);
-        
+
         // Hash in parallel - each thread opens its own file handle
         let results: Result<Vec<_>> = specs
             .into_par_iter()
             .filter(|s| !s.excluded)
             .map(|spec| -> Result<(usize, [u8; 32])> {
                 let mut source = open_source().map_err(crate::Error::Io)?;
-                source.seek(SeekFrom::Start(spec.offset)).map_err(crate::Error::Io)?;
-                
+                source
+                    .seek(SeekFrom::Start(spec.offset))
+                    .map_err(crate::Error::Io)?;
+
                 let mut buffer = vec![0u8; spec.size];
                 source.read_exact(&mut buffer).map_err(crate::Error::Io)?;
-                
+
                 let mut hasher = H::new();
                 hasher.update(&buffer);
                 let result = hasher.finalize();
@@ -1150,44 +1048,13 @@ impl<R: Read + Seek> Asset<R> {
                 Ok((spec.index, hash))
             })
             .collect();
-        
+
         let mut hashes = results?;
-        
+
         // Sort by index to maintain order
         hashes.sort_by_key(|(idx, _)| *idx);
-        
-        Ok(hashes.into_iter().map(|(_, h)| h).collect())
-    }
 
-    /// Hash the asset excluding specified segments (zero-copy with mmap)
-    ///
-    /// **Deprecated**: Use `read_with_processing()` instead for a unified API.
-    ///
-    /// # Example
-    /// ```no_run
-    /// # use asset_io::*;
-    /// # use std::fs::File;
-    /// # fn example() -> Result<()> {
-    /// # let file = File::open("test.jpg")?;
-    /// # let mut asset = Asset::from_source(file)?;
-    /// use sha2::{Sha256, Digest};
-    ///
-    /// let mut hasher = Sha256::new();
-    /// let c2pa_idx = asset.structure().c2pa_jumbf_index();
-    /// asset.hash_excluding_segments(&[c2pa_idx], &mut hasher)?;
-    /// let hash = hasher.finalize();
-    /// # Ok(())
-    /// # }
-    /// ```
-    #[deprecated(since = "0.2.0", note = "Use read_with_processing() instead")]
-    #[allow(deprecated)]
-    pub fn hash_excluding_segments<H: std::io::Write>(
-        &mut self,
-        excluded_indices: &[Option<usize>],
-        hasher: &mut H,
-    ) -> Result<()> {
-        self.structure
-            .hash_excluding_segments(&mut self.source, excluded_indices, hasher)
+        Ok(hashes.into_iter().map(|(_, h)| h).collect())
     }
 
     /// Write to a writer with updates
@@ -1214,7 +1081,11 @@ impl<R: Read + Seek> Asset<R> {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn write<W: Write>(&mut self, writer: &mut W, updates: &Updates) -> Result<Structure> {
+    pub fn write<W: Read + Write + Seek>(
+        &mut self,
+        writer: &mut W,
+        updates: &Updates,
+    ) -> Result<Structure> {
         // Calculate destination structure
         let dest_structure = self
             .handler
@@ -1264,7 +1135,7 @@ impl<R: Read + Seek> Asset<R> {
     /// let structure = asset.write_with_processing(
     ///     &mut output,
     ///     &updates,
-    ///     &mut |chunk| hasher.update(chunk),
+    ///     &mut |chunk: &dyn asset_io::ProcessChunk| hasher.update(chunk.data()),
     /// )?;
     ///
     /// // Generate C2PA manifest using hash
@@ -1283,8 +1154,8 @@ impl<R: Read + Seek> Asset<R> {
         processor: &mut F,
     ) -> Result<Structure>
     where
-        W: Write + Seek,
-        F: FnMut(&[u8]),
+        W: Read + Write + Seek,
+        F: for<'a> FnMut(&'a (dyn crate::ProcessChunk + 'a)),
     {
         // Calculate destination structure
         let dest_structure = self
@@ -1432,120 +1303,6 @@ impl<R: Read + Write + Seek> Asset<R> {
                 .sum(),
         )
     }
-
-    /// Update C2PA JUMBF manifest in-place
-    ///
-    /// This is a convenience method for the common C2PA workflow where a
-    /// placeholder manifest is written first, then replaced with the final
-    /// signed manifest.
-    ///
-    /// # Example
-    /// ```no_run
-    /// use asset_io::{Asset, Updates};
-    /// use std::fs::OpenOptions;
-    ///
-    /// # fn main() -> asset_io::Result<()> {
-    /// // Write placeholder
-    /// let mut asset = Asset::open("input.jpg")?;
-    /// let placeholder = vec![0u8; 20000]; // Reserve space
-    /// asset.write_to("output.jpg", &Updates::new().set_jumbf(placeholder))?;
-    ///
-    /// // Sign and update in-place
-    /// let final_manifest = vec![/* signed manifest */];
-    /// let mut file = OpenOptions::new()
-    ///     .read(true)
-    ///     .write(true)
-    ///     .open("output.jpg")?;
-    /// let mut asset = Asset::from_source(file)?;
-    /// asset.update_jumbf_in_place(final_manifest)?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub fn update_jumbf_in_place(&mut self, new_jumbf: Vec<u8>) -> Result<usize> {
-        self.update_segment_in_place(crate::segment::SegmentKind::Jumbf, new_jumbf)
-    }
-
-    /// Update XMP metadata in-place
-    ///
-    /// Useful for modifying XMP fields without rewriting the entire file.
-    ///
-    /// # Example
-    /// ```no_run
-    /// use asset_io::{Asset, MiniXmp};
-    /// use std::fs::OpenOptions;
-    ///
-    /// # fn main() -> asset_io::Result<()> {
-    /// let file = OpenOptions::new()
-    ///     .read(true)
-    ///     .write(true)
-    ///     .open("photo.jpg")?;
-    /// let mut asset = Asset::from_source(file)?;
-    ///
-    /// // Modify XMP
-    /// let xmp_data = asset.xmp()?.expect("No XMP found");
-    /// let xmp_str = String::from_utf8_lossy(&xmp_data).into_owned();
-    /// let mini_xmp = MiniXmp::new(&xmp_str);
-    /// let updated = mini_xmp.set("dc:title", "Updated Title")?;
-    ///
-    /// // Check if it fits
-    /// if updated.as_ref().len() as u64 <= asset.xmp_capacity().unwrap_or(0) {
-    ///     asset.update_xmp_in_place(updated.into_inner().into_bytes())?;  // Fast in-place update!
-    /// }
-    /// # Ok(())
-    /// # }
-    /// ```
-    #[cfg(feature = "xmp")]
-    pub fn update_xmp_in_place(&mut self, new_xmp: Vec<u8>) -> Result<usize> {
-        self.update_segment_in_place(crate::segment::SegmentKind::Xmp, new_xmp)
-    }
-
-    /// Update EXIF metadata in-place
-    ///
-    /// # Example
-    /// ```no_run
-    /// use asset_io::Asset;
-    /// use std::fs::OpenOptions;
-    ///
-    /// # fn main() -> asset_io::Result<()> {
-    /// let mut file = OpenOptions::new()
-    ///     .read(true)
-    ///     .write(true)
-    ///     .open("photo.jpg")?;
-    /// let mut asset = Asset::from_source(file)?;
-    ///
-    /// // Prepare new EXIF data (must fit in existing segment capacity)
-    /// let new_exif = vec![/* EXIF TIFF data */];
-    /// asset.update_exif_in_place(new_exif)?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    #[cfg(feature = "exif")]
-    pub fn update_exif_in_place(&mut self, new_exif: Vec<u8>) -> Result<usize> {
-        self.update_segment_in_place(crate::segment::SegmentKind::Exif, new_exif)
-    }
-
-    /// Get capacity for JUMBF updates
-    ///
-    /// Returns `None` if the file has no JUMBF segment.
-    pub fn jumbf_capacity(&self) -> Option<u64> {
-        self.segment_capacity(crate::segment::SegmentKind::Jumbf)
-    }
-
-    /// Get capacity for XMP updates
-    ///
-    /// Returns `None` if the file has no XMP segment.
-    #[cfg(feature = "xmp")]
-    pub fn xmp_capacity(&self) -> Option<u64> {
-        self.segment_capacity(crate::segment::SegmentKind::Xmp)
-    }
-
-    /// Get capacity for EXIF updates
-    ///
-    /// Returns `None` if the file has no EXIF segment.
-    #[cfg(feature = "exif")]
-    pub fn exif_capacity(&self) -> Option<u64> {
-        self.segment_capacity(crate::segment::SegmentKind::Exif)
-    }
 }
 
 impl Asset<File> {
@@ -1554,8 +1311,17 @@ impl Asset<File> {
     ///
     /// Returns the destination structure which can be used for subsequent
     /// in-place updates via [`Structure::update_segment`].
+    ///
+    /// Opens the file with read+write so BMFF can patch chunk offset tables (stco/co64)
+    /// after modifying the UUID region.
     pub fn write_to<P: AsRef<Path>>(&mut self, path: P, updates: &Updates) -> Result<Structure> {
-        let mut output = File::create(path)?;
+        use std::fs::OpenOptions;
+        let mut output = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(path)?;
         let structure = self.write(&mut output, updates)?;
         Ok(structure)
     }

@@ -27,6 +27,10 @@ pub enum ContainerKind {
     /// BMFF container (ISO Base Media File Format: HEIC, HEIF, AVIF, MP4, MOV)
     #[cfg(feature = "bmff")]
     Bmff,
+
+    /// RIFF container (Resource Interchange File Format: WebP, WAV, AVI)
+    #[cfg(feature = "riff")]
+    Riff,
 }
 
 /// Trait for container-specific I/O operations
@@ -72,7 +76,10 @@ pub trait ContainerIO: Send + Sync {
     ///
     /// This streams from the source to destination, applying updates
     /// without loading the entire file into memory.
-    fn write<R: Read + Seek, W: Write>(
+    ///
+    /// For BMFF, the writer must support Read + Write + Seek (e.g. `File`) so that
+    /// chunk offset tables (stco/co64) can be patched after UUID region changes.
+    fn write<R: Read + Seek, W: Read + Write + Seek>(
         &self,
         structure: &Structure,
         source: &mut R,
@@ -120,14 +127,17 @@ pub trait ContainerIO: Send + Sync {
     /// # Example Handler Override
     ///
     /// ```rust,ignore
-    /// fn write_with_processor<R: Read + Seek, W: Write, F: FnMut(&[u8])>(
+    /// fn write_with_processor<R: Read + Seek, W: Write, F>(
     ///     &self,
     ///     structure: &Structure,
     ///     source: &mut R,
     ///     writer: &mut W,
     ///     updates: &Updates,
-    ///     processor: F,
-    /// ) -> Result<()> {
+    ///     processor: &mut F,
+    /// ) -> Result<()>
+    /// where
+    ///     F: for<'a> FnMut(&'a (dyn ProcessChunk + 'a)),
+    /// {
     ///     use crate::processing_writer::ProcessingWriter;
     ///     
     ///     let exclude_segments = &updates.processing.exclude_segments;
@@ -147,14 +157,17 @@ pub trait ContainerIO: Send + Sync {
     ///     Ok(())
     /// }
     /// ```
-    fn write_with_processor<R: Read + Seek, W: Write, F: FnMut(&[u8])>(
+    fn write_with_processor<R: Read + Seek, W: Read + Write + Seek, F>(
         &self,
         structure: &Structure,
         source: &mut R,
         writer: &mut W,
         updates: &Updates,
-        processor: F,
-    ) -> Result<()> {
+        processor: &mut F,
+    ) -> Result<()>
+    where
+        F: for<'a> FnMut(&'a (dyn crate::ProcessChunk + 'a)),
+    {
         use crate::processing_writer::ProcessingWriter;
 
         // Default implementation: wrap writer and process everything
@@ -259,6 +272,9 @@ pub(crate) mod png_io;
 #[cfg(feature = "bmff")]
 pub mod bmff_io;
 
+#[cfg(feature = "riff")]
+pub(crate) mod riff_io;
+
 // ============================================================================
 // ContainerKind Registration Macro
 // ============================================================================
@@ -300,7 +316,7 @@ macro_rules! register_containers {
             }
 
             #[allow(unreachable_patterns)]
-            pub(crate) fn write<R: std::io::Read + std::io::Seek, W: std::io::Write>(
+            pub(crate) fn write<R: std::io::Read + std::io::Seek, W: std::io::Read + std::io::Write + std::io::Seek>(
                 &self,
                 structure: &$crate::Structure,
                 source: &mut R,
@@ -316,14 +332,17 @@ macro_rules! register_containers {
             }
 
             #[allow(unreachable_patterns)]
-            pub(crate) fn write_with_processor<R: std::io::Read + std::io::Seek, W: std::io::Write, F: FnMut(&[u8])>(
+            pub(crate) fn write_with_processor<R: std::io::Read + std::io::Seek, W: std::io::Read + std::io::Write + std::io::Seek, F>(
                 &self,
                 structure: &$crate::Structure,
                 source: &mut R,
                 writer: &mut W,
                 updates: &$crate::Updates,
-                processor: F,
-            ) -> $crate::Result<()> {
+                processor: &mut F,
+            ) -> $crate::Result<()>
+            where
+                F: for<'a> FnMut(&'a (dyn $crate::ProcessChunk + 'a)),
+            {
                 match self {
                     $(
                         $(#[$meta])*
@@ -553,32 +572,7 @@ register_containers! {
 
     #[cfg(feature = "bmff")]
     Bmff => bmff_io::BmffIO,
-}
 
-/// Calculate the C2PA exclusion range for a segment in a structure
-///
-/// This encapsulates container-specific details about what bytes must be excluded
-/// from hashing when generating C2PA DataHash assertions. For example:
-/// - PNG: Excludes data + CRC (4 extra bytes after data)
-/// - JPEG: Excludes only the JUMBF data (headers are hashed)
-/// - BMFF: Excludes only the manifest data (box headers are hashed)
-///
-/// # Returns
-/// Some((offset, size)) for the range to exclude from the hash, or None
-/// if the segment kind is not found.
-///
-/// # Example
-/// ```ignore
-/// use asset_io::SegmentKind;
-///
-/// let structure = asset.write_with_processing(&updates, |chunk| hasher.update(chunk))?;
-/// let (offset, size) = exclusion_range_for_segment(&structure, SegmentKind::Jumbf)
-///     .expect("JUMBF segment not found");
-/// ```
-pub fn exclusion_range_for_segment(
-    structure: &crate::Structure,
-    kind: crate::segment::SegmentKind,
-) -> Option<(u64, u64)> {
-    let handler = get_handler(structure.container).ok()?;
-    handler.exclusion_range_for_segment(structure, kind)
+    #[cfg(feature = "riff")]
+    Riff => riff_io::RiffIO,
 }
