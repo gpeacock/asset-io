@@ -27,10 +27,11 @@
 
 use asset_io::{Asset, ProcessChunk, SegmentKind};
 use c2pa::{
-    assertions::{c2pa_action, Action, BmffHash},
+    assertions::{c2pa_action, Action, BmffHash, DataHash},
     Builder, ClaimGeneratorInfo, HashRange, Reader, Settings, ValidationState,
 };
-use std::io::{BufReader, Seek, SeekFrom, Write};
+use sha2::{Digest, Sha256};
+use std::io::{BufReader, Write};
 use std::time::Instant;
 
 /// Buffer size for read/write (64KB vs default 8KB)
@@ -143,43 +144,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // For BMFF: add BmffHash explicitly so we get BmffHash (like c2patool), not DataHash.
         // We use "application/c2pa" for placeholder composition so asset-io gets raw JUMBF
         // (asset-io adds the UUID box header itself; SDK's BMFF compose would double-wrap).
-        if is_bmff {
+        let t_placeholder = Instant::now();
+        let (structure, mut output_file, signed_jumbf) = if is_bmff {
+            // BMFF: use placeholder() + hash_bmff_mdat_bytes for one-pass mdat hashing
             let ph_alg = "sha256";
             let mut placeholder_bmff = BmffHash::new("jumbf manifest", ph_alg, None);
             placeholder_bmff.set_default_exclusions();
             placeholder_bmff.add_place_holder_hash()?;
-            // Use versioned label (c2pa.hash.bmff.v3) - v1 is deprecated
             let assertion_label = format!("{}.v3", BmffHash::LABEL);
             builder.add_assertion(&assertion_label, &placeholder_bmff)?;
-        }
 
-        let t_placeholder = Instant::now();
-        let mut placeholder_jumbf = builder.placeholder("application/c2pa")?;
-        profile("placeholder", t_placeholder);
-
-        // BmffHash Merkle leaves expand the manifest beyond the placeholder; reserve extra space
-        // per SDK docs: "size of manifest = placeholder + (number of leaves * size of hash)"
-        // Large videos (4K, etc.) have many mdat chunks → large Merkle trees; 256KB covers typical cases
-        if is_bmff {
+            let mut placeholder_jumbf = builder.placeholder("application/c2pa")?;
             placeholder_jumbf.extend(std::iter::repeat(0u8).take(256 * 1024));
-        }
 
-        // asset-io writes the file with JUMBF embedded
-        let updates = asset_io::Updates::new()
-            .set_jumbf(placeholder_jumbf.clone())
-            .exclude_from_processing(vec![SegmentKind::Jumbf], asset_io::ExclusionMode::DataOnly);
+            let updates = asset_io::Updates::new()
+                .set_jumbf(placeholder_jumbf.clone())
+                .exclude_from_processing(
+                    vec![SegmentKind::Jumbf],
+                    asset_io::ExclusionMode::DataOnly,
+                );
 
-        let mut output_file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(output_path)?;
+            let mut output_file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(output_path)?;
 
-        // Write phase (BMFF requires Read+Write+Seek for chunk offset adjustment)
-        let t_write = Instant::now();
-        let structure = if is_bmff {
-            // BMFF: use write_with_processing + hash_bmff_mdat_bytes for one-pass mdat hashing
             let mut processor = |chunk: &dyn ProcessChunk| {
                 if let Some(id) = chunk.id() {
                     let _ = builder.hash_bmff_mdat_bytes(
@@ -189,12 +180,58 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     );
                 }
             };
-            asset.write_with_processing(&mut output_file, &updates, &mut processor)?
+            let structure =
+                asset.write_with_processing(&mut output_file, &updates, &mut processor)?;
+            output_file.flush()?;
+            profile("asset_write", t_placeholder);
+
+            let signed_jumbf = builder.sign_embeddable("application/c2pa")?;
+            (structure, output_file, signed_jumbf)
         } else {
-            asset.write(&mut output_file, &updates)?
+            // DataHash: single-pass write+hash using sign_data_hashed_embeddable
+            let signer = Settings::signer()?;
+            let placeholder_jumbf = builder.placeholder("application/c2pa")?;
+            profile("placeholder", t_placeholder);
+
+            let updates = asset_io::Updates::new()
+                .set_jumbf(placeholder_jumbf.clone())
+                .exclude_from_processing(
+                    vec![SegmentKind::Jumbf],
+                    asset_io::ExclusionMode::DataOnly,
+                );
+
+            let mut output_file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(output_path)?;
+
+            let t_write = Instant::now();
+            let mut hasher = Sha256::new();
+            let mut processor = |chunk: &dyn ProcessChunk| {
+                hasher.update(chunk.data());
+            };
+            let structure =
+                asset.write_with_processing(&mut output_file, &updates, &mut processor)?;
+            output_file.flush()?;
+            profile("asset_write", t_write);
+
+            let (exclusion_offset, exclusion_size) = structure
+                .exclusion_range_for_segment(SegmentKind::Jumbf)
+                .ok_or("Failed to compute exclusion range for JUMBF segment")?;
+
+            let mut data_hash = DataHash::new("jumbf_manifest", "sha256");
+            data_hash.add_exclusion(HashRange::new(exclusion_offset, exclusion_size));
+            data_hash.set_hash(hasher.finalize().to_vec());
+
+            let signed_jumbf = builder.sign_data_hashed_embeddable(
+                signer.as_ref(),
+                &data_hash,
+                "application/c2pa",
+            )?;
+            (structure, output_file, signed_jumbf)
         };
-        output_file.flush()?;
-        profile("asset_write", t_write);
 
         if debug {
             println!("\n🔬 Debug: JUMBF segment and exclusion ranges");
@@ -226,32 +263,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("   Structure total_size: {}", structure.total_size);
             println!();
         }
-
-        if !is_bmff {
-            let t_exclusion = Instant::now();
-            println!("Setting exclusion ranges for DataHash...");
-            let (exclusion_offset, exclusion_size) = structure
-                .exclusion_range_for_segment(SegmentKind::Jumbf)
-                .ok_or("Failed to compute exclusion range for JUMBF segment")?;
-            builder
-                .set_data_hash_exclusions(vec![HashRange::new(exclusion_offset, exclusion_size)])?;
-            println!(
-                "   Range: offset={}, size={}",
-                exclusion_offset, exclusion_size
-            );
-            profile("exclusion_setup", t_exclusion);
-        }
-
-        // Buffered read for hash computation
-        output_file.seek(SeekFrom::Start(0))?;
-        let t_hash = Instant::now();
-        let mut buf_reader = BufReader::with_capacity(BUF_SIZE, output_file);
-        builder.update_hash_from_stream(native_format, &mut buf_reader)?;
-        let mut output_file = buf_reader.into_inner();
-        profile("update_hash_from_stream", t_hash);
-
-        // sign the manifest
-        let signed_jumbf = builder.sign_embeddable("application/c2pa")?;
 
         if debug {
             let capacity = structure
