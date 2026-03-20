@@ -598,20 +598,17 @@ fn adjust_chunk_offsets<W: Read + Write + Seek>(
             }
             let (_version, _flags) = read_box_header_ext(output)?;
             let entry_count = output.read_u32::<BigEndian>()?;
-            let entry_start = output.stream_position()?;
-            let mut entries = Vec::with_capacity(entry_count as usize);
             for _ in 0..entry_count {
+                let entry_pos = output.stream_position()?;
                 let offset = output.read_u32::<BigEndian>()?;
                 let new_offset = if adjust > 0 {
                     offset.saturating_add(adjust as u32)
                 } else {
                     offset.saturating_sub((-adjust) as u32)
                 };
-                entries.push(new_offset);
-            }
-            output.seek(SeekFrom::Start(entry_start))?;
-            for e in entries {
-                output.write_u32::<BigEndian>(e)?;
+                // Seek back to the start of this entry and overwrite it in place.
+                output.seek(SeekFrom::Start(entry_pos))?;
+                output.write_u32::<BigEndian>(new_offset)?;
             }
         }
     }
