@@ -194,9 +194,18 @@ where
     }
 
     /// Process a chunk (for BMFF handler to call when streaming mdat boxes).
+    ///
+    /// When exclude mode is enabled via [`set_exclude_mode`], this method is a
+    /// no-op, consistent with the behaviour of [`write`] and [`write_all`].
+    ///
+    /// [`set_exclude_mode`]: Self::set_exclude_mode
+    /// [`write`]: std::io::Write::write
+    /// [`write_all`]: std::io::Write::write_all
     #[allow(dead_code)]
     pub fn process_chunk(&mut self, chunk: impl ProcessChunk) {
-        (self.processor)(&chunk as &dyn ProcessChunk);
+        if !self.exclude_mode {
+            (self.processor)(&chunk as &dyn ProcessChunk);
+        }
     }
 }
 
@@ -313,6 +322,28 @@ mod tests {
 
         // Verify only non-excluded data was processed
         assert_eq!(processed, b"included1included2");
+    }
+
+    #[test]
+    fn test_process_chunk_respects_exclude_mode() {
+        let mut output = Vec::new();
+        let mut processed = Vec::new();
+        let mut processor = |chunk: &dyn ProcessChunk| processed.extend_from_slice(chunk.data());
+
+        let mut writer = ProcessingWriter::new(&mut output, &mut processor);
+
+        // process_chunk while NOT in exclude mode — should be processed
+        writer.process_chunk(SimpleChunk(b"included"));
+
+        // process_chunk while in exclude mode — should be a no-op
+        writer.set_exclude_mode(true);
+        writer.process_chunk(SimpleChunk(b"excluded"));
+        writer.set_exclude_mode(false);
+
+        // process_chunk after exclude mode is cleared — should be processed again
+        writer.process_chunk(SimpleChunk(b"also_included"));
+
+        assert_eq!(processed, b"includedalso_included");
     }
 
     #[test]
