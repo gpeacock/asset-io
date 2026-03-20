@@ -220,11 +220,11 @@ asset.read_embedded_thumbnail()?      // Option<Thumbnail>
 
 // Writing
 asset.write_to(path, &updates)?       // To new file
-asset.write(&mut writer, &updates)?   // To any Write+Seek
+asset.write(&mut writer, &updates)?   // To any Read+Write+Seek (e.g. File or Cursor<Vec<u8>>)
 
 // Streaming processing
 asset.read_with_processing(callback, &options)?
-asset.write_with_processing(writer, &updates, callback)?
+asset.write_with_processing(&mut writer, &updates, callback)?   // writer: Read+Write+Seek
 
 // In-place updates (when size permits)
 asset.update_segment_in_place(asset_io::SegmentKind::Xmp, new_xmp)?
