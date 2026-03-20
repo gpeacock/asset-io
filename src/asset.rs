@@ -682,11 +682,22 @@ impl<R: Read + Seek> Asset<R> {
             .max(DEFAULT_CHUNK_SIZE);
         let exclude_segments = &updates.processing.exclude_segments;
 
-        // Calculate exclusion ranges
+        // Calculate exclusion ranges using container-specific logic (e.g., PNG includes CRC,
+        // RIFF includes alignment padding, BMFF uses full UUID box range).
         let exclusion_ranges: Vec<ByteRange> = exclude_segments
             .iter()
-            .filter_map(|kind| self.structure.segments.iter().find(|s| s.is_type(*kind)))
-            .map(|segment| segment.location())
+            .filter_map(|kind| {
+                if let Some((offset, size)) = self.structure.exclusion_range_for_segment(*kind) {
+                    Some(ByteRange::new(offset, size))
+                } else {
+                    // Fallback: use the segment's raw location
+                    self.structure
+                        .segments
+                        .iter()
+                        .find(|s| s.is_type(*kind))
+                        .map(|seg| seg.location())
+                }
+            })
             .collect();
 
         // Read all chunks
@@ -949,11 +960,22 @@ impl<R: Read + Seek> Asset<R> {
             .max(DEFAULT_CHUNK_SIZE);
         let exclude_segments = &updates.processing.exclude_segments;
 
-        // Calculate exclusion ranges
+        // Calculate exclusion ranges using container-specific logic (e.g., PNG includes CRC,
+        // RIFF includes alignment padding, BMFF uses full UUID box range).
         let exclusion_ranges: Vec<ByteRange> = exclude_segments
             .iter()
-            .filter_map(|kind| self.structure.segments.iter().find(|s| s.is_type(*kind)))
-            .map(|segment| segment.location())
+            .filter_map(|kind| {
+                if let Some((offset, size)) = self.structure.exclusion_range_for_segment(*kind) {
+                    Some(ByteRange::new(offset, size))
+                } else {
+                    // Fallback: use the segment's raw location
+                    self.structure
+                        .segments
+                        .iter()
+                        .find(|s| s.is_type(*kind))
+                        .map(|seg| seg.location())
+                }
+            })
             .collect();
 
         // Build chunk specs
