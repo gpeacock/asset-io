@@ -3,7 +3,10 @@
 use crate::{
     containers::ContainerKind,
     error::Result,
-    segment::{ByteRange, ChunkedSegmentReader, Location, Segment, SegmentKind, DEFAULT_CHUNK_SIZE, MAX_SEGMENT_SIZE},
+    segment::{
+        ByteRange, ChunkedSegmentReader, Location, Segment, SegmentKind, DEFAULT_CHUNK_SIZE,
+        MAX_SEGMENT_SIZE,
+    },
     MediaType,
 };
 use std::io::{Read, Seek, SeekFrom, Take};
@@ -198,7 +201,7 @@ impl Structure {
                 ),
             });
         }
-        
+
         source.seek(SeekFrom::Start(range.offset))?;
         let mut buffer = vec![0u8; range.size as usize];
         source.read_exact(&mut buffer)?;
@@ -218,6 +221,23 @@ impl Structure {
         source.seek(SeekFrom::Start(range.offset))?;
         let taken = source.take(range.size);
         Ok(ChunkedSegmentReader::new(taken, range.size, chunk_size))
+    }
+
+    /// Get the exclusion range for a segment kind.
+    ///
+    /// Returns the byte range `(offset, size)` that should be excluded from hashing
+    /// or processing for the given segment kind. This may differ from the segment's
+    /// [`location()`](crate::segment::Segment::location) depending on the container:
+    ///
+    /// - **JPEG**: Same as segment location (data only)
+    /// - **PNG**: Segment location + 4 bytes (data + CRC)
+    /// - **RIFF**: Segment location with padded size (data + alignment padding)
+    /// - **BMFF JUMBF**: Full UUID box range (not just JUMBF data), per BmffHash spec
+    ///
+    /// Returns `None` if the segment kind is not found in this structure.
+    pub fn exclusion_range_for_segment(&self, kind: SegmentKind) -> Option<(u64, u64)> {
+        let handler = crate::containers::get_handler(self.container).ok()?;
+        handler.exclusion_range_for_segment(self, kind)
     }
 
     /// Get byte ranges for all segments EXCEPT those matching the exclusion patterns
@@ -524,7 +544,7 @@ impl Structure {
     /// let structure = asset.write_with_processing(
     ///     &mut output,
     ///     &updates,
-    ///     &mut |chunk| hasher.update(chunk),
+    ///     &mut |chunk: &dyn asset_io::ProcessChunk| hasher.update(chunk.data()),
     /// )?;
     ///
     /// // Generate manifest and update in-place
@@ -544,7 +564,9 @@ impl Structure {
         // PNG requires special handling for CRC recalculation
         #[cfg(feature = "png")]
         if self.container == ContainerKind::Png {
-            return crate::containers::png_io::update_png_segment_in_stream(writer, self, kind, data);
+            return crate::containers::png_io::update_png_segment_in_stream(
+                writer, self, kind, data,
+            );
         }
 
         // Find the segment
@@ -565,12 +587,13 @@ impl Structure {
         // For BMFF C2PA segments, only the first range (JUMBF data) is writeable
         // The second range (full UUID box) is for hash exclusions only
         #[cfg(feature = "bmff")]
-        let writeable_ranges = if self.container == ContainerKind::Bmff && kind == SegmentKind::Jumbf {
-            &segment.ranges[..1]  // Only first range
-        } else {
-            &segment.ranges[..]  // All ranges
-        };
-        
+        let writeable_ranges =
+            if self.container == ContainerKind::Bmff && kind == SegmentKind::Jumbf {
+                &segment.ranges[..1] // Only first range
+            } else {
+                &segment.ranges[..] // All ranges
+            };
+
         #[cfg(not(feature = "bmff"))]
         let writeable_ranges = &segment.ranges[..];
 

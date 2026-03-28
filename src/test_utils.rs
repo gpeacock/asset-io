@@ -76,6 +76,8 @@ define_fixtures!(
     P1000708 => ("P1000708.jpg", "image/jpeg"),            // 810KB - XMP only
     SAMPLE1_PNG => ("sample1.png", "image/png"),           // PNG test fixture
     GREEN_CAT_PNG => ("GreenCat.png", "image/png"),        // PNG with JUMBF
+    SAMPLE1_HEIC => ("sample1.heic", "image/heif"),        // BMFF/HEIC
+    SAMPLE1_WEBP => ("sample1.webp", "image/webp"),        // RIFF/WebP
 );
 
 /// Get path to a fixture file
@@ -216,7 +218,9 @@ mod tests {
         assert!(fixtures.contains(&"P1000708.jpg"));
         assert!(fixtures.contains(&"sample1.png"));
         assert!(fixtures.contains(&"GreenCat.png"));
-        assert_eq!(fixtures.len(), 5);
+        assert!(fixtures.contains(&"sample1.heic"));
+        assert!(fixtures.contains(&"sample1.webp"));
+        assert_eq!(fixtures.len(), 7);
     }
 
     #[cfg(feature = "embed-fixtures")]

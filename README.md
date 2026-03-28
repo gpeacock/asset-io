@@ -176,8 +176,8 @@ cargo run --example inspect --features all-formats,xmp,exif -- image.jpg
 # Test all metadata operation combinations
 cargo run --example test_all_combinations --features jpeg,png,test-utils
 
-# C2PA signing workflow demo
-cargo run --example c2pa --features jpeg,png
+# C2PA signing with new embeddable API (0.77.0+)
+cargo run --example c2pa_embeddable --features all-formats,xmp -- input.jpg output.jpg
 
 # Update XMP field in-place
 cargo run --example update_xmp_field --features jpeg,xmp -- photo.jpg dc:title "New Title"
@@ -217,15 +217,15 @@ asset.read_embedded_thumbnail()?      // Option<Thumbnail>
 
 // Writing
 asset.write_to(path, &updates)?       // To new file
-asset.write(&mut writer, &updates)?   // To any Write+Seek
+asset.write(&mut writer, &updates)?   // To any Read+Write+Seek (e.g. File or Cursor<Vec<u8>>)
 
 // Streaming processing
 asset.read_with_processing(callback, &options)?
-asset.write_with_processing(writer, &updates, callback)?
+asset.write_with_processing(&mut writer, &updates, callback)?   // writer: Read+Write+Seek
 
 // In-place updates (when size permits)
-asset.update_xmp_in_place(new_xmp)?
-asset.update_jumbf_in_place(new_jumbf)?
+asset.update_segment_in_place(asset_io::SegmentKind::Xmp, new_xmp)?
+asset.update_segment_in_place(asset_io::SegmentKind::Jumbf, new_jumbf)?
 ```
 
 ## Use Cases
