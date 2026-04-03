@@ -42,22 +42,16 @@ pub enum MediaType {
     #[cfg(feature = "bmff")]
     /// QuickTime MOV video
     QuickTime,
-    // Future media types (commented out until container handlers implemented)
-    //
     // RIFF container variants
-    // WebP,
-    // Wav,
-    // Avi,
-    //
-    // TIFF container
-    // Tiff,
-    // Dng,
-    //
-    // Other formats
-    // Gif,
-    // Svg,
-    // Pdf,
-    // Mp3,
+    #[cfg(feature = "riff")]
+    /// WebP image (RIFF/WEBP container)
+    WebP,
+    #[cfg(feature = "riff")]
+    /// WAV audio (RIFF/WAVE container)
+    Wav,
+    #[cfg(feature = "riff")]
+    /// AVI video (RIFF/AVI container)
+    Avi,
 }
 
 impl MediaType {
@@ -95,6 +89,12 @@ impl MediaType {
             MediaType::Mp4Audio,
             #[cfg(feature = "bmff")]
             MediaType::QuickTime,
+            #[cfg(feature = "riff")]
+            MediaType::WebP,
+            #[cfg(feature = "riff")]
+            MediaType::Wav,
+            #[cfg(feature = "riff")]
+            MediaType::Avi,
         ]
     }
 
@@ -124,6 +124,8 @@ impl MediaType {
             | MediaType::Mp4Video
             | MediaType::Mp4Audio
             | MediaType::QuickTime => ContainerKind::Bmff,
+            #[cfg(feature = "riff")]
+            MediaType::WebP | MediaType::Wav | MediaType::Avi => ContainerKind::Riff,
         }
     }
 
@@ -158,6 +160,12 @@ impl MediaType {
             MediaType::Mp4Audio => "audio/mp4",
             #[cfg(feature = "bmff")]
             MediaType::QuickTime => "video/quicktime",
+            #[cfg(feature = "riff")]
+            MediaType::WebP => "image/webp",
+            #[cfg(feature = "riff")]
+            MediaType::Wav => "audio/wav",
+            #[cfg(feature = "riff")]
+            MediaType::Avi => "video/avi",
         }
     }
 
@@ -192,6 +200,12 @@ impl MediaType {
             MediaType::Mp4Audio => "m4a",
             #[cfg(feature = "bmff")]
             MediaType::QuickTime => "mov",
+            #[cfg(feature = "riff")]
+            MediaType::WebP => "webp",
+            #[cfg(feature = "riff")]
+            MediaType::Wav => "wav",
+            #[cfg(feature = "riff")]
+            MediaType::Avi => "avi",
         }
     }
 }

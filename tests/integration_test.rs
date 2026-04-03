@@ -87,12 +87,17 @@ mod fixture_tests {
             "Should have fixtures in tests/fixtures"
         );
 
-        // All should be supported image formats (JPEG or PNG)
+        // All should be supported formats (JPEG, PNG, BMFF, RIFF)
         for fixture in &fixtures {
             let lower = fixture.to_lowercase();
+            let supported = lower.ends_with(".jpg")
+                || lower.ends_with(".jpeg")
+                || lower.ends_with(".png")
+                || lower.ends_with(".heic")
+                || lower.ends_with(".webp");
             assert!(
-                lower.ends_with(".jpg") || lower.ends_with(".jpeg") || lower.ends_with(".png"),
-                "Fixture {} should be a supported format (JPEG or PNG)",
+                supported,
+                "Fixture {} should be a supported format (JPEG, PNG, HEIC, WebP)",
                 fixture
             );
         }
@@ -361,10 +366,11 @@ mod png_tests {
     fn test_png_round_trip_real_file() {
         let mut asset = Asset::open("tests/fixtures/GreenCat.png").unwrap();
 
-        // Write with no changes
-        let mut output = Vec::new();
+        // Write with no changes (Cursor<Vec<u8>> implements Read+Write+Seek for BMFF chunk offset adjustment)
+        let mut output = Cursor::new(Vec::new());
         let updates = Updates::default();
         asset.write(&mut output, &updates).unwrap();
+        let output = output.into_inner();
 
         // Output should be valid PNG
         assert_eq!(&output[0..8], b"\x89PNG\r\n\x1a\n");
@@ -387,9 +393,10 @@ mod png_tests {
 
         // Add XMP metadata
         let xmp_data = b"<rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\"><test>PNG XMP</test></rdf:RDF>".to_vec();
-        let mut output = Vec::new();
+        let mut output = Cursor::new(Vec::new());
         let updates = Updates::new().set_xmp(xmp_data.clone());
         asset.write(&mut output, &updates).unwrap();
+        let output = output.into_inner();
 
         // Parse the output and verify XMP was added
         let mut output_cursor = Cursor::new(output);
@@ -406,9 +413,10 @@ mod png_tests {
 
         // Add JUMBF metadata
         let jumbf_data = b"Test JUMBF data for PNG".to_vec();
-        let mut output = Vec::new();
+        let mut output = Cursor::new(Vec::new());
         let updates = Updates::new().set_jumbf(jumbf_data.clone());
         asset.write(&mut output, &updates).unwrap();
+        let output = output.into_inner();
 
         // Parse the output and verify JUMBF was added
         let mut output_cursor = Cursor::new(output);
@@ -427,11 +435,12 @@ mod png_tests {
         let xmp_data = b"<test>XMP Data</test>".to_vec();
         let jumbf_data = b"JUMBF Data".to_vec();
 
-        let mut output = Vec::new();
+        let mut output = Cursor::new(Vec::new());
         let updates = Updates::new()
             .set_xmp(xmp_data.clone())
             .set_jumbf(jumbf_data.clone());
         asset.write(&mut output, &updates).unwrap();
+        let output = output.into_inner();
 
         // Verify both were added
         let mut output_cursor = Cursor::new(output);
@@ -512,7 +521,11 @@ mod streaming_tests {
 
             // Write with processing (uses calculate_updated_structure internally)
             let structure = asset
-                .write_with_processing(&mut output_file, &updates, &mut |_chunk| {})
+                .write_with_processing(
+                    &mut output_file,
+                    &updates,
+                    &mut |_chunk: &dyn asset_io::ProcessChunk| {},
+                )
                 .expect(&format!("write_with_processing failed for {}", name));
 
             // Check JUMBF segment exists in structure
@@ -597,7 +610,11 @@ mod streaming_tests {
             .expect("Failed to create output file");
 
         let _structure = asset
-            .write_with_processing(&mut output_file, &updates, &mut |_| {})
+            .write_with_processing(
+                &mut output_file,
+                &updates,
+                &mut |_: &dyn asset_io::ProcessChunk| {},
+            )
             .expect("write_with_processing failed");
 
         drop(output_file);
@@ -620,12 +637,11 @@ mod streaming_tests {
         println!("✓ Keep XMP + Add JUMBF successful");
     }
 
-    /// Test all metadata modification combinations
+    /// Test all metadata modification combinations (Set, Remove, Keep for XMP × JUMBF)
+    /// Runs on all supported formats: JPEG, PNG, BMFF, RIFF
     #[test]
     fn test_metadata_modifications() {
-        #[cfg(feature = "jpeg")]
-        {
-            let test_xmp = br#"<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>
+        let test_xmp = br#"<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>
 <x:xmpmeta xmlns:x="adobe:ns:meta/">
 <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
 <rdf:Description rdf:about="" xmlns:dc="http://purl.org/dc/elements/1.1/">
@@ -634,57 +650,126 @@ mod streaming_tests {
 </rdf:RDF>
 </x:xmpmeta>
 <?xpacket end="w"?>"#
-                .to_vec();
+            .to_vec();
+        let test_jumbf = create_test_jumbf();
 
-            let input_path = fixture_path(P1000708);
+        // (fixture, ext, format_name) - use fixture that has both XMP and JUMBF when possible
+        let formats: Vec<(&str, &str, &str)> = vec![
+            #[cfg(feature = "jpeg")]
+            (FIREFLY_TRAIN, "jpg", "jpeg"),
+            #[cfg(feature = "png")]
+            (GREEN_CAT_PNG, "png", "png"),
+            #[cfg(feature = "bmff")]
+            (SAMPLE1_HEIC, "heic", "bmff"),
+            #[cfg(feature = "riff")]
+            (SAMPLE1_WEBP, "webp", "riff"),
+        ];
 
-            // Test: Add XMP
-            {
-                let output = "/tmp/test_add_xmp.jpg";
-                let mut asset = Asset::open(&input_path).expect("Failed to open");
-                asset
-                    .write_to(output, &Updates::new().set_xmp(test_xmp.clone()))
-                    .expect("Write failed");
-
-                let mut verify = Asset::open(output).expect("Failed to reopen");
-                assert!(verify.xmp().unwrap().is_some(), "XMP should be added");
+        for (fixture, ext, format_name) in formats {
+            let input_path = fixture_path(fixture);
+            if !input_path.exists() {
+                println!(
+                    "  Skipping {} - fixture not found: {:?}",
+                    format_name, input_path
+                );
+                continue;
             }
 
-            // Test: Add JUMBF
-            {
-                let output = "/tmp/test_add_jumbf.jpg";
-                let jumbf = create_test_jumbf();
-                let mut asset = Asset::open(&input_path).expect("Failed to open");
-                asset
-                    .write_to(output, &Updates::new().set_jumbf(jumbf.clone()))
-                    .expect("Write failed");
+            println!(
+                "\n=== Testing {} metadata combinations for {} ===",
+                format_name, fixture
+            );
 
-                let mut verify = Asset::open(output).expect("Failed to reopen");
-                let result = verify.jumbf().unwrap().expect("JUMBF should be added");
-                assert_eq!(result, jumbf);
+            for xmp_name in ["Set", "Remove", "Keep"] {
+                for jumbf_name in ["Set", "Remove", "Keep"] {
+                    let base = format!(
+                        "{}_{}_{}_{}",
+                        format_name,
+                        fixture.replace('/', "_").replace('.', "_"),
+                        xmp_name.to_lowercase(),
+                        jumbf_name.to_lowercase()
+                    );
+                    let output = format!("/tmp/test_meta_{}.{}", base, ext);
+
+                    let updates = match (xmp_name, jumbf_name) {
+                        ("Set", "Set") => Updates::new()
+                            .set_xmp(test_xmp.clone())
+                            .set_jumbf(test_jumbf.clone()),
+                        ("Set", "Remove") => {
+                            Updates::new().set_xmp(test_xmp.clone()).remove_jumbf()
+                        }
+                        ("Set", "Keep") => Updates::new().set_xmp(test_xmp.clone()).keep_jumbf(),
+                        ("Remove", "Set") => {
+                            Updates::new().remove_xmp().set_jumbf(test_jumbf.clone())
+                        }
+                        ("Remove", "Remove") => Updates::new().remove_xmp().remove_jumbf(),
+                        ("Remove", "Keep") => Updates::new().remove_xmp().keep_jumbf(),
+                        ("Keep", "Set") => Updates::new().keep_xmp().set_jumbf(test_jumbf.clone()),
+                        ("Keep", "Remove") => Updates::new().keep_xmp().remove_jumbf(),
+                        ("Keep", "Keep") => Updates::new().keep_xmp().keep_jumbf(),
+                        _ => unreachable!(),
+                    };
+
+                    let mut asset = Asset::open(&input_path).expect(&format!(
+                        "Failed to open {} for {} x {} test",
+                        fixture, xmp_name, jumbf_name
+                    ));
+
+                    asset.write_to(&output, &updates).expect(&format!(
+                        "Write failed for {} x {} on {}",
+                        xmp_name, jumbf_name, format_name
+                    ));
+
+                    // Verify output parses and metadata state matches expectations
+                    let mut verify = Asset::open(&output).expect("Failed to reopen output");
+                    let out_xmp = verify.xmp().expect("xmp() failed");
+                    let out_jumbf = verify.jumbf().expect("jumbf() failed");
+
+                    match xmp_name {
+                        "Set" => assert!(
+                            out_xmp.is_some() && out_xmp.as_ref().unwrap() == &test_xmp,
+                            "XMP Set: expected test XMP in output"
+                        ),
+                        "Remove" => {
+                            assert!(out_xmp.is_none(), "XMP Remove: expected no XMP in output")
+                        }
+                        "Keep" => {
+                            let in_xmp = Asset::open(&input_path)
+                                .ok()
+                                .and_then(|mut a| a.xmp().ok().flatten());
+                            if in_xmp.is_some() {
+                                assert!(out_xmp.is_some(), "XMP Keep: expected XMP preserved");
+                            }
+                        }
+                        _ => {}
+                    }
+
+                    match jumbf_name {
+                        "Set" => assert!(
+                            out_jumbf.is_some() && out_jumbf.as_ref().unwrap() == &test_jumbf,
+                            "JUMBF Set: expected test JUMBF in output"
+                        ),
+                        "Remove" => assert!(
+                            out_jumbf.is_none(),
+                            "JUMBF Remove: expected no JUMBF in output"
+                        ),
+                        "Keep" => {
+                            let in_jumbf = Asset::open(&input_path)
+                                .ok()
+                                .and_then(|mut a| a.jumbf().ok().flatten());
+                            if in_jumbf.is_some() {
+                                assert!(
+                                    out_jumbf.is_some(),
+                                    "JUMBF Keep: expected JUMBF preserved"
+                                );
+                            }
+                        }
+                        _ => {}
+                    }
+                }
             }
 
-            // Test: Remove XMP
-            {
-                // First add XMP, then remove it
-                let temp = "/tmp/test_remove_xmp_temp.jpg";
-                let output = "/tmp/test_remove_xmp.jpg";
-
-                let mut asset = Asset::open(&input_path).expect("Failed to open");
-                asset
-                    .write_to(temp, &Updates::new().set_xmp(test_xmp.clone()))
-                    .expect("Write failed");
-
-                let mut asset2 = Asset::open(temp).expect("Failed to open temp");
-                asset2
-                    .write_to(output, &Updates::new().remove_xmp())
-                    .expect("Write failed");
-
-                let mut verify = Asset::open(output).expect("Failed to reopen");
-                assert!(verify.xmp().unwrap().is_none(), "XMP should be removed");
-            }
-
-            println!("✓ All metadata modification tests passed");
+            println!("✓ {} - All 9 metadata combinations passed", format_name);
         }
     }
 }

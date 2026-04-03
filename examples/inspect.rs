@@ -37,7 +37,7 @@ fn main() -> asset_io::Result<()> {
                 std::str::from_utf8(&xmp[..xmp.len().min(100)]).unwrap_or("<binary data>");
             println!("  Preview: {}...", preview);
         }
-        None => println!("\n✗ No XMP metadata found"),
+        None => {}
     }
 
     // Check for JUMBF (loads and assembles only if present)
@@ -45,7 +45,7 @@ fn main() -> asset_io::Result<()> {
         Some(jumbf) => {
             println!("\n✓ Found JUMBF data ({} bytes)", jumbf.len());
         }
-        None => println!("\n✗ No JUMBF data found"),
+        None => {}
     }
 
     // Check for EXIF metadata
@@ -70,7 +70,7 @@ fn main() -> asset_io::Result<()> {
                 println!("  Orientation: {}", orientation);
             }
         }
-        None => println!("\n✗ No EXIF metadata found"),
+        None => {}
     }
 
     // Check for embedded thumbnail (from EXIF)
@@ -82,10 +82,12 @@ fn main() -> asset_io::Result<()> {
             };
             println!(
                 "\n✓ Found embedded thumbnail ({:?}, {}, {} bytes)",
-                thumb.format, dims, thumb.data.len()
+                thumb.format,
+                dims,
+                thumb.data.len()
             );
         }
-        None => println!("\n✗ No embedded thumbnail found"),
+        None => {}
     }
 
     // Show segment breakdown

@@ -74,7 +74,6 @@ impl ByteOrder {
     }
 }
 
-
 /// Information about an embedded thumbnail
 #[derive(Debug)]
 pub struct ThumbnailInfo {
