@@ -57,7 +57,10 @@
 //!     .exclude_from_processing(vec![SegmentKind::Jumbf], ExclusionMode::DataOnly);
 //!
 //! let mut hasher = Sha256::new();
-//! asset.read_with_processing(&updates, &mut |chunk| hasher.update(chunk))?;  // read uses &[u8]
+//! asset.read_with_processing(&updates, &mut |chunk| {
+//!     hasher.update(chunk);
+//!     Ok(())
+//! })?;
 //! let hash = hasher.finalize();
 //! println!("Asset hash: {:x}", hash);
 //!
@@ -71,7 +74,10 @@
 //! let dest_structure = asset.write_with_processing(
 //!     &mut output,
 //!     &updates,
-//!     &mut |chunk: &dyn asset_io::ProcessChunk| hasher.update(chunk.data()),
+//!     &mut |chunk: &dyn asset_io::ProcessChunk| {
+//!         hasher.update(chunk.data());
+//!         Ok(())
+//!     },
 //! )?;
 //! // Now you have the hash and can update the JUMBF in-place
 //! # Ok(())
@@ -98,7 +104,7 @@ pub use asset::{Asset, AssetBuilder};
 pub use containers::bmff_io::{bmff_adjust_chunk_offsets, BmffFragment, BmffIO};
 pub use containers::ContainerKind;
 pub use error::{Error, Result};
-pub use processing_writer::{MdatChunk, ProcessChunk, SimpleChunk};
+pub use processing_writer::{MdatChunk, ProcessChunk, ProcessChunkFn, ReadChunkFn, SimpleChunk};
 #[cfg(feature = "parallel")]
 pub use segment::merkle_root;
 pub use segment::{ByteRange, ChunkSpec, ExclusionMode, ProcessingChunk, Segment, SegmentKind};

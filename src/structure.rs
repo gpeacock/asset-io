@@ -341,7 +341,10 @@ impl Structure {
     ///     .exclude_from_processing(vec![SegmentKind::Jumbf], ExclusionMode::DataOnly);
     ///
     /// let mut hasher = Sha256::new();
-    /// asset.read_with_processing(&updates, &mut |chunk| hasher.update(chunk))?;
+    /// asset.read_with_processing(&updates, &mut |chunk| {
+    ///     hasher.update(chunk);
+    ///     Ok(())
+    /// })?;
     /// let hash = hasher.finalize();
     /// # Ok(())
     /// # }
@@ -544,7 +547,10 @@ impl Structure {
     /// let structure = asset.write_with_processing(
     ///     &mut output,
     ///     &updates,
-    ///     &mut |chunk: &dyn asset_io::ProcessChunk| hasher.update(chunk.data()),
+    ///     &mut |chunk: &dyn asset_io::ProcessChunk| {
+    ///         hasher.update(chunk.data());
+    ///         Ok(())
+    ///     },
     /// )?;
     ///
     /// // Generate manifest and update in-place

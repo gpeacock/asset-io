@@ -90,6 +90,7 @@ fn main() -> asset_io::Result<()> {
         asset.read_with_processing(&updates, &mut |chunk| {
             sha2::Digest::update(&mut hasher, chunk);
             bytes += chunk.len() as u64;
+            Ok(())
         })?;
 
         let hash = sha2::Digest::finalize(hasher);
@@ -126,6 +127,7 @@ fn main() -> asset_io::Result<()> {
             let mut h = hasher_clone.lock().unwrap();
             sha2::Digest::update(&mut *h, chunk);
             *bytes_clone.lock().unwrap() += chunk.len() as u64;
+            Ok(())
         })?;
 
         let hash = sha2::Digest::finalize(Arc::try_unwrap(hasher).unwrap().into_inner().unwrap());

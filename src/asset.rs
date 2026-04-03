@@ -4,7 +4,12 @@
 //! without needing to know the specific media type.
 
 use crate::{
-    containers::ContainerKind, detect_container, error::Result, get_handler, structure::Structure,
+    containers::ContainerKind,
+    detect_container,
+    error::Result,
+    get_handler,
+    processing_writer::{ProcessChunkFn, ReadChunkFn},
+    structure::Structure,
     Updates,
 };
 use std::fs::File;
@@ -355,6 +360,9 @@ impl<R: Read + Seek> Asset<R> {
     /// the asset's data, calling the processor for each chunk while respecting
     /// the exclusion settings in `updates.processing`.
     ///
+    /// The processor must return `Ok(())` to continue. Any `Err` stops streaming and is
+    /// returned from this method (including [`Error::UserCanceled`] for cooperative cancel).
+    ///
     /// Use this for:
     /// - Hashing an existing file
     /// - Validating data integrity
@@ -375,14 +383,17 @@ impl<R: Read + Seek> Asset<R> {
     ///
     /// // Process the data
     /// let mut hasher = Sha256::new();
-    /// asset.read_with_processing(&updates, &mut |chunk| hasher.update(chunk))?;
+    /// asset.read_with_processing(&updates, &mut |chunk| {
+    ///     hasher.update(chunk);
+    ///     Ok(())
+    /// })?;
     /// let hash = hasher.finalize();
     /// # Ok(())
     /// # }
     /// ```
     pub fn read_with_processing<F>(&mut self, updates: &Updates, processor: &mut F) -> Result<()>
     where
-        F: FnMut(&[u8]),
+        F: ReadChunkFn,
     {
         use crate::segment::DEFAULT_CHUNK_SIZE;
 
@@ -481,7 +492,7 @@ impl<R: Read + Seek> Asset<R> {
                 // Process current chunk (CPU) - happens after read completes
                 // Note: True overlap would require threading, but for now
                 // this at least structures the code for easy threading later
-                processor(&current_buffer);
+                processor(&current_buffer)?;
 
                 // Swap buffers
                 current_buffer = next_buffer;
@@ -489,7 +500,7 @@ impl<R: Read + Seek> Asset<R> {
             }
 
             // Process the last chunk
-            processor(&current_buffer);
+            processor(&current_buffer)?;
         }
 
         Ok(())
@@ -503,6 +514,9 @@ impl<R: Read + Seek> Asset<R> {
     ///
     /// Note: For small files (<1MB), the thread spawn overhead may negate benefits.
     /// For very large files, consider `parallel_hash()` or `read_chunks()` with rayon.
+    ///
+    /// The processor must return `Ok(())` to continue; any `Err` (including
+    /// [`Error::UserCanceled`]) stops both reader and processor threads and is returned here.
     ///
     /// # Example
     /// ```no_run
@@ -521,6 +535,7 @@ impl<R: Read + Seek> Asset<R> {
     ///
     /// asset.read_with_processing_overlapped(&updates, move |chunk| {
     ///     hasher_clone.lock().unwrap().update(chunk);
+    ///     Ok(())
     /// })?;
     ///
     /// let hash = Arc::try_unwrap(hasher)
@@ -537,10 +552,11 @@ impl<R: Read + Seek> Asset<R> {
         processor: F,
     ) -> Result<()>
     where
-        F: FnMut(&[u8]) + Send + 'static,
+        F: Send + 'static + ReadChunkFn,
     {
         use crate::segment::DEFAULT_CHUNK_SIZE;
         use std::sync::mpsc;
+        use std::sync::{Arc, Mutex};
         use std::thread;
 
         let chunk_size = updates
@@ -556,11 +572,6 @@ impl<R: Read + Seek> Asset<R> {
 
         for segment in self.structure.segments.iter() {
             let is_excluded = exclude_segments.iter().any(|kind| segment.is_type(*kind));
-
-            eprintln!(
-                "DEBUG: Segment: {:?}, is_excluded={}",
-                segment.kind, is_excluded
-            );
 
             if is_excluded {
                 // For BMFF, use the format-specific exclusion range that includes the entire box
@@ -578,11 +589,6 @@ impl<R: Read + Seek> Asset<R> {
                         (loc.offset, loc.size)
                     };
 
-                eprintln!(
-                    "DEBUG: Excluding: offset={}, size={}",
-                    exclude_start, exclude_size
-                );
-
                 if exclude_start > last_end {
                     ranges.push((last_end, exclude_start - last_end));
                 }
@@ -598,29 +604,41 @@ impl<R: Read + Seek> Asset<R> {
         // This lets us read the next chunk while processing the current one
         let (work_tx, work_rx) = mpsc::sync_channel::<Option<Vec<u8>>>(2);
         let (done_tx, done_rx) = mpsc::sync_channel::<()>(1);
+        let proc_err: Arc<Mutex<Option<crate::Error>>> = Arc::new(Mutex::new(None));
+        let proc_err_worker = Arc::clone(&proc_err);
 
         // Spawn processor thread
         let processor_handle = thread::spawn(move || {
             let mut proc = processor;
             while let Ok(Some(chunk)) = work_rx.recv() {
-                proc(&chunk);
+                match proc(&chunk) {
+                    Ok(()) => {}
+                    Err(e) => {
+                        *proc_err_worker.lock().unwrap() = Some(e);
+                        break;
+                    }
+                }
             }
             done_tx.send(()).ok();
         });
 
         // Read and send chunks in main thread
-        for (offset, size) in ranges {
+        'read_ranges: for (offset, size) in ranges {
             self.source.seek(SeekFrom::Start(offset))?;
             let mut remaining = size;
 
             while remaining > 0 {
+                if proc_err.lock().unwrap().is_some() {
+                    break 'read_ranges;
+                }
+
                 let to_read = remaining.min(chunk_size as u64) as usize;
                 let mut buffer = vec![0u8; to_read];
                 self.source.read_exact(&mut buffer)?;
 
                 // Send to processor thread (blocks if channel full - backpressure)
                 if work_tx.send(Some(buffer)).is_err() {
-                    break;
+                    break 'read_ranges;
                 }
 
                 remaining -= to_read as u64;
@@ -634,6 +652,10 @@ impl<R: Read + Seek> Asset<R> {
         // Wait for processor to finish
         done_rx.recv().ok();
         processor_handle.join().ok();
+
+        if let Some(e) = proc_err.lock().unwrap().take() {
+            return Err(e);
+        }
 
         Ok(())
     }
@@ -1126,6 +1148,10 @@ impl<R: Read + Seek> Asset<R> {
     /// chunk by chunk as it's being written. This is much more efficient than
     /// writing first and then re-reading the file to hash it.
     ///
+    /// The processor must return `Ok(())` to continue. Any `Err` stops the write and is
+    /// returned here (including [`Error::UserCanceled`] for cooperative cancel). The output
+    /// file may be partially written if an error occurs mid-stream.
+    ///
     /// The processor callback is called for each chunk of data being written,
     /// except for segments specified in `exclude_segments`. This allows you to:
     /// - Hash the asset while writing (C2PA use case)
@@ -1157,7 +1183,10 @@ impl<R: Read + Seek> Asset<R> {
     /// let structure = asset.write_with_processing(
     ///     &mut output,
     ///     &updates,
-    ///     &mut |chunk: &dyn asset_io::ProcessChunk| hasher.update(chunk.data()),
+    ///     &mut |chunk: &dyn asset_io::ProcessChunk| {
+    ///         hasher.update(chunk.data());
+    ///         Ok(())
+    ///     },
     /// )?;
     ///
     /// // Generate C2PA manifest using hash
@@ -1177,7 +1206,7 @@ impl<R: Read + Seek> Asset<R> {
     ) -> Result<Structure>
     where
         W: Read + Write + Seek,
-        F: for<'a> FnMut(&'a (dyn crate::ProcessChunk + 'a)),
+        F: ProcessChunkFn,
     {
         // Calculate destination structure
         let dest_structure = self

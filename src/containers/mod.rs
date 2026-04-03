@@ -136,7 +136,7 @@ pub trait ContainerIO: Send + Sync {
     ///     processor: &mut F,
     /// ) -> Result<()>
     /// where
-    ///     F: for<'a> FnMut(&'a (dyn ProcessChunk + 'a)),
+    ///     F: crate::ProcessChunkFn,
     /// {
     ///     use crate::processing_writer::ProcessingWriter;
     ///     
@@ -166,7 +166,7 @@ pub trait ContainerIO: Send + Sync {
         processor: &mut F,
     ) -> Result<()>
     where
-        F: for<'a> FnMut(&'a (dyn crate::ProcessChunk + 'a)),
+        F: crate::ProcessChunkFn,
     {
         use crate::processing_writer::ProcessingWriter;
 
@@ -341,7 +341,7 @@ macro_rules! register_containers {
                 processor: &mut F,
             ) -> $crate::Result<()>
             where
-                F: for<'a> FnMut(&'a (dyn $crate::ProcessChunk + 'a)),
+                F: $crate::ProcessChunkFn,
             {
                 match self {
                     $(

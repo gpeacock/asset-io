@@ -23,9 +23,9 @@ fs2 = { version = "0.4", optional = true }
 atree = { version = "0.5", optional = true }
 rayon = { version = "1.10", optional = true }
 sha2 = { version = "0.10", optional = true }
+c2pa = { version = "0.79.0", optional = true }  
 
 [dev-dependencies]
-c2pa = { path = "../c2pa-rs/sdk" }  # Using asset-io-integration branch
 sha2 = "0.10"  # For examples only
 serde_bytes = "0.11"  # For BMFF hash example
 serde_cbor = "0.11"  # For DataHash padding
@@ -55,7 +55,7 @@ test-utils = []
 
 [[example]]
 name = "c2pa_embeddable"
-required-features = ["xmp"]
+required-features = ["c2pa","all-formats"]
 
 [[example]]
 name = "inspect"
@@ -64,6 +64,10 @@ required-features = ["all-formats", "xmp", "exif"]
 [[example]]
 name = "parallel_hash"
 required-features = ["all-formats", "parallel"]
+
+[[example]]
+name = "progress_cancel"
+required-features = ["all-formats"]
 
 [[test]]
 name = "integration_test"

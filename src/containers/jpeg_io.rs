@@ -932,7 +932,7 @@ impl ContainerIO for JpegIO {
         processor: &mut F,
     ) -> Result<()>
     where
-        F: for<'a> FnMut(&'a (dyn crate::ProcessChunk + 'a)),
+        F: crate::ProcessChunkFn,
     {
         use crate::processing_writer::ProcessingWriter;
 
@@ -1705,7 +1705,7 @@ fn write_jumbf_with_exclusion<W: Write, F>(
     should_exclude: bool,
 ) -> Result<()>
 where
-    F: for<'a> FnMut(&'a (dyn crate::ProcessChunk + 'a)),
+    F: crate::ProcessChunkFn,
 {
     // Check if already in APP11 format
     let is_complete_app11 = jumbf.len() >= 2 && jumbf[0] == 0xFF && jumbf[1] == APP11;

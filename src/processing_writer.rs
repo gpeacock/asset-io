@@ -3,6 +3,7 @@
 //! This module provides a `Write` wrapper that intercepts write calls and
 //! processes data through a callback before forwarding to the underlying writer.
 
+use crate::error::set_pending_processor_error;
 use std::io::{Read, Result, Write};
 
 /// A chunk of data passed to a processor during write.
@@ -16,10 +17,11 @@ use std::io::{Read, Result, Write};
 /// // Processor that handles both flat hash and mdat
 /// let mut processor = |chunk: &dyn ProcessChunk| {
 ///     if let Some(id) = chunk.id() {
-///         builder.hash_bmff_mdat_bytes(id, chunk.data(), chunk.large_size().unwrap_or(false)).unwrap();
+///         builder.hash_bmff_mdat_bytes(id, chunk.data(), chunk.large_size().unwrap_or(false))?;
 ///     } else {
 ///         hasher.update(chunk.data());
 ///     }
+///     Ok(())
 /// };
 /// ```
 pub trait ProcessChunk {
@@ -72,6 +74,22 @@ impl ProcessChunk for MdatChunk<'_> {
     }
 }
 
+/// Write-side streaming processor: invoked for each chunk during
+/// [`crate::Asset::write_with_processing`] and [`ProcessingWriter`].
+///
+/// This uses the usual supertrait + blanket impl pattern for the higher-ranked
+/// `FnMut` bound (an object-safe `ProcessChunk` reference for any lifetime).
+pub trait ProcessChunkFn: for<'a> FnMut(&'a (dyn ProcessChunk + 'a)) -> crate::Result<()> {}
+
+impl<T> ProcessChunkFn for T where T: for<'a> FnMut(&'a (dyn ProcessChunk + 'a)) -> crate::Result<()>
+{}
+
+/// Read-side streaming processor: invoked for each byte slice during
+/// [`crate::Asset::read_with_processing`].
+pub trait ReadChunkFn: FnMut(&[u8]) -> crate::Result<()> {}
+
+impl<T> ReadChunkFn for T where T: FnMut(&[u8]) -> crate::Result<()> {}
+
 /// A writer wrapper that processes data through a callback before writing
 ///
 /// This enables single-pass operations where data is processed (e.g., hashed)
@@ -95,6 +113,7 @@ impl ProcessChunk for MdatChunk<'_> {
 ///
 /// let mut writer = ProcessingWriter::new(&mut output, |chunk: &dyn ProcessChunk| {
 ///     hasher.update(chunk.data());
+///     Ok(())
 /// });
 ///
 /// // This data will be processed
@@ -113,7 +132,7 @@ impl ProcessChunk for MdatChunk<'_> {
 /// ```
 pub struct ProcessingWriter<'a, W: Write, F>
 where
-    F: for<'b> FnMut(&'b (dyn ProcessChunk + 'b)),
+    F: ProcessChunkFn,
 {
     writer: W,
     processor: &'a mut F,
@@ -122,7 +141,7 @@ where
 
 impl<'a, W: Write, F> ProcessingWriter<'a, W, F>
 where
-    F: for<'b> FnMut(&'b (dyn ProcessChunk + 'b)),
+    F: ProcessChunkFn,
 {
     /// Create a new processing writer
     ///
@@ -186,28 +205,43 @@ where
     ///
     /// * `offset` - The file offset to hash (as 8-byte big-endian)
     #[allow(dead_code)]
-    pub fn process_offset(&mut self, offset: u64) {
+    pub fn process_offset(&mut self, offset: u64) -> Result<()> {
         if !self.exclude_mode {
             let chunk = SimpleChunk(&offset.to_be_bytes());
-            (self.processor)(&chunk as &dyn ProcessChunk);
+            if let Err(e) = (self.processor)(&chunk as &dyn ProcessChunk) {
+                set_pending_processor_error(e);
+                return Err(io_processor_fail());
+            }
         }
+        Ok(())
     }
 
     /// Process a chunk (for BMFF handler to call when streaming mdat boxes).
     #[allow(dead_code)]
-    pub fn process_chunk(&mut self, chunk: impl ProcessChunk) {
-        (self.processor)(&chunk as &dyn ProcessChunk);
+    pub fn process_chunk(&mut self, chunk: impl ProcessChunk) -> Result<()> {
+        if let Err(e) = (self.processor)(&chunk as &dyn ProcessChunk) {
+            set_pending_processor_error(e);
+            return Err(io_processor_fail());
+        }
+        Ok(())
     }
+}
+
+fn io_processor_fail() -> std::io::Error {
+    std::io::Error::other(crate::error::PROCESSOR_IO_SENTINEL)
 }
 
 impl<W: Write, F> Write for ProcessingWriter<'_, W, F>
 where
-    F: for<'a> FnMut(&'a (dyn ProcessChunk + 'a)),
+    F: ProcessChunkFn,
 {
     fn write(&mut self, buf: &[u8]) -> Result<usize> {
         if !self.exclude_mode {
             let chunk = SimpleChunk(buf);
-            (self.processor)(&chunk as &dyn ProcessChunk);
+            if let Err(e) = (self.processor)(&chunk as &dyn ProcessChunk) {
+                set_pending_processor_error(e);
+                return Err(io_processor_fail());
+            }
         }
         self.writer.write(buf)
     }
@@ -215,7 +249,10 @@ where
     fn write_all(&mut self, buf: &[u8]) -> Result<()> {
         if !self.exclude_mode {
             let chunk = SimpleChunk(buf);
-            (self.processor)(&chunk as &dyn ProcessChunk);
+            if let Err(e) = (self.processor)(&chunk as &dyn ProcessChunk) {
+                set_pending_processor_error(e);
+                return Err(io_processor_fail());
+            }
         }
         self.writer.write_all(buf)
     }
@@ -228,7 +265,10 @@ where
         if !self.exclude_mode {
             for buf in bufs {
                 let chunk = SimpleChunk(buf);
-                (self.processor)(&chunk as &dyn ProcessChunk);
+                if let Err(e) = (self.processor)(&chunk as &dyn ProcessChunk) {
+                    set_pending_processor_error(e);
+                    return Err(io_processor_fail());
+                }
             }
         }
         self.writer.write_vectored(bufs)
@@ -244,7 +284,7 @@ where
 // Implement Read if the underlying writer supports it (needed for BMFF chunk offset adjustment)
 impl<W: Read + Write, F> Read for ProcessingWriter<'_, W, F>
 where
-    F: for<'a> FnMut(&'a (dyn ProcessChunk + 'a)),
+    F: ProcessChunkFn,
 {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
         self.writer.read(buf)
@@ -254,7 +294,7 @@ where
 // Implement Seek if the underlying writer supports it
 impl<W: Write + std::io::Seek, F> std::io::Seek for ProcessingWriter<'_, W, F>
 where
-    F: for<'a> FnMut(&'a (dyn ProcessChunk + 'a)),
+    F: ProcessChunkFn,
 {
     fn seek(&mut self, pos: std::io::SeekFrom) -> Result<u64> {
         self.writer.seek(pos)
@@ -264,13 +304,17 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::Error;
     use sha2::{Digest, Sha256};
 
     #[test]
     fn test_basic_processing() {
         let mut output = Vec::new();
         let mut hasher = Sha256::new();
-        let mut processor = |chunk: &dyn ProcessChunk| hasher.update(chunk.data());
+        let mut processor = |chunk: &dyn ProcessChunk| {
+            hasher.update(chunk.data());
+            Ok(())
+        };
 
         let mut writer = ProcessingWriter::new(&mut output, &mut processor);
 
@@ -293,7 +337,10 @@ mod tests {
     fn test_exclude_mode() {
         let mut output = Vec::new();
         let mut processed = Vec::new();
-        let mut processor = |chunk: &dyn ProcessChunk| processed.extend_from_slice(chunk.data());
+        let mut processor = |chunk: &dyn ProcessChunk| {
+            processed.extend_from_slice(chunk.data());
+            Ok(())
+        };
 
         let mut writer = ProcessingWriter::new(&mut output, &mut processor);
 
@@ -316,10 +363,23 @@ mod tests {
     }
 
     #[test]
+    fn test_processor_user_canceled_surfaces_via_from_io() {
+        let mut output = Vec::new();
+        let mut processor = |_chunk: &dyn ProcessChunk| Err(Error::UserCanceled);
+        let mut writer = ProcessingWriter::new(&mut output, &mut processor);
+        let io_err = writer.write_all(b"hello").expect_err("expected io error");
+        let asset_err: Error = io_err.into();
+        assert!(matches!(asset_err, Error::UserCanceled));
+    }
+
+    #[test]
     fn test_multiple_writes() {
         let mut output = Vec::new();
         let mut count = 0;
-        let mut processor = |chunk: &dyn ProcessChunk| count += chunk.data().len();
+        let mut processor = |chunk: &dyn ProcessChunk| {
+            count += chunk.data().len();
+            Ok(())
+        };
 
         let mut writer = ProcessingWriter::new(&mut output, &mut processor);
 

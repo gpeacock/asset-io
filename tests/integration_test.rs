@@ -524,7 +524,7 @@ mod streaming_tests {
                 .write_with_processing(
                     &mut output_file,
                     &updates,
-                    &mut |_chunk: &dyn asset_io::ProcessChunk| {},
+                    &mut |_chunk: &dyn asset_io::ProcessChunk| Ok(()),
                 )
                 .expect(&format!("write_with_processing failed for {}", name));
 
@@ -613,7 +613,7 @@ mod streaming_tests {
             .write_with_processing(
                 &mut output_file,
                 &updates,
-                &mut |_: &dyn asset_io::ProcessChunk| {},
+                &mut |_: &dyn asset_io::ProcessChunk| Ok(()),
             )
             .expect("write_with_processing failed");
 

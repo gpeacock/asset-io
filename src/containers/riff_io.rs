@@ -320,7 +320,7 @@ impl RiffIO {
         data_only: bool,
     ) -> Result<()>
     where
-        F: for<'a> FnMut(&'a (dyn crate::ProcessChunk + 'a)),
+        F: crate::ProcessChunkFn,
     {
         if should_exclude {
             if data_only {
@@ -680,7 +680,7 @@ impl ContainerIO for RiffIO {
         processor: &mut F,
     ) -> Result<()>
     where
-        F: for<'a> FnMut(&'a (dyn crate::ProcessChunk + 'a)),
+        F: crate::ProcessChunkFn,
     {
         use crate::processing_writer::ProcessingWriter;
         use crate::segment::ExclusionMode;
@@ -1077,7 +1077,10 @@ mod tests {
 
         let mut output = Cursor::new(Vec::new());
         let mut processed_bytes = 0usize;
-        let mut processor = |chunk: &dyn crate::ProcessChunk| processed_bytes += chunk.data().len();
+        let mut processor = |chunk: &dyn crate::ProcessChunk| {
+            processed_bytes += chunk.data().len();
+            Ok(())
+        };
 
         handler
             .write_with_processor(

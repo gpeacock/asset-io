@@ -1465,7 +1465,7 @@ impl ContainerIO for BmffIO {
         processor: &mut F,
     ) -> Result<()>
     where
-        F: for<'a> FnMut(&'a (dyn crate::ProcessChunk + 'a)),
+        F: crate::ProcessChunkFn,
     {
         use crate::processing_writer::ProcessingWriter;
         use crate::MetadataUpdate;
@@ -1614,7 +1614,7 @@ impl ContainerIO for BmffIO {
             if let MetadataUpdate::Set(ref xmp_data) = updates.xmp {
                 // For V2: Hash the offset of this box position, then exclude content
                 if use_bmff_v2 {
-                    pw.process_offset(xmp_box_start);
+                    pw.process_offset(xmp_box_start)?;
                     pw.set_exclude_mode(true);
                 }
                 write_xmp_box(&mut pw, xmp_data)?;
@@ -1638,7 +1638,7 @@ impl ContainerIO for BmffIO {
 
                 // For V2: Hash the offset of this box, then exclude content
                 if use_bmff_v2 {
-                    pw.process_offset(box_info.offset);
+                    pw.process_offset(box_info.offset)?;
                     pw.set_exclude_mode(true);
                 }
                 pw.write_all(&box_data)?;
@@ -1744,7 +1744,7 @@ impl ContainerIO for BmffIO {
 
                     if is_top_level && !is_excluded_box {
                         // BMFF V2: Hash the offset of this top-level box, then exclude content
-                        pw.process_offset(box_start);
+                        pw.process_offset(box_start)?;
                         pw.set_exclude_mode(true);
                     } else if is_excluded_box {
                         // Always exclude certain boxes (mfra) entirely
@@ -1773,7 +1773,7 @@ impl ContainerIO for BmffIO {
                                     id: mdat_id,
                                     data: mdat_chunk,
                                     large_size: mdat_large_size,
-                                });
+                                })?;
                             }
                         }
                         remaining -= to_read as u64;
@@ -1797,13 +1797,13 @@ impl ContainerIO for BmffIO {
                                 id: mdat_id,
                                 data: mdat_content,
                                 large_size: header.large_size,
-                            });
+                            })?;
                         }
                     }
 
                     if is_top_level && !is_excluded_box {
                         // BMFF V2: Hash the offset of this top-level box, then exclude content
-                        pw.process_offset(box_start);
+                        pw.process_offset(box_start)?;
                         pw.set_exclude_mode(true);
                         pw.write_all(&box_data)?;
                         pw.set_exclude_mode(false);

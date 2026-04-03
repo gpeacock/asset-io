@@ -173,12 +173,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let mut processor = |chunk: &dyn ProcessChunk| {
                 if let Some(id) = chunk.id() {
-                    let _ = builder.hash_bmff_mdat_bytes(
-                        id,
-                        chunk.data(),
-                        chunk.large_size().unwrap_or(false),
-                    );
+                    builder
+                        .hash_bmff_mdat_bytes(id, chunk.data(), chunk.large_size().unwrap_or(false))
+                        .map_err(|e| asset_io::Error::InvalidFormat(e.to_string()))?;
                 }
+                Ok(())
             };
             let structure =
                 asset.write_with_processing(&mut output_file, &updates, &mut processor)?;
@@ -211,6 +210,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut hasher = Sha256::new();
             let mut processor = |chunk: &dyn ProcessChunk| {
                 hasher.update(chunk.data());
+                Ok(())
             };
             let structure =
                 asset.write_with_processing(&mut output_file, &updates, &mut processor)?;
