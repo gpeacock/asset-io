@@ -1787,34 +1787,57 @@ impl ContainerIO for BmffIO {
                     let mut box_data = vec![0u8; header.size as usize];
                     source.read_exact(&mut box_data)?;
 
-                    if header.name == BoxType::MdatBox {
+                    // BMFF V2 top-level mdat must match the large-box path: process_offset, then
+                    // mdat payload via process_chunk, then copy under exclude (not chunk-before-offset).
+                    let mdat_v2_top_done = if header.name == BoxType::MdatBox {
                         let mdat_id = next_mdat_id;
                         next_mdat_id += 1;
                         let mdat_header_len: usize = if header.large_size { 16 } else { 8 };
                         let mdat_content = &box_data[mdat_header_len..];
-                        if !mdat_content.is_empty() {
-                            pw.process_chunk(MdatChunk {
-                                id: mdat_id,
-                                data: mdat_content,
-                                large_size: header.large_size,
-                            })?;
-                        }
-                    }
 
-                    if is_top_level && !is_excluded_box {
-                        // BMFF V2: Hash the offset of this top-level box, then exclude content
-                        pw.process_offset(box_start)?;
-                        pw.set_exclude_mode(true);
-                        pw.write_all(&box_data)?;
-                        pw.set_exclude_mode(false);
-                    } else if is_excluded_box {
-                        // Always exclude certain boxes (mfra) entirely
-                        pw.set_exclude_mode(true);
-                        pw.write_all(&box_data)?;
-                        pw.set_exclude_mode(false);
+                        if is_top_level && !is_excluded_box {
+                            pw.process_offset(box_start)?;
+                            pw.set_exclude_mode(true);
+                            if !mdat_content.is_empty() {
+                                pw.process_chunk(MdatChunk {
+                                    id: mdat_id,
+                                    data: mdat_content,
+                                    large_size: header.large_size,
+                                })?;
+                            }
+                            pw.write_all(&box_data)?;
+                            pw.set_exclude_mode(false);
+                            true
+                        } else {
+                            if !mdat_content.is_empty() {
+                                pw.process_chunk(MdatChunk {
+                                    id: mdat_id,
+                                    data: mdat_content,
+                                    large_size: header.large_size,
+                                })?;
+                            }
+                            false
+                        }
                     } else {
-                        // Normal copy (V1 style, or non-top-level boxes)
-                        pw.write_all(&box_data)?;
+                        false
+                    };
+
+                    if !mdat_v2_top_done {
+                        if is_top_level && !is_excluded_box {
+                            // BMFF V2: Hash the offset of this top-level box, then exclude content
+                            pw.process_offset(box_start)?;
+                            pw.set_exclude_mode(true);
+                            pw.write_all(&box_data)?;
+                            pw.set_exclude_mode(false);
+                        } else if is_excluded_box {
+                            // Always exclude certain boxes (mfra) entirely
+                            pw.set_exclude_mode(true);
+                            pw.write_all(&box_data)?;
+                            pw.set_exclude_mode(false);
+                        } else {
+                            // Normal copy (V1 style, or non-top-level boxes)
+                            pw.write_all(&box_data)?;
+                        }
                     }
                 }
             }
@@ -1924,7 +1947,11 @@ impl ContainerIO for BmffIO {
                 // Only metadata segments that appear near the start
                 seg.is_xmp() || seg.is_jumbf() || seg.is_exif()
             })
-            .map(|seg| seg.location().offset)
+            // Use the minimum offset across ALL ranges, not just range[0] (location()).
+            // For C2PA JUMBF segments, range[0] is the JUMBF data (inside the UUID box) and
+            // range[1] is the full UUID box — using range[0].offset gives a value that is 45
+            // bytes too large, shifting every downstream offset in calculate_updated_structure.
+            .map(|seg| seg.ranges.iter().map(|r| r.offset).min().unwrap_or(0))
             .min() // Get the earliest metadata segment
             .unwrap_or_else(|| {
                 // No segments in source - use typical ftyp size for each format

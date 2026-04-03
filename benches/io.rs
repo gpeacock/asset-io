@@ -4,6 +4,7 @@
 
 use asset_io::{Asset, ExclusionMode, ProcessChunk, SegmentKind, Updates};
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use std::io::Seek;
 use std::path::PathBuf;
 
 fn fixture_path(name: &str) -> PathBuf {
@@ -117,6 +118,10 @@ fn bench_sign(c: &mut Criterion, name: &str, fixture: &str) {
                         .write_with_processing(&mut output_file, &updates, &mut processor)
                         .unwrap();
                     output_file.flush().unwrap();
+                    output_file.seek(std::io::SeekFrom::Start(0)).unwrap();
+                    builder
+                        .update_hash_from_stream(&native_format, &mut output_file)
+                        .unwrap();
                     let signed_jumbf = builder.sign_embeddable("application/c2pa").unwrap();
                     (structure, output_file, signed_jumbf)
                 } else {
