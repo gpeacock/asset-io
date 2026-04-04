@@ -1540,68 +1540,55 @@ impl ContainerIO for BmffIO {
         // Wrap writer in ProcessingWriter
         let mut pw = ProcessingWriter::new(writer, processor);
 
-        // BMFF V2 hashing: Track top-level box positions for offset-only hashing
-        // For V2, we hash 8-byte offsets of top-level boxes instead of their content
-        let use_bmff_v2 = should_exclude_jumbf; // V2 hashing when computing BmffHash
+        // BMFF V3 hashing: For each non-excluded top-level box the hash covers:
+        //   8-byte big-endian output offset  ||  box content minus any subset exclusions
+        // mdat is partially excluded (bytes 16+) and those bytes go to the Merkle tree instead.
+        let use_bmff_v2 = should_exclude_jumbf;
 
-        // Collect all top-level box offsets (paths like "/ftyp", "/moov", not "/moov/...")
+        // Collect top-level offsets of boxes that are included in the main hash.
+        // Fully-excluded boxes (ftyp, C2PA UUID, mfra, free, skip) are omitted.
+        // mdat is kept because it is only partially excluded (subset offset 16).
         let mut top_level_offsets = Vec::new();
         if use_bmff_v2 {
             for (path, tokens) in &bmff_map {
-                // Top-level boxes have paths like "/xxxx" with exactly 2 slashes
-                // (starts with / and contains one more / separator, or just /xxxx with no more slashes)
                 if path.starts_with('/') && path.matches('/').count() == 1 && path.len() > 1 {
                     for token in tokens {
                         let box_info = &bmff_tree[*token];
                         let offset = box_info.data.offset;
 
-                        // Skip boxes that are fully excluded (not hashed in V2)
-                        // - ftyp: always at offset 0
-                        // - mfra: check box type
-                        // - C2PA UUID: will be written new, skip existing
+                        // These box types are fully excluded from the V3 hash.
                         let is_ftyp = path == "/ftyp";
                         let is_mfra = path == "/mfra";
-                        let is_c2pa_uuid = if path == "/uuid" {
-                            box_info
+                        let is_free = path == "/free";
+                        let is_skip = path == "/skip";
+                        let is_c2pa_uuid = path == "/uuid"
+                            && box_info
                                 .data
                                 .user_type
                                 .as_ref()
                                 .map(|uuid| uuid.as_slice() == C2PA_UUID)
-                                .unwrap_or(false)
-                        } else {
-                            false
-                        };
+                                .unwrap_or(false);
 
-                        if !is_ftyp && !is_mfra && !is_c2pa_uuid {
+                        if !is_ftyp && !is_mfra && !is_free && !is_skip && !is_c2pa_uuid {
                             top_level_offsets.push(offset);
                         }
                     }
                 }
             }
             top_level_offsets.sort();
-            top_level_offsets.dedup(); // Remove duplicates if any
+            top_level_offsets.dedup();
         }
 
         // Simple strategy: Copy up to ftyp end, insert/skip UUIDs, copy rest
         source.seek(SeekFrom::Start(0))?;
 
-        // Copy ftyp box (EXCLUDED from hash per BmffHash spec)
-        // Note: ftyp is always excluded for BmffHash, regardless of exclude_segments
+        // ftyp is fully excluded from the hash (not in top_level_offsets).
         let mut buffer = vec![0u8; ftyp_end as usize];
         source.read_exact(&mut buffer)?;
         pw.set_exclude_mode(true);
         pw.write_all(&buffer)?;
         pw.set_exclude_mode(false);
 
-        // For BMFF V2: Hash the ftyp box offset (even though box is excluded)
-        // This is removed from top_level_offsets list, so we need to track separately
-        // Actually, ftyp is fully excluded in V2, so we don't hash its offset either
-
-        // For BMFF V2: Hash the ftyp box offset (even though box is excluded)
-        // This is removed from top_level_offsets list, so we need to track separately
-        // Actually, ftyp is fully excluded in V2, so we don't hash its offset either
-
-        // Track current write position for V2 offset calculations
         let xmp_box_start = ftyp_end;
 
         // ===== C2PA Spec Compliance: Box Ordering =====
@@ -1612,15 +1599,13 @@ impl ContainerIO for BmffIO {
         // Write new XMP UUID if needed
         if write_xmp {
             if let MetadataUpdate::Set(ref xmp_data) = updates.xmp {
-                // For V2: Hash the offset of this box position, then exclude content
+                // V3: hash = output_offset || box_content. Emit the offset then let
+                // the box content flow through the processor naturally (no exclude_mode).
                 if use_bmff_v2 {
-                    pw.process_offset(xmp_box_start)?;
-                    pw.set_exclude_mode(true);
+                    let out_offset = pw.stream_position()?;
+                    pw.process_offset(out_offset)?;
                 }
                 write_xmp_box(&mut pw, xmp_data)?;
-                if use_bmff_v2 {
-                    pw.set_exclude_mode(false);
-                }
             }
         } else if !remove_xmp {
             // Keep existing XMP
@@ -1636,15 +1621,12 @@ impl ContainerIO for BmffIO {
                 let mut box_data = vec![0u8; box_info.size as usize];
                 source.read_exact(&mut box_data)?;
 
-                // For V2: Hash the offset of this box, then exclude content
+                // V3: emit offset then let box content through (no exclude_mode).
                 if use_bmff_v2 {
-                    pw.process_offset(box_info.offset)?;
-                    pw.set_exclude_mode(true);
+                    let out_offset = pw.stream_position()?;
+                    pw.process_offset(out_offset)?;
                 }
                 pw.write_all(&box_data)?;
-                if use_bmff_v2 {
-                    pw.set_exclude_mode(false);
-                }
             }
         }
 
@@ -1724,7 +1706,10 @@ impl ContainerIO for BmffIO {
                 let is_top_level = use_bmff_v2 && top_level_offsets.contains(&box_start);
 
                 // Determine if this box should be excluded from hash
-                let is_excluded_box = header.name == BoxType::MfraBox;
+                let is_excluded_box = matches!(
+                    header.name,
+                    BoxType::MfraBox | BoxType::FreeBox | BoxType::UnknownBox(0x736b6970)
+                );
 
                 if header.size > MAX_BOX_ALLOCATION {
                     // Stream large boxes (e.g., mdat) without loading into memory
@@ -1739,80 +1724,112 @@ impl ContainerIO for BmffIO {
                         0
                     };
                     let mdat_large_size = header.large_size;
-                    let mdat_header_len: usize = if mdat_large_size { 16 } else { 8 };
-                    let mut mdat_header_remaining = if is_mdat { mdat_header_len } else { 0 };
 
+                    // V3 hash: emit output offset for non-excluded top-level boxes.
+                    // The box content (or the first 16 bytes for mdat) then flows through
+                    // the processor without exclude_mode for the main hash.
                     if is_top_level && !is_excluded_box {
-                        // BMFF V2: Hash the offset of this top-level box, then exclude content
-                        pw.process_offset(box_start)?;
-                        pw.set_exclude_mode(true);
-                    } else if is_excluded_box {
-                        // Always exclude certain boxes (mfra) entirely
-                        pw.set_exclude_mode(true);
+                        let out_offset = pw.stream_position()?;
+                        pw.process_offset(out_offset)?;
                     }
+
+                    // For mdat: bytes 0-15 go into the main hash; bytes 16+ go to the
+                    // Merkle tree (via process_chunk, excluded from main hash).
+                    // For all other non-excluded top-level boxes: all content goes to
+                    // the main hash (no exclude_mode).
+                    let mut main_hash_remaining: usize =
+                        if is_mdat && is_top_level && !is_excluded_box {
+                            16
+                        } else {
+                            0
+                        };
 
                     while remaining > 0 {
                         let to_read = remaining.min(buffer.len() as u64) as usize;
                         source.read_exact(&mut buffer[..to_read])?;
-                        pw.write_all(&buffer[..to_read])?;
-                        if is_mdat {
-                            let mdat_chunk = if mdat_header_remaining > 0 {
-                                if to_read <= mdat_header_remaining {
-                                    mdat_header_remaining -= to_read;
-                                    &buffer[..0]
-                                } else {
-                                    let skip = mdat_header_remaining;
-                                    mdat_header_remaining = 0;
-                                    &buffer[skip..to_read]
+
+                        if is_excluded_box {
+                            pw.set_exclude_mode(true);
+                            pw.write_all(&buffer[..to_read])?;
+                            pw.set_exclude_mode(false);
+                        } else if is_mdat && is_top_level {
+                            // Split the buffer at the 16-byte boundary.
+                            if main_hash_remaining > 0 {
+                                let to_main = main_hash_remaining.min(to_read);
+                                pw.write_all(&buffer[..to_main])?; // → main hash
+                                main_hash_remaining -= to_main;
+
+                                if to_main < to_read {
+                                    let rest = &buffer[to_main..to_read];
+                                    pw.set_exclude_mode(true);
+                                    pw.process_chunk(MdatChunk {
+                                        id: mdat_id,
+                                        data: rest,
+                                        large_size: mdat_large_size,
+                                    })?;
+                                    pw.write_all(rest)?;
+                                    pw.set_exclude_mode(false);
                                 }
                             } else {
-                                &buffer[..to_read]
-                            };
-                            if !mdat_chunk.is_empty() {
+                                // Entirely past the 16-byte main-hash region → Merkle only.
+                                pw.set_exclude_mode(true);
                                 pw.process_chunk(MdatChunk {
                                     id: mdat_id,
-                                    data: mdat_chunk,
+                                    data: &buffer[..to_read],
                                     large_size: mdat_large_size,
                                 })?;
+                                pw.write_all(&buffer[..to_read])?;
+                                pw.set_exclude_mode(false);
                             }
+                        } else {
+                            // Non-mdat box: write all content through the processor.
+                            pw.write_all(&buffer[..to_read])?;
                         }
-                        remaining -= to_read as u64;
-                    }
 
-                    if is_top_level || is_excluded_box {
-                        pw.set_exclude_mode(false);
+                        remaining -= to_read as u64;
                     }
                 } else {
                     // Small boxes can be loaded for efficiency
                     let mut box_data = vec![0u8; header.size as usize];
                     source.read_exact(&mut box_data)?;
 
-                    // BMFF V2 top-level mdat must match the large-box path: process_offset, then
-                    // mdat payload via process_chunk, then copy under exclude (not chunk-before-offset).
+                    // V3 small-box path.
+                    //
+                    // mdat: emit offset, write first 16 bytes to main hash, then
+                    // send bytes 16+ to the Merkle tree (excluded from main hash).
+                    //
+                    // Other non-excluded top-level boxes: emit offset then write all
+                    // content through the processor (no exclude_mode).
                     let mdat_v2_top_done = if header.name == BoxType::MdatBox {
                         let mdat_id = next_mdat_id;
                         next_mdat_id += 1;
-                        let mdat_header_len: usize = if header.large_size { 16 } else { 8 };
-                        let mdat_content = &box_data[mdat_header_len..];
+                        // Always provide mdat chunks (even outside V2 mode) so that a
+                        // processor can observe them if needed.
+                        let merkle_start = 16.min(box_data.len());
+                        let merkle_data = &box_data[merkle_start..];
 
                         if is_top_level && !is_excluded_box {
-                            pw.process_offset(box_start)?;
-                            pw.set_exclude_mode(true);
-                            if !mdat_content.is_empty() {
+                            let out_offset = pw.stream_position()?;
+                            pw.process_offset(out_offset)?;
+                            // First 16 bytes → main hash.
+                            pw.write_all(&box_data[..merkle_start])?;
+                            // Bytes 16+ → Merkle tree, excluded from main hash.
+                            if !merkle_data.is_empty() {
+                                pw.set_exclude_mode(true);
                                 pw.process_chunk(MdatChunk {
                                     id: mdat_id,
-                                    data: mdat_content,
+                                    data: merkle_data,
                                     large_size: header.large_size,
                                 })?;
+                                pw.write_all(merkle_data)?;
+                                pw.set_exclude_mode(false);
                             }
-                            pw.write_all(&box_data)?;
-                            pw.set_exclude_mode(false);
                             true
                         } else {
-                            if !mdat_content.is_empty() {
+                            if !merkle_data.is_empty() {
                                 pw.process_chunk(MdatChunk {
                                     id: mdat_id,
-                                    data: mdat_content,
+                                    data: merkle_data,
                                     large_size: header.large_size,
                                 })?;
                             }
@@ -1824,13 +1841,12 @@ impl ContainerIO for BmffIO {
 
                     if !mdat_v2_top_done {
                         if is_top_level && !is_excluded_box {
-                            // BMFF V2: Hash the offset of this top-level box, then exclude content
-                            pw.process_offset(box_start)?;
-                            pw.set_exclude_mode(true);
+                            // V3: emit offset then let all content flow through the processor.
+                            let out_offset = pw.stream_position()?;
+                            pw.process_offset(out_offset)?;
                             pw.write_all(&box_data)?;
-                            pw.set_exclude_mode(false);
                         } else if is_excluded_box {
-                            // Always exclude certain boxes (mfra) entirely
+                            // Fully-excluded boxes (mfra, free, skip) are not hashed.
                             pw.set_exclude_mode(true);
                             pw.write_all(&box_data)?;
                             pw.set_exclude_mode(false);
@@ -1953,17 +1969,15 @@ impl ContainerIO for BmffIO {
             // bytes too large, shifting every downstream offset in calculate_updated_structure.
             .map(|seg| seg.ranges.iter().map(|r| r.offset).min().unwrap_or(0))
             .min() // Get the earliest metadata segment
-            .unwrap_or_else(|| {
+            .unwrap_or(match source_structure.media_type {
                 // No segments in source - use typical ftyp size for each format
                 // These are empirically determined from common files
-                match source_structure.media_type {
-                    crate::MediaType::QuickTime => 20u64, // QuickTime .mov files
-                    crate::MediaType::Heif => 24u64,      // HEIF images
-                    crate::MediaType::Heic => 24u64,      // HEIC images
-                    crate::MediaType::Avif => 32u64,      // AVIF images (larger ftyp!)
-                    crate::MediaType::Mp4Audio => 32u64,  // M4A audio files
-                    _ => 24u64,                           // Generic MP4 default
-                }
+                crate::MediaType::QuickTime => 20u64, // QuickTime .mov files
+                crate::MediaType::Heif => 24u64,      // HEIF images
+                crate::MediaType::Heic => 24u64,      // HEIC images
+                crate::MediaType::Avif => 32u64,      // AVIF images (larger ftyp!)
+                crate::MediaType::Mp4Audio => 32u64,  // M4A audio files
+                _ => 24u64,                           // Generic MP4 default
             });
 
         let mut current_offset = ftyp_end;
@@ -2006,11 +2020,7 @@ impl ContainerIO for BmffIO {
         let metadata_end_in_source = source_structure
             .segments
             .iter()
-            .filter(|seg| {
-                // Only metadata segments, not actual media data
-                seg.is_xmp() || seg.is_jumbf() || seg.is_exif()
-            })
-            .last()
+            .rfind(|seg| seg.is_xmp() || seg.is_jumbf() || seg.is_exif())
             .map(|seg| {
                 let loc = seg.location();
                 loc.offset + loc.size
