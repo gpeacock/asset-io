@@ -168,7 +168,12 @@ impl PngIO {
             return Err(Error::InvalidFormat("Not a PNG file".into()));
         }
 
-        structure.add_segment(Segment::new(0, 8, SegmentKind::Header, None));
+        structure.add_segment(Segment::new(
+            0,
+            8,
+            SegmentKind::Header,
+            Some("PNGh".to_string()),
+        ));
 
         let mut offset = 8u64;
         let mut found_iend = false;
@@ -214,7 +219,7 @@ impl PngIO {
                         data_offset,
                         chunk_len,
                         SegmentKind::ImageData,
-                        Some("idat".to_string()),
+                        Some("IDAT".to_string()),
                     ));
                     source.seek(SeekFrom::Current((chunk_len + 4) as i64))?; // Skip data + CRC
                 }
@@ -414,11 +419,12 @@ impl PngIO {
         Ok(())
     }
 
-    /// Write a PNG chunk with proper C2PA exclusion handling for ProcessingWriter
+    /// Write a PNG chunk, optionally excluding the payload from processing.
     ///
-    /// Per C2PA spec, only the manifest DATA (and CRC which depends on data)
-    /// should be excluded from hashing. The length and type fields must be
-    /// included in the hash to prevent insertion attacks.
+    /// When exclusion is enabled, only the chunk data and its dependent CRC are
+    /// withheld from the processor. The length and type fields are always
+    /// included, so the container structure remains verifiable independently of
+    /// the payload contents.
     fn write_chunk_with_exclusion<W: Write, F>(
         pw: &mut crate::processing_writer::ProcessingWriter<'_, W, F>,
         chunk_type: &[u8],
@@ -695,9 +701,6 @@ impl ContainerIO for PngIO {
 
         source.seek(SeekFrom::Start(0))?;
 
-        // Write PNG signature
-        pw.write_all(PNG_SIGNATURE)?;
-
         // Collect source segments by type for ordered iteration
         let source_idats: Vec<_> = structure
             .segments
@@ -713,11 +716,15 @@ impl ContainerIO for PngIO {
             .collect();
         let mut other_index = 0;
 
-        // Iterate through destination structure and write each segment
+        // Iterate through destination structure and write each segment.
+        // A boundary signal is emitted once at the top of each iteration so no
+        // arm needs to handle boundary signalling directly.
         for dest_segment in &dest_structure.segments {
+            pw.begin_segment(dest_segment)?;
+
             match dest_segment {
                 seg if seg.is_type(SegmentKind::Header) => {
-                    continue;
+                    pw.write_all(PNG_SIGNATURE)?;
                 }
 
                 seg if seg.is_xmp() => match &updates.xmp {
@@ -728,10 +735,8 @@ impl ContainerIO for PngIO {
                         if let Some(source_seg) = structure.segments.iter().find(|s| s.is_xmp()) {
                             let location = source_seg.location();
                             source.seek(SeekFrom::Start(location.offset))?;
-
                             let mut xmp_data = vec![0u8; location.size as usize];
                             source.read_exact(&mut xmp_data)?;
-
                             Self::write_xmp_chunk(&mut pw, &xmp_data)?;
                         }
                     }
@@ -740,7 +745,7 @@ impl ContainerIO for PngIO {
 
                 seg if seg.is_jumbf() => {
                     // Handle JUMBF based on exclusion mode:
-                    // - DataOnly: Include length+type in hash, exclude data+CRC (C2PA compliant)
+                    // - DataOnly: Include length+type in hash, exclude data+CRC
                     // - EntireSegment: Exclude entire chunk including headers
                     match &updates.jumbf {
                         crate::MetadataUpdate::Set(new_jumbf) => {
@@ -752,7 +757,6 @@ impl ContainerIO for PngIO {
                                     should_exclude_jumbf,
                                 )?;
                             } else {
-                                // EntireSegment mode: exclude everything
                                 if should_exclude_jumbf {
                                     pw.set_exclude_mode(true);
                                 }
@@ -768,10 +772,8 @@ impl ContainerIO for PngIO {
                             {
                                 let location = source_seg.location();
                                 source.seek(SeekFrom::Start(location.offset))?;
-
                                 let mut jumbf_data = vec![0u8; location.size as usize];
                                 source.read_exact(&mut jumbf_data)?;
-
                                 if data_only_mode {
                                     Self::write_chunk_with_exclusion(
                                         &mut pw,
@@ -780,7 +782,6 @@ impl ContainerIO for PngIO {
                                         should_exclude_jumbf,
                                     )?;
                                 } else {
-                                    // EntireSegment mode: exclude everything
                                     if should_exclude_jumbf {
                                         pw.set_exclude_mode(true);
                                     }
@@ -801,7 +802,6 @@ impl ContainerIO for PngIO {
                         let location = source_seg.location();
                         let chunk_start = location.offset - 8;
                         let chunk_size = 8 + location.size + 4;
-
                         source.seek(SeekFrom::Start(chunk_start))?;
                         Self::copy_bytes(source, &mut pw, chunk_size)?;
                         idat_index += 1;
@@ -817,7 +817,6 @@ impl ContainerIO for PngIO {
                         let location = source_seg.location();
                         let chunk_start = location.offset - 8;
                         let chunk_size = 8 + location.size + 4;
-
                         source.seek(SeekFrom::Start(chunk_start))?;
                         Self::copy_bytes(source, &mut pw, chunk_size)?;
                     }
@@ -851,6 +850,14 @@ impl ContainerIO for PngIO {
         let mut dest_structure = Structure::new(ContainerKind::Png, source_structure.media_type);
         let mut current_offset = PNG_SIGNATURE.len() as u64;
 
+        // Header segment is always first — the write loop writes PNG_SIGNATURE for it.
+        dest_structure.add_segment(Segment::new(
+            0,
+            PNG_SIGNATURE.len() as u64,
+            SegmentKind::Header,
+            Some("PNGh".to_string()),
+        ));
+
         let mut xmp_written = false;
         let mut jumbf_written = false;
 
@@ -861,8 +868,7 @@ impl ContainerIO for PngIO {
         for segment in &source_structure.segments {
             match segment {
                 segment if segment.is_type(SegmentKind::Header) => {
-                    // PNG signature already accounted for
-                    continue;
+                    continue; // already added above
                 }
 
                 segment if segment.is_xmp() => {
@@ -1077,7 +1083,7 @@ impl ContainerIO for PngIO {
         let location = segment.location();
         // PNG chunks: length(4) + type(4) + data(N) + CRC(4)
         // Segment stores data offset/size. CRC immediately follows data.
-        // For C2PA: exclude data + CRC (CRC depends on data, so it changes too)
+        // Exclude data + CRC (CRC depends on data, so it changes too)
         Some((location.offset, location.size + 4))
     }
 }

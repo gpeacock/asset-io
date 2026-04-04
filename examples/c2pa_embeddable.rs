@@ -18,21 +18,21 @@
 use asset_io::{Asset, ProcessChunk, SegmentKind};
 use c2pa::{
     assertions::{
-        c2pa_action, Action, BmffHash, DataHash, ExclusionsMap, MerkleMap, SubsetMap, VecByteBuf,
+        c2pa_action, Action, BmffHash, BoxHash, BoxMap, DataHash, ExclusionsMap, MerkleMap,
+        SubsetMap, VecByteBuf,
     },
     Builder, ClaimGeneratorInfo, HashRange, Settings,
 };
 use serde_bytes::ByteBuf;
 use sha2::{Digest, Sha256};
-use std::io::{BufReader, Write};
+use std::io::Write;
 use std::time::Instant;
 
-/// Buffer size for streaming reads/writes.
-const BUF_SIZE: usize = 64 * 1024;
-
-/// Extra bytes reserved beyond the placeholder for the JUMBF payload inside the C2PA UUID box.
-/// Provides headroom for the BmffHash assertion (Merkle maps grow with mdat size).
+/// Extra bytes reserved beyond the placeholder JUMBF for BmffHash (Merkle maps grow with mdat).
 const BMFF_PLACEHOLDER_PADDING: usize = 50 * 1024;
+
+/// Extra bytes reserved for BoxHash (covers the per-segment BoxMap entries plus signing overhead).
+const BOX_HASH_PADDING: usize = 16 * 1024;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
@@ -53,8 +53,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let input_path = files[0];
     let output_path = files[1];
 
-    // Load settings (trust anchors, TSA URL, etc.) and create a shared context.
-    let settings_str = std::fs::read_to_string("tests/fixtures/test_settings.json")?;
+    // Load settings: prefer a settings file named by ASSET_IO_SETTINGS env var, otherwise
+    // fall back to the default test settings.
+    let settings_path = std::env::var("ASSET_IO_SETTINGS")
+        .unwrap_or_else(|_| "tests/fixtures/test_settings.json".to_string());
+    let settings_str = std::fs::read_to_string(&settings_path)?;
     let settings = Settings::from_string(&settings_str, "json")?;
     let context = c2pa::Context::new().with_settings(settings)?.into_shared();
     let mut builder = Builder::from_shared_context(&context);
@@ -279,12 +282,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         structure.update_segment(&mut output_file, SegmentKind::Jumbf, signed_jumbf)?;
         output_file.flush()?;
     } else {
-        // BoxHash path: hash the source, sign, write the result.
-        let source_file = std::fs::File::open(input_path)?;
-        let mut buf_reader = BufReader::with_capacity(BUF_SIZE, source_file);
-        builder.update_hash_from_stream(&native_format, &mut buf_reader)?;
+        // BoxHash path: single-pass write with per-segment hashing via NamedChunk boundaries.
+        //
+        // The format write path (PNG / JPEG) emits a zero-data NamedChunk boundary signal
+        // before every logical structural chunk.  The processor uses these boundaries to
+        // finalise the previous segment's hash and start a fresh one, accumulating a
+        // separate SHA-256 per named segment in a single write pass.
+        //
+        // The "C2PA" boundary precedes the excluded JUMBF region; no bytes from the JUMBF
+        // chunk reach the processor, so its BoxMap entry is stored with an empty hash
+        // (matching what c2pa-rs's make_box_maps / get_box_map produces for that slot).
+        //
+        // BoxHash applies only to JPEG / PNG / GIF — never BMFF.
+        let ph_alg = "sha256";
 
-        let signed_jumbf = builder.sign_embeddable("application/c2pa")?;
+        // Add a placeholder BoxHash so that builder.placeholder() reserves enough space.
+        builder.add_assertion(BoxHash::LABEL, &BoxHash { boxes: Vec::new() })?;
+        let mut placeholder_jumbf = builder.placeholder("application/c2pa")?;
+        placeholder_jumbf.extend(std::iter::repeat(0u8).take(BOX_HASH_PADDING));
+
+        let updates = asset_io::Updates::new()
+            .set_jumbf(placeholder_jumbf)
+            .exclude_from_processing(
+                vec![SegmentKind::Jumbf],
+                asset_io::ExclusionMode::EntireSegment,
+            );
 
         let mut output_file = std::fs::OpenOptions::new()
             .read(true)
@@ -292,10 +314,90 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .create(true)
             .truncate(true)
             .open(output_path)?;
-        asset.write(
-            &mut output_file,
-            &asset_io::Updates::new().set_jumbf(signed_jumbf),
-        )?;
+
+        // Per-segment accumulator state captured by the processor closure.
+        let mut seg_name: Option<String> = None;
+        let mut seg_hasher: Option<Sha256> = None;
+        let mut box_maps: Vec<BoxMap> = Vec::new();
+
+        let mut processor = |chunk: &dyn ProcessChunk| {
+            if let Some(seg) = chunk.segment() {
+                // Boundary signal — finalise the outgoing segment.
+                if let Some(n) = seg_name.take() {
+                    let bm = if let Some(h) = seg_hasher.take() {
+                        BoxMap {
+                            names: vec![n],
+                            alg: Some(ph_alg.to_string()),
+                            hash: ByteBuf::from(h.finalize().to_vec()),
+                            excluded: None,
+                            pad: ByteBuf::from(vec![]),
+                            range_start: 0,
+                            range_len: 0,
+                        }
+                    } else {
+                        // C2PA JUMBF — excluded; stored with empty hash to maintain
+                        // position parity with c2pa-rs's get_box_map sequence.
+                        BoxMap {
+                            names: vec![n],
+                            alg: None,
+                            hash: ByteBuf::from(vec![]),
+                            excluded: None,
+                            pad: ByteBuf::from(vec![]),
+                            range_start: 0,
+                            range_len: 0,
+                        }
+                    };
+                    box_maps.push(bm);
+                }
+                // Map C2PA JUMBF to the BoxHash name "C2PA"; all other segments
+                // use their container-native path.
+                let is_c2pa = seg.is_c2pa();
+                let box_name = if is_c2pa {
+                    "C2PA"
+                } else {
+                    seg.path.as_deref().unwrap_or("")
+                };
+                // Start the incoming segment — no hasher for C2PA (bytes are excluded).
+                seg_name = Some(box_name.to_string());
+                seg_hasher = if is_c2pa { None } else { Some(Sha256::new()) };
+            } else {
+                // Regular data bytes — feed into the current segment's hasher.
+                if let Some(h) = &mut seg_hasher {
+                    h.update(chunk.data());
+                }
+            }
+            Ok(())
+        };
+
+        let structure = asset.write_with_processing(&mut output_file, &updates, &mut processor)?;
+        output_file.flush()?;
+
+        // Finalise the last segment (no following boundary signal to trigger it).
+        if let Some(n) = seg_name {
+            if let Some(h) = seg_hasher {
+                box_maps.push(BoxMap {
+                    names: vec![n],
+                    alg: Some(ph_alg.to_string()),
+                    hash: ByteBuf::from(h.finalize().to_vec()),
+                    excluded: None,
+                    pad: ByteBuf::from(vec![]),
+                    range_start: 0,
+                    range_len: 0,
+                });
+            }
+        }
+
+        // Swap out the placeholder BoxHash for the real one.
+        let bh = BoxHash { boxes: box_maps };
+        builder
+            .definition
+            .assertions
+            .retain(|a| !a.label.starts_with(BoxHash::LABEL));
+        builder.add_assertion(BoxHash::LABEL, &bh)?;
+
+        let signed_jumbf = builder.sign_embeddable("application/c2pa")?;
+
+        structure.update_segment(&mut output_file, SegmentKind::Jumbf, signed_jumbf)?;
         output_file.flush()?;
     }
 

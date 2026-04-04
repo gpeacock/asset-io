@@ -24,7 +24,7 @@ const RST7: u8 = 0xD7;
 const XMP_SIGNATURE: &[u8] = b"http://ns.adobe.com/xap/1.0/\0";
 const XMP_EXTENDED_SIGNATURE: &[u8] = b"http://ns.adobe.com/xmp/extension/\0";
 const EXIF_SIGNATURE: &[u8] = b"Exif\0\0";
-const C2PA_MARKER: &[u8] = b"c2pa";
+
 const MAX_MARKER_SIZE: usize = 65533; // Max size for JPEG marker segment
 
 /// Get human-readable label for a JPEG marker
@@ -258,7 +258,12 @@ impl JpegIO {
             return Err(Error::InvalidFormat("Not a JPEG file".into()));
         }
 
-        structure.add_segment(Segment::new(0, 2, SegmentKind::Header, None));
+        structure.add_segment(Segment::new(
+            0,
+            2,
+            SegmentKind::Header,
+            Some(marker_label(SOI).to_string()),
+        ));
 
         let mut offset = 2u64;
 
@@ -309,7 +314,7 @@ impl JpegIO {
                         sos_start,
                         image_end - sos_start,
                         SegmentKind::ImageData,
-                        Some("sos".to_string()),
+                        Some(marker_label(SOS).to_string()),
                     ));
 
                     // Add EOI segment
@@ -344,7 +349,7 @@ impl JpegIO {
                         structure.add_segment(Segment::with_ranges(
                             vec![ByteRange::new(xmp_offset, xmp_size)],
                             SegmentKind::Xmp,
-                            Some("app1".to_string()),
+                            Some(marker_label(APP1).to_string()),
                         )?);
                         let remaining = (data_size as usize) - sig_buf.len();
                         source.seek(SeekFrom::Current(remaining as i64))?;
@@ -488,7 +493,7 @@ impl JpegIO {
                                     segment_start,
                                     size + 2,
                                     SegmentKind::Exif,
-                                    Some("app1".to_string()),
+                                    Some(marker_label(APP1).to_string()),
                                 );
                                 if let Some(meta) = thumbnail_meta {
                                     segment = segment.with_metadata(meta);
@@ -503,7 +508,7 @@ impl JpegIO {
                                     segment_start,
                                     size + 2,
                                     SegmentKind::Exif,
-                                    Some("app1".to_string()),
+                                    Some(marker_label(APP1).to_string()),
                                 ));
 
                                 // Skip remaining EXIF data
@@ -547,24 +552,21 @@ impl JpegIO {
                     let data_start = offset + 4;
                     let segment_start = offset;
 
-                    // Check for JPEG XT + JUMBF structure OR raw JUMBF
+                    // Check for JPEG XT + JUMBF structure OR raw JUMBF superbox.
                     // Format 1: JPEG XT: CI(2) + En(2) + Z(4) = 8 bytes, then JUMBF superbox
-                    // Format 2: Raw JUMBF superbox directly (used by c2pa crate)
-                    let mut header = [0u8; 32];
+                    // Format 2: Raw JUMBF superbox directly
+                    let mut header = [0u8; 16];
                     let bytes_to_read = header.len().min(data_size as usize);
                     source.read_exact(&mut header[..bytes_to_read])?;
 
-                    // Check if this is JPEG XT with JUMBF
+                    // Check if this is JPEG XT with JUMBF (JP prefix + "jumb" after 8-byte XT header)
                     let is_jpeg_xt = bytes_to_read >= 8 && &header[0..2] == b"JP";
                     let has_jumb_box_after_xt = bytes_to_read >= 16 && &header[12..16] == b"jumb";
-                    let has_c2pa_after_xt = bytes_to_read >= 32 && &header[28..32] == C2PA_MARKER;
 
                     // Check if this is raw JUMBF (no JPEG XT wrapper)
                     let has_jumb_box_direct = bytes_to_read >= 8 && &header[4..8] == b"jumb";
-                    let has_c2pa_direct = bytes_to_read >= 24 && &header[20..24] == C2PA_MARKER;
 
-                    let is_jumbf = (is_jpeg_xt && (has_jumb_box_after_xt || has_c2pa_after_xt))
-                        || (has_jumb_box_direct || has_c2pa_direct);
+                    let is_jumbf = (is_jpeg_xt && has_jumb_box_after_xt) || has_jumb_box_direct;
 
                     if is_jumbf {
                         // Calculate the actual JUMBF data offset and size
@@ -621,7 +623,7 @@ impl JpegIO {
                             structure.add_segment(Segment::with_ranges(
                                 vec![ByteRange::new(jumbf_data_offset, jumbf_data_size)],
                                 SegmentKind::Jumbf,
-                                Some("app11".to_string()),
+                                Some(marker_label(APP11).to_string()),
                             )?);
                         }
 
@@ -948,15 +950,16 @@ impl ContainerIO for JpegIO {
 
         source.seek(SeekFrom::Start(0))?;
 
-        // Write SOI
-        pw.write_u8(0xFF)?;
-        pw.write_u8(SOI)?;
-
-        // Iterate through destination structure and write each segment
+        // Iterate through destination structure and write each segment.
+        // A boundary signal is emitted once at the top of each iteration so no
+        // arm needs to handle boundary signalling directly.
         for dest_segment in &dest_structure.segments {
+            pw.begin_segment(dest_segment)?;
+
             match dest_segment {
                 seg if seg.is_type(SegmentKind::Header) => {
-                    continue;
+                    pw.write_u8(0xFF)?;
+                    pw.write_u8(SOI)?;
                 }
 
                 seg if seg.is_xmp() => match &updates.xmp {
@@ -1042,7 +1045,7 @@ impl ContainerIO for JpegIO {
 
                 seg if seg.is_jumbf() => {
                     // Handle JUMBF based on exclusion mode:
-                    // - DataOnly: Include headers in hash, exclude only data (C2PA compliant)
+                    // - DataOnly: Include headers in hash, exclude only data
                     // - EntireSegment: Exclude entire segment including headers
                     match &updates.jumbf {
                         crate::MetadataUpdate::Set(new_jumbf) => {
@@ -1053,7 +1056,6 @@ impl ContainerIO for JpegIO {
                                     should_exclude_jumbf,
                                 )?;
                             } else {
-                                // EntireSegment mode: exclude everything
                                 if should_exclude_jumbf {
                                     pw.set_exclude_mode(true);
                                 }
@@ -1087,7 +1089,6 @@ impl ContainerIO for JpegIO {
                                         should_exclude_jumbf,
                                     )?;
                                 } else {
-                                    // EntireSegment mode: exclude everything
                                     if should_exclude_jumbf {
                                         pw.set_exclude_mode(true);
                                     }
@@ -1102,7 +1103,7 @@ impl ContainerIO for JpegIO {
                     }
                 }
 
-                seg if seg.is_type(SegmentKind::ImageData) => {
+                _seg if _seg.is_type(SegmentKind::ImageData) => {
                     if let Some(source_seg) = structure
                         .segments
                         .iter()
@@ -1115,7 +1116,7 @@ impl ContainerIO for JpegIO {
                     }
                 }
 
-                seg if seg.path.as_deref() == Some("EOI") => {
+                _seg if _seg.path.as_deref() == Some("EOI") => {
                     pw.write_u8(0xFF)?;
                     pw.write_u8(EOI)?;
                 }
@@ -1151,6 +1152,14 @@ impl ContainerIO for JpegIO {
         let mut dest_structure = Structure::new(ContainerKind::Jpeg, source_structure.media_type);
         let mut current_offset = 2u64; // Start after SOI marker
 
+        // Header segment is always first — the write loop writes SOI bytes for it.
+        dest_structure.add_segment(Segment::new(
+            0,
+            2,
+            SegmentKind::Header,
+            Some(marker_label(SOI).to_string()),
+        ));
+
         let mut xmp_written = false;
         let mut jumbf_written = false;
 
@@ -1161,8 +1170,7 @@ impl ContainerIO for JpegIO {
         for segment in &source_structure.segments {
             match segment {
                 segment if segment.is_type(SegmentKind::Header) => {
-                    // SOI already accounted for in current_offset
-                    continue;
+                    continue; // already added above
                 }
 
                 segment if segment.is_xmp() => {
@@ -1274,7 +1282,7 @@ impl ContainerIO for JpegIO {
                             dest_structure.add_segment_with_ranges(
                                 SegmentKind::Jumbf,
                                 ranges,
-                                Some("APP11/C2PA".to_string()),
+                                Some(marker_label(APP11).to_string()),
                             )?;
                             jumbf_written = true;
                         }
@@ -1306,7 +1314,7 @@ impl ContainerIO for JpegIO {
                         current_offset,
                         2,
                         SegmentKind::Other,
-                        Some("EOI".to_string()),
+                        Some(marker_label(EOI).to_string()),
                     ));
                     current_offset += 2;
                 }
@@ -1345,8 +1353,8 @@ impl ContainerIO for JpegIO {
 
                         if !jumbf_written && !has_jumbf {
                             if let MetadataUpdate::Set(new_jumbf) = &updates.jumbf {
-                                // For c2pa-provided data (already in APP11 format), write directly
-                                // Otherwise wrap in JPEG XT format
+                                // If data is already in APP11 format, write directly;
+                                // otherwise wrap in JPEG XT format
                                 let is_already_app11 = new_jumbf.len() >= 2
                                     && new_jumbf[0] == 0xFF
                                     && new_jumbf[1] == APP11;
@@ -1359,7 +1367,7 @@ impl ContainerIO for JpegIO {
                                         current_offset,
                                         new_jumbf.len() as u64,
                                         SegmentKind::Jumbf,
-                                        Some("APP11/C2PA".to_string()),
+                                        Some(marker_label(APP11).to_string()),
                                     ));
                                     current_offset += new_jumbf.len() as u64;
                                 } else {
@@ -1397,7 +1405,7 @@ impl ContainerIO for JpegIO {
                                     dest_structure.add_segment_with_ranges(
                                         SegmentKind::Jumbf,
                                         ranges,
-                                        Some("APP11/C2PA".to_string()),
+                                        Some(marker_label(APP11).to_string()),
                                     )?;
                                 }
                                 jumbf_written = true;
@@ -1622,7 +1630,7 @@ fn write_xmp_segment<W: Write>(writer: &mut W, xmp: &[u8]) -> Result<()> {
 /// Write JUMBF data as one or more APP11 segments
 fn write_jumbf_segments<W: Write>(writer: &mut W, jumbf: &[u8]) -> Result<()> {
     // Check if the JUMBF data is already in APP11 segment format (complete with FF EB marker)
-    // (This happens when c2pa crate returns complete APP11 segments)
+    // (This happens when the caller provides pre-formatted APP11 segments)
     let is_complete_app11 = jumbf.len() >= 2 && jumbf[0] == 0xFF && jumbf[1] == APP11;
 
     if is_complete_app11 {
@@ -1689,10 +1697,12 @@ fn write_jumbf_segments<W: Write>(writer: &mut W, jumbf: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// Write JUMBF data with proper C2PA exclusion handling for ProcessingWriter
+/// Write JUMBF data across one or more APP11 segments with optional payload exclusion.
 ///
-/// Per C2PA spec, the APP11 headers must be included in the hash to prevent
-/// insertion attacks. Only the manifest DATA is excluded from hashing.
+/// APP11 headers (marker, length, JPEG XT fields) are always passed to the
+/// processor so the container structure remains verifiable. Only the JUMBF
+/// payload itself is optionally withheld, keeping structural fields in the
+/// hash while the embedded data content is excluded.
 ///
 /// This function:
 /// 1. Writes headers (marker, length, JPEG XT fields) with processing ENABLED
@@ -1711,7 +1721,7 @@ where
     let is_complete_app11 = jumbf.len() >= 2 && jumbf[0] == 0xFF && jumbf[1] == APP11;
     if is_complete_app11 {
         // For pre-formatted APP11 data, we can't easily separate headers from data
-        // This path shouldn't be used for C2PA (format should be "application/c2pa")
+        // Pre-formatted APP11 data — can't separate headers from payload
         if should_exclude {
             pw.set_exclude_mode(true);
         }
@@ -1761,7 +1771,7 @@ where
         let seg_size = JPEG_XT_HEADER + continuation_overhead + chunk.len() + 2;
         pw.write_u16::<BigEndian>(seg_size as u16)?;
 
-        // Write JPEG XT header (included in hash per C2PA spec)
+        // Write JPEG XT header (always included in hash)
         pw.write_all(b"JP")?;
         pw.write_u16::<BigEndian>(0x0211)?;
         pw.write_u32::<BigEndian>((seg_num + 1) as u32)?;

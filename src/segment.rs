@@ -471,6 +471,43 @@ impl Segment {
         self.kind == SegmentKind::Jumbf
     }
 
+    /// Check if this JUMBF segment contains a C2PA manifest.
+    ///
+    /// Returns `false` immediately for non-Jumbf segments. For Jumbf segments with
+    /// loaded data, inspects the JUMBF description box label (at byte offset 33) to
+    /// confirm the content type is `"c2pa"`.
+    ///
+    /// Falls back to `true` when data is not yet loaded — a conservative assumption
+    /// that avoids false negatives when segments haven't been read yet.
+    ///
+    /// JUMBF layout at the start of the payload:
+    /// ```text
+    /// superbox:  lbox(4) + "jumb"(4)
+    /// desc box:  lbox(4) + "jumd"(4) + UUID(16) + toggles(1) + label(n, NUL-terminated)
+    ///                                                            ^ offset 33
+    /// ```
+    pub fn is_c2pa(&self) -> bool {
+        if !self.is_jumbf() {
+            return false;
+        }
+        const LABEL_OFFSET: usize = 33;
+        const C2PA_LABEL: &[u8] = b"c2pa";
+        match &self.data {
+            LazyData::Loaded(bytes) if bytes.len() >= LABEL_OFFSET + C2PA_LABEL.len() => {
+                &bytes[LABEL_OFFSET..LABEL_OFFSET + C2PA_LABEL.len()] == C2PA_LABEL
+            }
+            #[cfg(feature = "memory-mapped")]
+            LazyData::MemoryMapped { mmap, offset, size }
+                if *size >= LABEL_OFFSET + C2PA_LABEL.len() =>
+            {
+                let start = offset + LABEL_OFFSET;
+                &mmap[start..start + C2PA_LABEL.len()] == C2PA_LABEL
+            }
+            // Data not yet loaded — conservatively assume it is C2PA.
+            _ => true,
+        }
+    }
+
     /// Check if this is image data
     pub fn is_image_data(&self) -> bool {
         self.kind == SegmentKind::ImageData

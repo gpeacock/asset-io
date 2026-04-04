@@ -4,6 +4,7 @@
 //! processes data through a callback before forwarding to the underlying writer.
 
 use crate::error::set_pending_processor_error;
+use crate::segment::Segment;
 use std::io::{Read, Result, Write};
 
 /// A chunk of data passed to a processor during write.
@@ -37,6 +38,16 @@ pub trait ProcessChunk {
     fn large_size(&self) -> Option<bool> {
         None
     }
+
+    /// Full logical segment for boundary signals.
+    ///
+    /// Returns the [`Segment`] when this chunk is a boundary marker, giving
+    /// the processor access to the complete logical view — including `is_c2pa()`,
+    /// `path`, `ranges`, and any loaded data — without coupling to container
+    /// internals.
+    fn segment(&self) -> Option<&Segment> {
+        None
+    }
 }
 
 /// Generic chunk for non-mdat data (JPEG, PNG, RIFF, BMFF non-mdat).
@@ -46,6 +57,21 @@ pub struct SimpleChunk<'a>(pub &'a [u8]);
 impl ProcessChunk for SimpleChunk<'_> {
     fn data(&self) -> &[u8] {
         self.0
+    }
+}
+
+/// Private boundary marker emitted by [`ProcessingWriter::begin_segment`].
+///
+/// Not part of the public API — callers use `begin_segment(&segment)` directly.
+struct SegmentBoundary<'a>(&'a Segment);
+
+impl ProcessChunk for SegmentBoundary<'_> {
+    fn data(&self) -> &[u8] {
+        &[]
+    }
+
+    fn segment(&self) -> Option<&Segment> {
+        Some(self.0)
     }
 }
 
@@ -216,7 +242,31 @@ where
         Ok(())
     }
 
-    /// Process a chunk (for BMFF handler to call when streaming mdat boxes).
+    /// Emit a named segment boundary to the processor.
+    ///
+    /// Called once per logical segment before its bytes are written. The processor
+    /// receives a zero-data chunk whose [`ProcessChunk::name`] returns `Some(name)`,
+    /// signalling that a new segment with the given name is starting. Always fires
+    /// regardless of [`exclude_mode`](Self::set_exclude_mode).
+    ///
+    /// Format write loops call this via [`Segment::name`] so boundary signalling is
+    /// uniform across all handlers.
+    /// Signal the start of a new logical segment.
+    ///
+    /// Fires the processor with a zero-data boundary marker carrying the
+    /// segment's path and kind, allowing processors to finalise the previous
+    /// segment and begin tracking a new one without coupling to any specific
+    /// container format or C2PA-specific names.
+    pub fn begin_segment(&mut self, segment: &Segment) -> Result<()> {
+        let chunk = SegmentBoundary(segment);
+        if let Err(e) = (self.processor)(&chunk as &dyn ProcessChunk) {
+            set_pending_processor_error(e);
+            return Err(io_processor_fail());
+        }
+        Ok(())
+    }
+
+    /// Process a typed chunk (for BMFF handler to call when streaming mdat boxes).
     #[allow(dead_code)]
     pub fn process_chunk(&mut self, chunk: impl ProcessChunk) -> Result<()> {
         if let Err(e) = (self.processor)(&chunk as &dyn ProcessChunk) {
