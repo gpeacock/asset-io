@@ -262,10 +262,8 @@ fn parse_exif_from_ifd(
             tags::MODEL => {
                 info.model = read_ascii_tag(data, tag_type, count, value_or_offset, byte_order);
             }
-            tags::ORIENTATION => {
-                if tag_type == types::SHORT {
-                    info.orientation = Some(value_or_offset as u16);
-                }
+            tags::ORIENTATION if tag_type == types::SHORT => {
+                info.orientation = Some(value_or_offset as u16)
             }
             tags::SOFTWARE => {
                 info.software = read_ascii_tag(data, tag_type, count, value_or_offset, byte_order);
@@ -279,10 +277,8 @@ fn parse_exif_from_ifd(
             tags::COPYRIGHT => {
                 info.copyright = read_ascii_tag(data, tag_type, count, value_or_offset, byte_order);
             }
-            tags::EXIF_IFD_POINTER => {
-                if tag_type == types::LONG {
-                    exif_ifd_offset = Some(value_or_offset);
-                }
+            tags::EXIF_IFD_POINTER if tag_type == types::LONG => {
+                exif_ifd_offset = Some(value_or_offset)
             }
             _ => {}
         }

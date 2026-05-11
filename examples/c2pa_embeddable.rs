@@ -291,7 +291,7 @@ fn main() -> Result<(), Error> {
     // Load settings: prefer ASSET_IO_SETTINGS env var, fall back to test fixtures.
     let settings_path = std::env::var("ASSET_IO_SETTINGS")
         .unwrap_or_else(|_| "tests/fixtures/test_settings.json".to_string());
-    let settings = Settings::from_string(&std::fs::read_to_string(&settings_path)?, "json")?;
+    let settings = Settings::new().with_json(&std::fs::read_to_string(&settings_path)?)?;
     let context = c2pa::Context::new().with_settings(settings)?.into_shared();
     let mut builder = Builder::from_shared_context(&context);
 
