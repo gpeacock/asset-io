@@ -4,12 +4,12 @@ High-performance, format-agnostic streaming I/O for media asset metadata (JUMBF,
 
 ## Features
 
-- 🚀 **Blazing Fast** - Single-pass parsing, optimized seeks, streaming writes
-- 💾 **Memory Efficient** - Lazy loading, processes files larger than RAM
-- 🔍 **Format Agnostic** - Auto-detects JPEG, PNG, HEIC, AVIF, MP4, and more
-- 🛡️ **Type Safe** - Full Rust type safety and error handling
-- 📦 **Minimal Dependencies** - Core functionality with optional features
-- 🔐 **C2PA Ready** - Built-in support for streaming hash computation with exclusions
+- **Fast** - Single-pass parsing, optimized seeks, streaming writes
+- **Memory Efficient** - Lazy loading, processes files larger than RAM
+- **Format Agnostic** - Auto-detects JPEG, PNG, HEIC, AVIF, MP4, and more
+- **Type Safe** - Full Rust type safety and error handling
+- **Minimal Dependencies** - Core functionality with optional features
+- **C2PA Ready** - Built-in support for streaming hash computation with exclusions
 
 ## Quick Start
 

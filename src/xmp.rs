@@ -294,6 +294,50 @@ fn get_keys_impl(xmp: &str, keys: &[&str]) -> Vec<Option<String>> {
     results
 }
 
+/// Detect if XMP has a packet wrapper, returning the total original size if so.
+///
+/// XMP packets wrapped in `<?xpacket begin=...?>` ... `<?xpacket end=...?>` use
+/// whitespace padding between the closing element and `<?xpacket end` to allow
+/// in-place editing without rewriting the entire file. Returns `Some(size)` to
+/// signal that padding should be maintained after modifications.
+fn detect_packet_size(xmp: &str) -> Option<usize> {
+    if xmp.contains("<?xpacket end") {
+        Some(xmp.len())
+    } else {
+        None
+    }
+}
+
+/// Adjust XMP packet padding to maintain a target total byte size.
+///
+/// Replaces the whitespace immediately before `<?xpacket end` so the total
+/// length equals `target_size`. If the content has grown beyond `target_size`,
+/// padding is removed entirely and the string will be larger than `target_size`.
+fn adjust_packet_padding(xmp: String, target_size: usize) -> String {
+    const END_MARKER: &str = "<?xpacket end";
+    let end_pos = match xmp.rfind(END_MARKER) {
+        Some(pos) => pos,
+        None => return xmp,
+    };
+    // Find where non-whitespace content ends before the end marker
+    let content_end = xmp[..end_pos]
+        .as_bytes()
+        .iter()
+        .rposition(|&b| !b.is_ascii_whitespace())
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    let suffix = &xmp[end_pos..];
+    let non_padded_size = content_end + suffix.len();
+    let padding_len = target_size.saturating_sub(non_padded_size);
+    let mut result = String::with_capacity(content_end + padding_len + suffix.len());
+    result.push_str(&xmp[..content_end]);
+    for _ in 0..padding_len {
+        result.push(' ');
+    }
+    result.push_str(suffix);
+    result
+}
+
 /// Apply multiple updates to XMP in a single pass (internal implementation).
 fn apply_updates_impl(xmp: &str, updates: &[(&str, Option<&str>)]) -> Result<String> {
     use quick_xml::{
@@ -306,6 +350,9 @@ fn apply_updates_impl(xmp: &str, updates: &[(&str, Option<&str>)]) -> Result<Str
     for (key, _) in updates {
         validate_key(key)?;
     }
+
+    // Remember original packet size so we can maintain padding after edits
+    let target_packet_size = detect_packet_size(xmp);
 
     let mut reader = Reader::from_str(xmp);
     reader.config_mut().trim_text(false);
@@ -429,7 +476,13 @@ fn apply_updates_impl(xmp: &str, updates: &[(&str, Option<&str>)]) -> Result<Str
     }
 
     let result = writer.into_inner().into_inner();
-    String::from_utf8(result).map_err(|e| crate::Error::InvalidFormat(e.to_string()))
+    let result_str = String::from_utf8(result)
+        .map_err(|e| crate::Error::InvalidFormat(e.to_string()))?;
+    if let Some(target_size) = target_packet_size {
+        Ok(adjust_packet_padding(result_str, target_size))
+    } else {
+        Ok(result_str)
+    }
 }
 
 #[cfg(test)]
@@ -764,5 +817,64 @@ mod tests {
         let xmp = MiniXmp::new(TEST_XMP);
         let s: &str = xmp.as_ref();
         assert!(s.contains("dc:format"));
+    }
+
+    fn make_padded_xmp(padding: usize) -> String {
+        let content = r#"<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>
+<x:xmpmeta xmlns:x="adobe:ns:meta/">
+    <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+        <rdf:Description dc:title="Photo" dc:format="image/jpeg" />
+    </rdf:RDF>
+</x:xmpmeta>"#;
+        format!("{}{:>width$}<?xpacket end=\"w\"?>", content, "", width = padding)
+    }
+
+    #[test]
+    fn test_packet_padding_maintained_on_shrink() {
+        let xmp_str = make_padded_xmp(500);
+        let original_size = xmp_str.len();
+
+        let xmp = MiniXmp::new(xmp_str);
+        let updated = xmp.remove("dc:format").unwrap();
+
+        assert_eq!(updated.len(), original_size, "Packet size should be unchanged after removal");
+        assert_eq!(updated.get("dc:format"), None);
+        assert_eq!(updated.get("dc:title"), Some("Photo".to_string()));
+    }
+
+    #[test]
+    fn test_packet_padding_maintained_on_add() {
+        let xmp_str = make_padded_xmp(500);
+        let original_size = xmp_str.len();
+
+        let xmp = MiniXmp::new(xmp_str);
+        let updated = xmp.set("dc:creator", "John").unwrap();
+
+        assert_eq!(updated.len(), original_size, "Packet size should be unchanged after add within padding");
+        assert_eq!(updated.get("dc:creator"), Some("John".to_string()));
+    }
+
+    #[test]
+    fn test_packet_padding_grows_when_content_exceeds_original() {
+        // Only 3 bytes of padding — adding a large value will exhaust it
+        let xmp_str = make_padded_xmp(3);
+        let original_size = xmp_str.len();
+
+        let xmp = MiniXmp::new(xmp_str);
+        let large_value = "x".repeat(500);
+        let updated = xmp.set("dc:description", &large_value).unwrap();
+
+        assert!(updated.len() > original_size, "Packet should grow when content exceeds original size");
+        assert_eq!(updated.get("dc:description"), Some(large_value));
+    }
+
+    #[test]
+    fn test_no_padding_without_packet_wrapper() {
+        // XMP without a packet wrapper should never have padding injected
+        let xmp = MiniXmp::new(r#"<rdf:Description dc:title="Photo" />"#);
+        let updated = xmp.set("dc:creator", "John").unwrap();
+
+        assert!(!updated.as_str().contains("<?xpacket end"));
+        assert_eq!(updated.get("dc:creator"), Some("John".to_string()));
     }
 }
