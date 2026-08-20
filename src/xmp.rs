@@ -53,8 +53,17 @@
 //!
 //! - Structured properties (nested elements, alt/bag/seq containers)
 //! - Arrays (only simple string values)
-//! - XMP packet padding (writes don't maintain the 2-4KB minimum size)
 //! - Namespace validation (assumes caller provides correct prefixes)
+//! - Writing to more than one `rdf:Description` block: `set`/`apply_updates`
+//!   only add or replace attribute-form values in the first block, and
+//!   attribute-form removal is likewise limited to the first block (element/
+//!   child-form removal, e.g. `<dc:title>...</dc:title>`, does strip a
+//!   matching key wherever it appears). This only matters if a single
+//!   subject has the *same* simple property duplicated with conflicting
+//!   values across multiple blocks, which isn't well-formed XMP in the first
+//!   place (multiple blocks are meant for different subjects, or
+//!   non-overlapping properties of one subject) and shouldn't occur from a
+//!   single well-behaved writer.
 //!
 //! ## What Works
 //!
@@ -63,6 +72,10 @@
 //! - Multiple `rdf:Description` blocks
 //! - XML entity encoding/decoding
 //! - UTF-8 text values
+//! - XMP packet padding: writes preserve an existing packet's original size
+//!   when possible (growing only if new content exceeds the available
+//!   padding), and add a fresh packet trailer with the spec-recommended 4 KB
+//!   padding reserve if the input had no packet wrapper at all
 //!
 //! For full XMP support, consider the `xmp-toolkit` crate instead.
 
@@ -70,6 +83,11 @@ use crate::error::Result;
 use std::io::Cursor;
 
 const RDF_DESCRIPTION: &[u8] = b"rdf:Description";
+const XMP_PACKET_END: &str = "<?xpacket end=\"w\"?>";
+/// Minimum packet size to reserve when writing a fresh packet trailer, per the
+/// XMP spec's recommendation of 2-4 KB of padding so later edits can be made
+/// in place without rewriting the whole packet.
+const MIN_PACKET_SIZE: usize = 4096;
 
 // ============================================================================
 // MiniXmp Struct API
@@ -338,6 +356,42 @@ fn adjust_packet_padding(xmp: String, target_size: usize) -> String {
     result
 }
 
+/// Format `len` bytes of packet padding: a leading newline, then spaces
+/// broken by a newline every 99 characters (the XMP spec's recommendation
+/// so the padding isn't one unreadably long line), then a trailing newline
+/// before the packet trailer. Always emits at least one newline.
+fn format_packet_padding(len: usize) -> String {
+    let mut out = String::with_capacity(len + 2);
+    out.push('\n');
+    let mut remaining = len.saturating_sub(1);
+    if remaining > 0 {
+        remaining -= 1; // reserve the final newline before the trailer
+        while remaining > 0 {
+            let chunk = remaining.min(99);
+            out.extend(std::iter::repeat_n(' ', chunk));
+            remaining -= chunk;
+            if remaining > 0 {
+                out.push('\n');
+                remaining -= 1;
+            }
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// Append a fresh `<?xpacket end?>` trailer to XMP that had no packet wrapper
+/// at all, reserving [`MIN_PACKET_SIZE`] bytes of padding so the packet can be
+/// edited in place later without a full rewrite.
+fn append_packet_wrapper(body: String) -> String {
+    let target_len = body.len().max(MIN_PACKET_SIZE);
+    let padding_len = target_len.saturating_sub(body.len());
+    let mut result = body;
+    result.push_str(&format_packet_padding(padding_len));
+    result.push_str(XMP_PACKET_END);
+    result
+}
+
 /// Apply multiple updates to XMP in a single pass (internal implementation).
 fn apply_updates_impl(xmp: &str, updates: &[(&str, Option<&str>)]) -> Result<String> {
     use quick_xml::{
@@ -361,9 +415,39 @@ fn apply_updates_impl(xmp: &str, updates: &[(&str, Option<&str>)]) -> Result<Str
     let mut writer = Writer::new(Cursor::new(Vec::new()));
     let mut applied = false;
 
+    // Name of a standalone child element currently being removed, e.g.
+    // `<dc:title>...</dc:title>` when `dc:title` has a `None` update. Some
+    // XMP producers write properties this way instead of as an
+    // `rdf:Description` attribute; removal needs to strip that form too so
+    // it doesn't linger alongside (or instead of) an attribute-based update.
+    let mut skipping_key: Option<Vec<u8>> = None;
+    let is_removal_key = |name: QName| {
+        updates
+            .iter()
+            .any(|(key, value)| value.is_none() && name == QName(key.as_bytes()))
+    };
+
     loop {
         let event = reader.read_event()?;
+
+        if let Some(skip_name) = &skipping_key {
+            match &event {
+                Event::End(e) if e.name().as_ref() == skip_name.as_slice() => {
+                    skipping_key = None;
+                }
+                Event::Eof => break,
+                _ => {}
+            }
+            continue;
+        }
+
         match event {
+            Event::Start(ref e) if is_removal_key(e.name()) => {
+                skipping_key = Some(e.name().as_ref().to_vec());
+            }
+            Event::Empty(ref e) if is_removal_key(e.name()) => {
+                // Self-closing standalone element being removed — nothing to skip.
+            }
             Event::Start(ref e) if e.name() == QName(RDF_DESCRIPTION) && !applied => {
                 let elem_name = std::str::from_utf8(RDF_DESCRIPTION).map_err(|_| {
                     crate::Error::InvalidFormat("Invalid RDF_DESCRIPTION constant".into())
@@ -476,12 +560,11 @@ fn apply_updates_impl(xmp: &str, updates: &[(&str, Option<&str>)]) -> Result<Str
     }
 
     let result = writer.into_inner().into_inner();
-    let result_str = String::from_utf8(result)
-        .map_err(|e| crate::Error::InvalidFormat(e.to_string()))?;
-    if let Some(target_size) = target_packet_size {
-        Ok(adjust_packet_padding(result_str, target_size))
-    } else {
-        Ok(result_str)
+    let result_str =
+        String::from_utf8(result).map_err(|e| crate::Error::InvalidFormat(e.to_string()))?;
+    match target_packet_size {
+        Some(target_size) => Ok(adjust_packet_padding(result_str, target_size)),
+        None => Ok(append_packet_wrapper(result_str)),
     }
 }
 
@@ -547,6 +630,31 @@ mod tests {
         let updated = xmp.remove("nonexistent").unwrap();
         // Should not error, just return unchanged XMP
         assert_eq!(updated.get("dc:format"), Some("image/jpeg".to_string()));
+    }
+
+    #[test]
+    fn test_remove_key_stored_as_element() {
+        // Some producers write properties as a standalone child element
+        // instead of an rdf:Description attribute; remove() must strip
+        // that form too, not just attributes.
+        let xmp = MiniXmp::new(
+            r#"<rdf:Description dc:format="image/jpeg"><dc:title>Photo</dc:title></rdf:Description>"#,
+        );
+        assert_eq!(xmp.get("dc:title"), Some("Photo".to_string()));
+
+        let updated = xmp.remove("dc:title").unwrap();
+        assert_eq!(updated.get("dc:title"), None);
+        assert!(!updated.as_str().contains("dc:title"));
+        // Unrelated attribute should survive untouched
+        assert_eq!(updated.get("dc:format"), Some("image/jpeg".to_string()));
+    }
+
+    #[test]
+    fn test_remove_self_closing_key_element() {
+        let xmp = MiniXmp::new(r#"<rdf:Description><dc:title/></rdf:Description>"#);
+        let updated = xmp.remove("dc:title").unwrap();
+        assert_eq!(updated.get("dc:title"), None);
+        assert!(!updated.as_str().contains("dc:title"));
     }
 
     #[test]
@@ -826,7 +934,12 @@ mod tests {
         <rdf:Description dc:title="Photo" dc:format="image/jpeg" />
     </rdf:RDF>
 </x:xmpmeta>"#;
-        format!("{}{:>width$}<?xpacket end=\"w\"?>", content, "", width = padding)
+        format!(
+            "{}{:>width$}<?xpacket end=\"w\"?>",
+            content,
+            "",
+            width = padding
+        )
     }
 
     #[test]
@@ -837,7 +950,11 @@ mod tests {
         let xmp = MiniXmp::new(xmp_str);
         let updated = xmp.remove("dc:format").unwrap();
 
-        assert_eq!(updated.len(), original_size, "Packet size should be unchanged after removal");
+        assert_eq!(
+            updated.len(),
+            original_size,
+            "Packet size should be unchanged after removal"
+        );
         assert_eq!(updated.get("dc:format"), None);
         assert_eq!(updated.get("dc:title"), Some("Photo".to_string()));
     }
@@ -850,7 +967,11 @@ mod tests {
         let xmp = MiniXmp::new(xmp_str);
         let updated = xmp.set("dc:creator", "John").unwrap();
 
-        assert_eq!(updated.len(), original_size, "Packet size should be unchanged after add within padding");
+        assert_eq!(
+            updated.len(),
+            original_size,
+            "Packet size should be unchanged after add within padding"
+        );
         assert_eq!(updated.get("dc:creator"), Some("John".to_string()));
     }
 
@@ -864,17 +985,37 @@ mod tests {
         let large_value = "x".repeat(500);
         let updated = xmp.set("dc:description", &large_value).unwrap();
 
-        assert!(updated.len() > original_size, "Packet should grow when content exceeds original size");
+        assert!(
+            updated.len() > original_size,
+            "Packet should grow when content exceeds original size"
+        );
         assert_eq!(updated.get("dc:description"), Some(large_value));
     }
 
     #[test]
-    fn test_no_padding_without_packet_wrapper() {
-        // XMP without a packet wrapper should never have padding injected
+    fn test_write_adds_packet_wrapper_with_min_padding() {
+        // XMP with no packet wrapper at all should get a fresh trailer added,
+        // reserving the spec-recommended 4 KB minimum padding.
         let xmp = MiniXmp::new(r#"<rdf:Description dc:title="Photo" />"#);
         let updated = xmp.set("dc:creator", "John").unwrap();
 
-        assert!(!updated.as_str().contains("<?xpacket end"));
+        assert!(updated.as_str().contains("<?xpacket end"));
+        assert!(
+            updated.len() >= MIN_PACKET_SIZE,
+            "Fresh packet should reserve at least the minimum padding"
+        );
         assert_eq!(updated.get("dc:creator"), Some("John".to_string()));
+    }
+
+    #[test]
+    fn test_write_wraps_large_content_without_shrinking_below_min() {
+        // Content already larger than the minimum should not be truncated,
+        // and should still get exactly one newline of padding before the trailer.
+        let large_value = "x".repeat(5000);
+        let xmp = MiniXmp::new(r#"<rdf:Description />"#);
+        let updated = xmp.set("dc:description", &large_value).unwrap();
+
+        assert!(updated.as_str().ends_with("<?xpacket end=\"w\"?>"));
+        assert_eq!(updated.get("dc:description"), Some(large_value));
     }
 }
