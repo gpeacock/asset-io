@@ -4,8 +4,7 @@ use crate::{
     containers::ContainerKind,
     error::Result,
     segment::{
-        ByteRange, ChunkedSegmentReader, Location, Segment, SegmentKind, DEFAULT_CHUNK_SIZE,
-        MAX_SEGMENT_SIZE,
+        ByteRange, ChunkedSegmentReader, Segment, SegmentKind, DEFAULT_CHUNK_SIZE, MAX_SEGMENT_SIZE,
     },
     MediaType,
 };
@@ -310,7 +309,7 @@ impl Structure {
     /// Get all segments except those matching exclusion patterns
     ///
     /// Returns (index, segment, location) for each segment to be hashed.
-    pub fn segments_excluding(&self, exclusions: &[&str]) -> Vec<(usize, &Segment, Location)> {
+    pub fn segments_excluding(&self, exclusions: &[&str]) -> Vec<(usize, &Segment, ByteRange)> {
         self.segments
             .iter()
             .enumerate()

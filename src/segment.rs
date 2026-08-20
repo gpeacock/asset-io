@@ -29,9 +29,6 @@ impl ByteRange {
     }
 }
 
-/// Alias for ByteRange for backward compatibility
-pub type Location = ByteRange;
-
 /// Chunk size for streaming large segments (64KB)
 pub const DEFAULT_CHUNK_SIZE: usize = 65536;
 
@@ -411,13 +408,8 @@ impl Segment {
     ///
     /// For single-range segments (most common), this is the full location.
     /// For multi-range segments, this is the location of the first range.
-    pub fn primary_location(&self) -> ByteRange {
-        self.ranges[0]
-    }
-
-    /// Get the location of this segment (alias for primary_location for backward compatibility)
     pub fn location(&self) -> ByteRange {
-        self.primary_location()
+        self.ranges[0]
     }
 
     /// Get the total size across all ranges
