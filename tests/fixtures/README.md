@@ -15,6 +15,13 @@ These three files cover the core test cases:
 - XMP-only metadata  
 - Both XMP and JUMBF together
 
+## Synthetic PDF Fixture
+
+The synthetic `pdf_metadata.pdf` fixture contains an uncompressed XMP stream and
+a document-level C2PA attachment association using classic cross-reference
+tables. Its `manifest` payload is a placeholder, not a valid C2PA manifest. It is
+used directly by the PDF integration tests and can seed the parsing fuzzer.
+
 ## Extended Fixtures (Optional)
 
 For more comprehensive testing, you can use a larger fixture set by setting the `JUMBF_TEST_FIXTURES` environment variable to point to an extended directory:

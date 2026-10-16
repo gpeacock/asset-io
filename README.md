@@ -134,10 +134,52 @@ asset-io = { version = "0.1", features = ["jpeg", "png", "xmp"] }
 | `jpeg` | JPEG format support (default) |
 | `png` | PNG format support |
 | `bmff` | HEIC/HEIF/AVIF/MP4/MOV support |
+| `pdf` | Read-only PDF XMP/C2PA extraction (strict subset; no extra dependencies) |
 | `xmp` | XMP parsing with MiniXmp |
 | `exif` | EXIF/thumbnail extraction |
 | `all-formats` | All format handlers |
 | `test-utils` | Test fixtures and utilities |
+
+### PDF (read-only)
+
+Enable `pdf` (also included in `all-formats`) and use `Asset::open`,
+`asset.xmp()`, and `asset.jumbf()` as above. PDF 1.0-1.7 and 2.0 headers are
+recognized at byte zero. The reader follows classic cross-reference tables and
+incremental `/Prev` chains, resolving the current catalog's `/Metadata` and
+document-level `/AF` C2PA association. It does not scan page data or search for
+metadata markers. Unreferenced and superseded metadata are not exposed.
+
+Uncompressed metadata streams, including indirect `/Length` values, are exposed
+as byte ranges. Parsing skips their payloads; `xmp()` and `jumbf()` allocate only
+when explicitly called. Existing range/chunk APIs and optional memory mapping
+provide streaming or borrowed access. Memory mapping retains its existing unsafe
+API and file-stability requirements.
+
+This is **not a general PDF parser, renderer, sanitizer, or C2PA validator**:
+
+- Encryption, cross-reference streams, hybrid-reference files, compressed objects,
+  external metadata streams, and filtered/compressed metadata are unsupported.
+  Recognized unsupported features return `Error::UnsupportedFeature`, not an
+  empty metadata result. Page/content streams are neither decoded nor executed.
+- Only document-level C2PA stores associated through the catalog's `/AF` are
+  discovered. Page/object-level manifests and attachment-only stores without
+  that association are outside this first version. C2PA file specifications
+  require `/AFRelationship /C2PA_Manifest` and `/Subtype /application#2Fc2pa`.
+  Multiple document-level C2PA stores are rejected rather than concatenated.
+- Parsing is bounded to 100,000 cross-reference entries, 128 revisions, 4,096
+  object resolutions, nesting/reference depth 32, 100,000 syntax nodes, 4,096-byte
+  tokens/names, and 16 MiB of syntax work. Metadata streams are limited to 256 MiB.
+  The final `startxref` and `%%EOF` must occur within the last 1,024 bytes.
+  Limit violations and malformed/ambiguous structures return errors.
+- All write operations, including in-place updates and writes with no metadata
+  changes, fail explicitly. `write_to` rejects PDF before creating or truncating
+  the output file.
+- Generic hashing/exclusion APIs remain byte-range utilities, **not PDF C2PA
+  validation**. PDF-specific revision/signature hashing rules are not implemented.
+
+Run the synthetic payload-size benchmark with
+`cargo bench --no-default-features --features pdf --bench pdf`.
+It measures parsing separately from metadata materialization.
 
 ## Performance
 

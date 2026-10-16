@@ -18,7 +18,11 @@ This directory contains fuzzing infrastructure for `asset-io` using `cargo-fuzz`
 ## Fuzz Targets
 
 ### `fuzz_parse` - General File Parsing
-Tests the core parsing logic across all supported formats (JPEG, PNG, BMFF containers).
+Tests the core parsing logic across all supported formats (JPEG, PNG, BMFF, RIFF,
+and read-only PDF containers). PDF is enabled through `all-formats`; seed inputs
+should include classic cross-reference tables and document-level metadata.
+The synthetic `tests/fixtures/pdf_metadata.pdf` fixture is a suitable seed:
+`cp tests/fixtures/pdf_metadata.pdf fuzz/corpus/fuzz_parse/` from the repository root.
 This is the most important target as it exercises the attack surface of untrusted file input.
 
 **What it tests:**

@@ -566,6 +566,13 @@ impl Structure {
     ) -> Result<usize> {
         use crate::error::Error;
 
+        #[cfg(feature = "pdf")]
+        if self.container == ContainerKind::Pdf {
+            return Err(Error::UnsupportedFeature(
+                crate::containers::pdf_io::READ_ONLY,
+            ));
+        }
+
         // PNG requires special handling for CRC recalculation
         #[cfg(feature = "png")]
         if self.container == ContainerKind::Png {

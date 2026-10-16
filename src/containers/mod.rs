@@ -31,6 +31,10 @@ pub enum ContainerKind {
     /// RIFF container (Resource Interchange File Format: WebP, WAV, AVI)
     #[cfg(feature = "riff")]
     Riff,
+
+    /// PDF document (read-only, classic cross-reference tables)
+    #[cfg(feature = "pdf")]
+    Pdf,
 }
 
 /// Trait for container-specific I/O operations
@@ -274,6 +278,9 @@ pub mod bmff_io;
 
 #[cfg(feature = "riff")]
 pub(crate) mod riff_io;
+
+#[cfg(feature = "pdf")]
+pub(crate) mod pdf_io;
 
 // ============================================================================
 // ContainerKind Registration Macro
@@ -575,4 +582,7 @@ register_containers! {
 
     #[cfg(feature = "riff")]
     Riff => riff_io::RiffIO,
+
+    #[cfg(feature = "pdf")]
+    Pdf => pdf_io::PdfIO,
 }

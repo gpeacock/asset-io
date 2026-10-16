@@ -39,13 +39,14 @@ jpeg = ["md5"]
 png = []
 bmff = ["atree"]
 riff = []
+pdf = []
 exif = []
 xmp = ["quick-xml", "md5"]
 memory-mapped = ["memmap2", "fs2"]
 parallel = ["rayon", "sha2"]
-all-formats = ["jpeg", "png", "bmff", "riff"]
+all-formats = ["jpeg", "png", "bmff", "riff", "pdf"]
 
-# Note: At least one format feature (jpeg, png) must be enabled for the library to compile.
+# Note: At least one format feature must be enabled for the library to compile.
 
 # Testing features
 # embed-fixtures: Compile test fixtures into the binary (faster CI, no file I/O)
@@ -80,6 +81,11 @@ name = "safety_test"
 name = "io"
 harness = false
 required-features = ["all-formats", "xmp"]
+
+[[bench]]
+name = "pdf"
+harness = false
+required-features = ["pdf"]
 
 [profile.release]
 opt-level = 3

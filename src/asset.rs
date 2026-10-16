@@ -1271,6 +1271,13 @@ impl<R: Read + Write + Seek> Asset<R> {
     ) -> Result<usize> {
         use crate::{error::Error, segment::SegmentKind};
 
+        #[cfg(feature = "pdf")]
+        if self.structure.container == crate::ContainerKind::Pdf {
+            return Err(Error::UnsupportedFeature(
+                crate::containers::pdf_io::READ_ONLY,
+            ));
+        }
+
         // Find the segment
         let segment_idx = match kind {
             SegmentKind::Jumbf => self.structure.c2pa_jumbf_index(),
@@ -1366,6 +1373,13 @@ impl Asset<File> {
     /// Opens the file with read+write so BMFF can patch chunk offset tables (stco/co64)
     /// after modifying the UUID region.
     pub fn write_to<P: AsRef<Path>>(&mut self, path: P, updates: &Updates) -> Result<Structure> {
+        #[cfg(feature = "pdf")]
+        if self.structure.container == crate::ContainerKind::Pdf {
+            return Err(crate::Error::UnsupportedFeature(
+                crate::containers::pdf_io::READ_ONLY,
+            ));
+        }
+
         use std::fs::OpenOptions;
         let mut output = OpenOptions::new()
             .read(true)

@@ -13,6 +13,9 @@ use crate::containers::ContainerKind;
 /// while others like JFIF typically hold just one (JPEG).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MediaType {
+    #[cfg(feature = "pdf")]
+    /// PDF document
+    Pdf,
     // JFIF container variants
     #[cfg(feature = "jpeg")]
     /// Standard JPEG image
@@ -73,6 +76,8 @@ impl MediaType {
     /// ```
     pub fn all() -> &'static [MediaType] {
         &[
+            #[cfg(feature = "pdf")]
+            MediaType::Pdf,
             #[cfg(feature = "jpeg")]
             MediaType::Jpeg,
             #[cfg(feature = "png")]
@@ -113,6 +118,8 @@ impl MediaType {
     /// ```
     pub fn container(&self) -> ContainerKind {
         match self {
+            #[cfg(feature = "pdf")]
+            MediaType::Pdf => ContainerKind::Pdf,
             #[cfg(feature = "jpeg")]
             MediaType::Jpeg => ContainerKind::Jpeg,
             #[cfg(feature = "png")]
@@ -144,6 +151,8 @@ impl MediaType {
     /// ```
     pub fn to_mime(self) -> &'static str {
         match self {
+            #[cfg(feature = "pdf")]
+            MediaType::Pdf => "application/pdf",
             #[cfg(feature = "jpeg")]
             MediaType::Jpeg => "image/jpeg",
             #[cfg(feature = "png")]
@@ -184,6 +193,8 @@ impl MediaType {
     /// ```
     pub fn to_extension(self) -> &'static str {
         match self {
+            #[cfg(feature = "pdf")]
+            MediaType::Pdf => "pdf",
             #[cfg(feature = "jpeg")]
             MediaType::Jpeg => "jpg",
             #[cfg(feature = "png")]
