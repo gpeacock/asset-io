@@ -425,9 +425,11 @@ impl JpegIO {
                                                     total_size,
                                                 });
                                         }
-                                        #[cfg(feature = "exif")]
-                                        Some(crate::SegmentMetadata::Thumbnail(_)) => {
-                                            // XMP segment shouldn't have thumbnail metadata, but handle gracefully
+                                        #[allow(unreachable_patterns)]
+                                        Some(_) => {
+                                            return Err(Error::InvalidFormat(
+                                                "Unexpected metadata on JPEG XMP segment".into(),
+                                            ));
                                         }
                                     }
                                 }

@@ -170,6 +170,7 @@ dependencies = [
  "c2pa",
  "criterion",
  "env_logger",
+ "flate2",
  "fs2",
  "log",
  "md5",

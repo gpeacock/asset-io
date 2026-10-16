@@ -134,7 +134,7 @@ asset-io = { version = "0.1", features = ["jpeg", "png", "xmp"] }
 | `jpeg` | JPEG format support (default) |
 | `png` | PNG format support |
 | `bmff` | HEIC/HEIF/AVIF/MP4/MOV support |
-| `pdf` | Read-only PDF XMP/C2PA extraction (strict subset; no extra dependencies) |
+| `pdf` | Read-only PDF XMP/C2PA extraction, with optional pure-Rust Flate support |
 | `xmp` | XMP parsing with MiniXmp |
 | `exif` | EXIF/thumbnail extraction |
 | `all-formats` | All format handlers |
@@ -144,21 +144,30 @@ asset-io = { version = "0.1", features = ["jpeg", "png", "xmp"] }
 
 Enable `pdf` (also included in `all-formats`) and use `Asset::open`,
 `asset.xmp()`, and `asset.jumbf()` as above. PDF 1.0-1.7 and 2.0 headers are
-recognized at byte zero. The reader follows classic cross-reference tables and
-incremental `/Prev` chains, resolving the current catalog's `/Metadata` and
-document-level `/AF` C2PA association. It does not scan page data or search for
-metadata markers. Unreferenced and superseded metadata are not exposed.
+recognized at byte zero. The reader follows classic tables, cross-reference
+streams, and incremental `/Prev` chains, resolving the current catalog's
+`/Metadata` and document-level `/AF` C2PA association. Cross-reference streams
+remain compact tables; compressed object streams are decoded on demand, with
+only one object stream cached during parsing. It does not load the document,
+decode page content, or search for metadata markers. Unreferenced and superseded
+metadata are not exposed.
 
-Uncompressed metadata streams, including indirect `/Length` values, are exposed
-as byte ranges. Parsing skips their payloads; `xmp()` and `jumbf()` allocate only
-when explicitly called. Existing range/chunk APIs and optional memory mapping
-provide streaming or borrowed access. Memory mapping retains its existing unsafe
-API and file-stability requirements.
+Metadata streams, including indirect `/Length` values, are exposed as physical
+byte ranges. Parsing skips their payloads; `xmp()` and `jumbf()` allocate only
+when explicitly called, and decode Flate-compressed metadata at that point.
+The `pdf` feature enables `flate2` with its pure-Rust backend (no native zlib).
+FlateDecode and 8-bit single-component PNG predictors are supported.
+
+Existing range/chunk APIs and optional memory mapping provide streaming or
+borrowed access to **physical file bytes**. For compressed metadata these bytes
+are encoded, not decoded XMP/JUMBF; the segment's `PdfFlate` metadata records the
+encoding. Use `xmp()`/`jumbf()` to retrieve decoded payloads. Memory mapping
+retains its existing unsafe API and file-stability requirements.
 
 This is **not a general PDF parser, renderer, sanitizer, or C2PA validator**:
 
-- Encryption, cross-reference streams, hybrid-reference files, compressed objects,
-  external metadata streams, and filtered/compressed metadata are unsupported.
+- Encryption, hybrid-reference files, external metadata streams, other filter
+  types/chains, and other predictor layouts remain unsupported.
   Recognized unsupported features return `Error::UnsupportedFeature`, not an
   empty metadata result. Page/content streams are neither decoded nor executed.
 - Only document-level C2PA stores associated through the catalog's `/AF` are
@@ -166,11 +175,27 @@ This is **not a general PDF parser, renderer, sanitizer, or C2PA validator**:
   that association are outside this first version. C2PA file specifications
   require `/AFRelationship /C2PA_Manifest` and `/Subtype /application#2Fc2pa`.
   Multiple document-level C2PA stores are rejected rather than concatenated.
-- Parsing is bounded to 100,000 cross-reference entries, 128 revisions, 4,096
-  object resolutions, nesting/reference depth 32, 100,000 syntax nodes, 4,096-byte
-  tokens/names, and 16 MiB of syntax work. Metadata streams are limited to 256 MiB.
+- Parsing is bounded to 1,000,000 total cross-reference entries (at most 100,000
+  classic entries), 128 revisions, 4,096 object resolutions,
+  nesting/reference depth 32, 100,000 syntax nodes, 4,096-byte
+  tokens/names, and 16 MiB of syntax work.
+  - Structural streams have separate 8 MiB encoded and decoded limits.
+  - Structural decoding has a cumulative 32 MiB input-plus-output work budget;
+    repeatedly decoding different object streams also consumes this budget.
+  - Retained compact cross-reference data is limited to 16 MiB.
+  - Metadata input is limited to 256 MiB; Flate output (including predictor row
+    bytes) is limited to 64 MiB per retrieval. Uncompressed retrieval retains
+    the existing 256 MiB limit. Returning a `Vec` necessarily allocates the
+    requested payload, but never the whole PDF.
+  - Predictor rows are limited to 64 KiB; object streams to 100,000 entries.
+
   The final `startxref` and `%%EOF` must occur within the last 1,024 bytes.
   Limit violations and malformed/ambiguous structures return errors.
+- Checksum errors, incomplete streams, and trailing compressed data are rejected.
+  A narrow compatibility exception permits legacy **cross-reference** streams
+  ending in a zlib sync-flush marker without the final zlib trailer, only when
+  their decoded size exactly matches the declared table layout. This emits a
+  `log::warn!` diagnostic. Object and metadata streams require full termination.
 - All write operations, including in-place updates and writes with no metadata
   changes, fail explicitly. `write_to` rejects PDF before creating or truncating
   the output file.

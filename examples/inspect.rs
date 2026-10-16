@@ -37,7 +37,7 @@ fn main() -> asset_io::Result<()> {
                 std::str::from_utf8(&xmp[..xmp.len().min(100)]).unwrap_or("<binary data>");
             println!("  Preview: {}...", preview);
         }
-        None => {}
+        None => println!("\nNo XMP metadata found."),
     }
 
     // Check for JUMBF (loads and assembles only if present)
@@ -45,7 +45,7 @@ fn main() -> asset_io::Result<()> {
         Some(jumbf) => {
             println!("\n✓ Found JUMBF data ({} bytes)", jumbf.len());
         }
-        None => {}
+        None => println!("\nNo document-level JUMBF/C2PA data found."),
     }
 
     // Check for EXIF metadata

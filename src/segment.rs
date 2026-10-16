@@ -131,6 +131,14 @@ pub enum ExclusionMode {
 /// reassembly or interpretation of multi-part segments.
 #[derive(Debug, Clone)]
 pub enum SegmentMetadata {
+    /// PDF Flate-encoded payload. Physical ranges still address encoded file bytes.
+    #[cfg(feature = "pdf")]
+    PdfFlate {
+        /// PDF predictor (1 or PNG predictors 10-15).
+        predictor: u8,
+        /// Bytes in a predictor row (8-bit, single-component data).
+        columns: u32,
+    },
     /// JPEG Extended XMP reassembly information
     ///
     /// JPEG Extended XMP uses a special format where chunks have explicit offsets
@@ -159,7 +167,7 @@ impl SegmentMetadata {
                 chunk_offsets,
                 total_size,
             } => Some((guid.as_str(), chunk_offsets.as_slice(), *total_size)),
-            #[cfg(feature = "exif")]
+            #[allow(unreachable_patterns)]
             _ => None,
         }
     }
