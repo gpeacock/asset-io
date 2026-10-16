@@ -107,7 +107,9 @@ pub use error::{Error, Result};
 pub use processing_writer::{MdatChunk, ProcessChunk, ProcessChunkFn, ReadChunkFn, SimpleChunk};
 #[cfg(feature = "parallel")]
 pub use segment::merkle_root;
-pub use segment::{ByteRange, ChunkSpec, ExclusionMode, ProcessingChunk, Segment, SegmentKind};
+pub use segment::{
+    ByteRange, ChunkSpec, ExclusionMode, ProcessingChunk, Segment, SegmentKind, SegmentMetadata,
+};
 pub use structure::Structure;
 pub use thumbnail::{Thumbnail, ThumbnailKind};
 #[cfg(feature = "exif")]
@@ -119,7 +121,7 @@ pub use xmp::MiniXmp;
 // Internal re-exports
 pub(crate) use containers::{detect_container, get_handler, Handler};
 pub(crate) use media_type::MediaType;
-pub(crate) use segment::{ChunkedSegmentReader, SegmentMetadata};
+pub(crate) use segment::ChunkedSegmentReader;
 pub(crate) use updates::MetadataUpdate;
 
 // Test utilities - only compiled for tests or when explicitly enabled

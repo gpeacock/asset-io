@@ -1,7 +1,7 @@
 #![no_main]
 
+use asset_io::{Asset, ContainerKind, Updates};
 use libfuzzer_sys::fuzz_target;
-use asset_io::{Asset, Updates};
 use std::io::Cursor;
 
 fuzz_target!(|data: &[u8]| {
@@ -26,5 +26,28 @@ fuzz_target!(|data: &[u8]| {
 
         let mut output = Cursor::new(Vec::new());
         let _ = asset.write(&mut output, &Updates::new().remove_xmp());
+
+        if asset.container() == ContainerKind::Pdf {
+            for updates in [
+                Updates::new().set_jumbf(b"manifest".to_vec()),
+                Updates::new().set_xmp(b"<xmp/>".to_vec()).remove_jumbf(),
+                Updates::new().remove_xmp().remove_jumbf(),
+            ] {
+                let mut output = Cursor::new(Vec::new());
+                if let Ok(expected) = asset.write(&mut output, &updates) {
+                    assert!(output.get_ref().starts_with(data));
+                    let actual = Asset::from_source(output).expect("written PDF must reparse");
+                    assert_eq!(expected.total_size, actual.structure().total_size);
+                    let layout = |structure: &asset_io::Structure| {
+                        structure
+                            .segments()
+                            .iter()
+                            .map(|segment| (segment.kind, segment.ranges.clone()))
+                            .collect::<Vec<_>>()
+                    };
+                    assert_eq!(layout(&expected), layout(actual.structure()));
+                }
+            }
+        }
     }
 });

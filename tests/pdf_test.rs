@@ -892,22 +892,20 @@ fn rejects_truncation_and_trailing_garbage_without_panicking() {
 }
 
 #[test]
-fn writes_and_in_place_updates_fail_without_touching_output() {
+fn unregistered_attachment_edits_fail_but_noop_copies_exactly() {
     let mut pdf = metadata_pdf();
     pdf.finish("/Root 1 0 R");
     let original = pdf.bytes.clone();
     let mut asset = Asset::from_source(Cursor::new(pdf.bytes)).unwrap();
     let mut output = Cursor::new(b"unchanged".to_vec());
-    assert!(matches!(
-        asset.write(&mut output, &Updates::new()),
-        Err(Error::UnsupportedFeature(_))
-    ));
-    assert_eq!(output.get_ref(), b"unchanged");
+    asset.write(&mut output, &Updates::new()).unwrap();
+    assert_eq!(output.get_ref(), &original);
+    output = Cursor::new(b"unchanged".to_vec());
     let mut called = false;
     assert!(matches!(
         asset.write_with_processing(
             &mut output,
-            &Updates::new(),
+            &Updates::new().set_jumbf(b"replacement".to_vec()),
             &mut |_: &dyn asset_io::ProcessChunk| {
                 called = true;
                 Ok(())
@@ -928,7 +926,8 @@ fn writes_and_in_place_updates_fail_without_touching_output() {
     ));
     assert_eq!(output.get_ref(), b"unchanged");
     let mut copied = Cursor::new(Vec::new());
-    asset.write(&mut copied, &Updates::new()).unwrap_err();
+    asset.write(&mut copied, &Updates::new()).unwrap();
+    assert_eq!(copied.get_ref(), &original);
     let mut bytes = Vec::new();
     asset
         .read_with_processing(&Updates::new(), &mut |chunk: &[u8]| {
@@ -940,7 +939,7 @@ fn writes_and_in_place_updates_fail_without_touching_output() {
 }
 
 #[test]
-fn write_to_does_not_truncate_or_create_files() {
+fn unsupported_write_to_does_not_truncate_or_create_files() {
     let mut pdf = metadata_pdf();
     pdf.finish("/Root 1 0 R");
     let dir = tempfile::tempdir().unwrap();
@@ -951,12 +950,657 @@ fn write_to_does_not_truncate_or_create_files() {
     std::fs::write(&output, b"unchanged").unwrap();
     let mut asset = Asset::open(input).unwrap();
     assert!(matches!(
-        asset.write_to(&output, &Updates::new()),
+        asset.write_to(&output, &Updates::new().set_jumbf(b"new".to_vec())),
         Err(Error::UnsupportedFeature(_))
     ));
     assert_eq!(std::fs::read(&output).unwrap(), b"unchanged");
-    assert!(asset.write_to(&absent, &Updates::new()).is_err());
+    assert!(asset
+        .write_to(&absent, &Updates::new().remove_jumbf())
+        .is_err());
     assert!(!absent.exists());
+}
+
+fn writable_pdf() -> Pdf {
+    let mut pdf = metadata_pdf();
+    pdf.object(1, 0, b"<< /Type /Catalog /Metadata 2 0 R /AF [4 0 R 6 0 R] /Names << /Unrelated (kept) /EmbeddedFiles << /Names [(credentials) 4 0 R (other.txt) 6 0 R] /Limits [(credentials) (other.txt)] /Custom true >> >> /Unknown [false -1.25 (a\\(b\\)\\053) <00ff>] >>");
+    pdf.object(
+        6,
+        0,
+        b"<< /Type /Filespec /AFRelationship /Data /F (other.txt) /EF << /F 7 0 R >> >>",
+    );
+    pdf.stream(7, "/Type /EmbeddedFile /Length 5", b"other");
+    pdf.object(8, 0, b"<< /Producer (asset-io test) >>");
+    pdf
+}
+
+fn same_layout(expected: &asset_io::Structure, actual: &asset_io::Structure) {
+    assert_eq!(expected.total_size, actual.total_size);
+    let layout = |structure: &asset_io::Structure| {
+        structure
+            .segments()
+            .iter()
+            .map(|segment| {
+                (
+                    segment.kind,
+                    segment.ranges.clone(),
+                    segment.path.clone(),
+                    segment.metadata.is_some(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(layout(expected), layout(actual));
+}
+
+#[test]
+fn incremental_write_combinations_preserve_prefix_and_predict_exact_layout() {
+    for xmp in 0..3 {
+        for jumbf in 0..3 {
+            let mut pdf = writable_pdf();
+            pdf.finish("/Root 1 0 R /ID [<0102> <0304>] /Info 8 0 R /Custom (kept)");
+            let original = pdf.bytes;
+            let mut asset = Asset::from_source(Cursor::new(&original)).unwrap();
+            let mut updates = match xmp {
+                0 => Updates::new(),
+                1 => Updates::new().remove_xmp(),
+                _ => Updates::new().set_xmp(b"<new-xmp/>".to_vec()),
+            };
+            updates = match jumbf {
+                0 => updates,
+                1 => updates.remove_jumbf(),
+                _ => updates.set_jumbf(b"new-manifest".to_vec()),
+            };
+            let mut output = Cursor::new(Vec::new());
+            let predicted = asset.write(&mut output, &updates).unwrap();
+            let bytes = output.into_inner();
+            assert!(bytes.starts_with(&original));
+            let mut reparsed = Asset::from_source(Cursor::new(&bytes)).unwrap();
+            same_layout(&predicted, reparsed.structure());
+            let expected_xmp = [
+                Some(b"<xmp/>".as_slice()),
+                None,
+                Some(b"<new-xmp/>".as_slice()),
+            ][xmp];
+            let expected_jumbf = [
+                Some(b"manifest".as_slice()),
+                None,
+                Some(b"new-manifest".as_slice()),
+            ][jumbf];
+            assert_eq!(reparsed.xmp().unwrap().as_deref(), expected_xmp);
+            assert_eq!(reparsed.jumbf().unwrap().as_deref(), expected_jumbf);
+            if xmp != 0 || jumbf != 0 {
+                let append = &bytes[original.len()..];
+                let text = String::from_utf8_lossy(append);
+                assert!(text.contains("/Unknown [false -1.25 <612862292B> <00FF>"));
+                assert!(text.contains("/ID [<0102> <0304>"));
+                assert!(text.contains("/Info 8 0 R"));
+                assert!(text.contains("/Custom <6B657074>"));
+                if jumbf != 0 {
+                    assert!(text.contains("<6F746865722E747874> 6 0 R"));
+                    assert!(text.contains("/AF [6 0 R"));
+                    assert!(text.contains("/Unrelated <6B657074>"));
+                    assert!(text.contains("/Custom true"));
+                }
+            } else {
+                assert_eq!(bytes, original);
+            }
+        }
+    }
+}
+
+#[test]
+fn new_metadata_and_multiple_revisions_round_trip_even_empty_payloads() {
+    let mut bytes = document(b"<< /Type /Catalog >>", "");
+    for data in [b"first".as_slice(), b"second".as_slice(), b"".as_slice()] {
+        let mut asset = Asset::from_source(Cursor::new(&bytes)).unwrap();
+        let mut output = Cursor::new(Vec::new());
+        let structure = asset
+            .write(
+                &mut output,
+                &Updates::new()
+                    .set_xmp(data.to_vec())
+                    .set_jumbf(data.to_vec()),
+            )
+            .unwrap();
+        assert!(output.get_ref().starts_with(&bytes));
+        bytes = output.into_inner();
+        let mut asset = Asset::from_source(Cursor::new(&bytes)).unwrap();
+        same_layout(&structure, asset.structure());
+        assert_eq!(asset.xmp().unwrap().as_deref(), Some(data));
+        assert_eq!(asset.jumbf().unwrap().as_deref(), Some(data));
+    }
+    let mut asset = Asset::from_source(Cursor::new(&bytes)).unwrap();
+    let mut output = Cursor::new(Vec::new());
+    let structure = asset
+        .write(&mut output, &Updates::new().remove_xmp().remove_jumbf())
+        .unwrap();
+    assert!(output.get_ref().starts_with(&bytes));
+    let mut asset = Asset::from_source(output).unwrap();
+    same_layout(&structure, asset.structure());
+    assert!(asset.xmp().unwrap().is_none());
+    assert!(asset.jumbf().unwrap().is_none());
+}
+
+#[test]
+fn writer_accepts_compressed_catalog_and_keeps_or_replaces_flate_metadata() {
+    for replace in [false, true] {
+        let mut pdf = Pdf::new();
+        let catalog = b"1 0 << /Type /Catalog /Metadata 2 0 R /Unknown (preserved) >>";
+        let encoded = deflate(catalog);
+        pdf.stream(
+            3,
+            &format!(
+                "/Type /ObjStm /N 1 /First 4 /Filter /FlateDecode /Length {}",
+                encoded.len()
+            ),
+            &encoded,
+        );
+        let xmp = deflate(b"compressed-xmp");
+        pdf.stream(
+            2,
+            &format!(
+                "/Type /Metadata /Subtype /XML /Filter /FlateDecode /Length {}",
+                xmp.len()
+            ),
+            &xmp,
+        );
+        pdf.finish_stream("/Root 1 0 R", &[(1, 3, 0)], true, false);
+        let original = pdf.bytes;
+        let mut asset = Asset::from_source(Cursor::new(&original)).unwrap();
+        let updates = Updates::new().set_jumbf(b"new-manifest".to_vec());
+        let updates = if replace {
+            updates.set_xmp(b"plain-xmp".to_vec())
+        } else {
+            updates
+        };
+        let mut output = Cursor::new(Vec::new());
+        let predicted = asset.write(&mut output, &updates).unwrap();
+        assert!(output.get_ref().starts_with(&original));
+        let mut reparsed = Asset::from_source(output).unwrap();
+        same_layout(&predicted, reparsed.structure());
+        assert_eq!(
+            reparsed.xmp().unwrap().unwrap(),
+            if replace {
+                b"plain-xmp".as_slice()
+            } else {
+                b"compressed-xmp".as_slice()
+            }
+        );
+        assert_eq!(reparsed.jumbf().unwrap().unwrap(), b"new-manifest");
+    }
+}
+
+#[test]
+fn write_processing_matches_final_ranges_including_historical_payloads() {
+    for mode in [ExclusionMode::DataOnly, ExclusionMode::EntireSegment] {
+        for size in [1, 7, 65536, usize::MAX] {
+            let mut pdf = writable_pdf();
+            pdf.finish("/Root 1 0 R");
+            let mut asset = Asset::from_source(Cursor::new(pdf.bytes)).unwrap();
+            let updates = Updates::new()
+                .set_jumbf(b"new-manifest".to_vec())
+                .exclude_from_processing(vec![SegmentKind::Jumbf, SegmentKind::Xmp], mode)
+                .with_chunk_size(size);
+            let mut written = Vec::new();
+            let mut boundaries = Vec::new();
+            let mut output = Cursor::new(Vec::new());
+            let structure = asset
+                .write_with_processing(
+                    &mut output,
+                    &updates,
+                    &mut |chunk: &dyn asset_io::ProcessChunk| {
+                        assert!(chunk.data().len() <= size);
+                        written.extend_from_slice(chunk.data());
+                        if let Some(segment) = chunk.segment() {
+                            boundaries.push((segment.kind, segment.location()));
+                        }
+                        Ok(())
+                    },
+                )
+                .unwrap();
+            let mut reparsed = Asset::from_source(output).unwrap();
+            same_layout(&structure, reparsed.structure());
+            let mut read = Vec::new();
+            reparsed
+                .read_with_processing(&updates, &mut |chunk: &[u8]| {
+                    read.extend_from_slice(chunk);
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(written, read);
+            // Superseded C2PA is ordinary historical data, not silently excluded.
+            assert!(written
+                .windows(b"manifest".len())
+                .any(|bytes| bytes == b"manifest"));
+            assert!(!boundaries.is_empty());
+        }
+    }
+}
+
+#[test]
+fn exact_length_finalization_changes_only_reserved_bytes() {
+    let original = document(b"<< /Type /Catalog >>", "");
+    let mut asset = Asset::from_source(Cursor::new(original)).unwrap();
+    let mut output = Cursor::new(Vec::new());
+    let structure = asset
+        .write(
+            &mut output,
+            &Updates::new()
+                .set_jumbf(vec![0; 32])
+                .set_xmp(b"<xmp/>".to_vec()),
+        )
+        .unwrap();
+    for length in [0, 31, 33] {
+        let before = output.get_ref().clone();
+        assert!(structure
+            .update_segment(&mut output, SegmentKind::Jumbf, vec![1; length])
+            .is_err());
+        assert_eq!(&before, output.get_ref());
+    }
+    let before = output.get_ref().clone();
+    let range = structure.segments()[structure.c2pa_jumbf_index().unwrap()].location();
+    structure
+        .update_segment(&mut output, SegmentKind::Jumbf, vec![7; 32])
+        .unwrap();
+    assert_eq!(
+        &before[..range.offset as usize],
+        &output.get_ref()[..range.offset as usize]
+    );
+    assert_eq!(
+        &before[range.end_offset() as usize..],
+        &output.get_ref()[range.end_offset() as usize..]
+    );
+    let mut asset = Asset::from_source(output).unwrap();
+    assert_eq!(asset.jumbf().unwrap().unwrap(), vec![7; 32]);
+    assert!(asset
+        .update_segment_in_place(SegmentKind::Xmp, b"short".to_vec())
+        .is_err());
+    asset
+        .update_segment_in_place(SegmentKind::Xmp, b"<new/>".to_vec())
+        .unwrap();
+    assert_eq!(asset.xmp().unwrap().unwrap(), b"<new/>");
+}
+
+#[test]
+fn signed_certified_and_unsupported_attachment_trees_reject_before_output() {
+    for catalog in [
+        b"<< /Type /Catalog /Perms << /DocMDP 2 0 R >> >>".as_slice(),
+        b"<< /Type /Catalog /AcroForm << /Fields [<< /FT /Sig /V << /Type /Sig >> >>] >> >>",
+        b"<< /Type /Catalog /Names << /EmbeddedFiles << /Kids [2 0 R] >> >> >>",
+        b"<< /Type /Catalog /Names << /EmbeddedFiles << /Names [(Content Credentials) 2 0 R] >> >> >>",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("output.pdf");
+        std::fs::write(&path, b"unchanged").unwrap();
+        let input = dir.path().join("input.pdf");
+        std::fs::write(&input, document(catalog, "")).unwrap();
+        let mut asset = Asset::open(&input).unwrap();
+        let updates = Updates::new().set_jumbf(b"new".to_vec());
+        let mut output = Cursor::new(b"unchanged".to_vec());
+        let mut called = false;
+        assert!(asset.write_with_processing(&mut output, &updates, &mut |_: &dyn asset_io::ProcessChunk| { called = true; Ok(()) }).is_err());
+        assert!(!called);
+        assert_eq!(output.get_ref(), b"unchanged");
+        assert!(asset.write_to(&path, &updates).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"unchanged");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
+    }
+}
+
+#[test]
+fn write_to_safely_replaces_source_path_or_hard_link_and_cleans_temporary_file() {
+    for hard_link in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("input.pdf");
+        let original = document(b"<< /Type /Catalog >>", "");
+        std::fs::write(&path, &original).unwrap();
+        let output = if hard_link {
+            let link = dir.path().join("linked.pdf");
+            std::fs::hard_link(&path, &link).unwrap();
+            link
+        } else {
+            path.clone()
+        };
+        let mut asset = Asset::open(&path).unwrap();
+        let predicted = asset
+            .write_to(&output, &Updates::new().set_jumbf(b"new-manifest".to_vec()))
+            .unwrap();
+        assert!(std::fs::read(&output).unwrap().starts_with(&original));
+        let mut asset = Asset::open(&output).unwrap();
+        same_layout(&predicted, asset.structure());
+        assert_eq!(asset.jumbf().unwrap().unwrap(), b"new-manifest");
+        assert_eq!(
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            if hard_link { 2 } else { 1 }
+        );
+        if hard_link {
+            assert_eq!(std::fs::read(&path).unwrap(), original);
+        }
+    }
+}
+
+fn form_pdf(form: &[u8], fields: &[(u32, &[u8])], compressed: bool) -> Vec<u8> {
+    let mut pdf = Pdf::new();
+    pdf.object(1, 0, b"<< /Type /Catalog /AcroForm 2 0 R >>");
+    pdf.object(2, 0, form);
+    for &(id, body) in fields {
+        pdf.object(id, 0, body);
+    }
+    if compressed {
+        let mut header = Vec::new();
+        let mut body = Vec::new();
+        for &(id, value) in fields {
+            header.extend_from_slice(format!("{id} {} ", body.len()).as_bytes());
+            body.extend_from_slice(value);
+            body.push(b' ');
+        }
+        let first = header.len();
+        header.extend_from_slice(&body);
+        let encoded = deflate(&header);
+        let container = pdf.highest_id + 1;
+        pdf.stream(
+            container,
+            &format!(
+                "/Type /ObjStm /N {} /First {first} /Filter /FlateDecode /Length {}",
+                fields.len(),
+                encoded.len()
+            ),
+            &encoded,
+        );
+        let entries: Vec<_> = fields
+            .iter()
+            .enumerate()
+            .map(|(index, &(id, _))| (id, container, index as u16))
+            .collect();
+        pdf.finish_stream("/Root 1 0 R", &entries, false, false);
+    } else {
+        pdf.finish("/Root 1 0 R");
+    }
+    pdf.bytes
+}
+
+#[test]
+fn unsigned_forms_and_empty_signature_fields_are_preserved() {
+    for compressed in [false, true] {
+        for value in [
+            b"<< /Fields 3 0 R /SigFlags 3 >>".as_slice(),
+            b"<< /Fields [4 0 R] >>",
+        ] {
+            let original = form_pdf(
+                value,
+                &[
+                    (3, b"[4 0 R]"),
+                    (4, b"<< /FT /Sig /Kids 5 0 R >>"),
+                    (5, b"[6 0 R 7 0 R]"),
+                    (6, b"<< /Parent 4 0 R /V 8 0 R >>"),
+                    (7, b"<< /Parent 4 0 R /FT /Tx /V (ordinary text) >>"),
+                    (8, b"null"),
+                ],
+                compressed,
+            );
+            let mut asset = Asset::from_source(Cursor::new(&original)).unwrap();
+            let mut output = Cursor::new(Vec::new());
+            let predicted = asset
+                .write(&mut output, &Updates::new().set_jumbf(vec![0; 32]))
+                .unwrap();
+            assert!(output.get_ref().starts_with(&original));
+            predicted
+                .update_segment(&mut output, SegmentKind::Jumbf, vec![1; 32])
+                .unwrap();
+            let mut reparsed = Asset::from_source(output).unwrap();
+            same_layout(&predicted, reparsed.structure());
+            assert_eq!(reparsed.jumbf().unwrap().unwrap(), vec![1; 32]);
+        }
+    }
+    for form in [
+        b"<< /Fields [] >>".as_slice(),
+        b"<< /Fields [<< /FT /Tx /V (hello) >> << /FT /Sig >>] >>",
+    ] {
+        let mut asset = Asset::from_source(Cursor::new(form_pdf(form, &[], false))).unwrap();
+        asset
+            .write(
+                &mut Cursor::new(Vec::new()),
+                &Updates::new().set_xmp(b"<xmp/>".to_vec()),
+            )
+            .unwrap();
+    }
+    let fields = format!("<< /Fields [{}] >>", "<< /FT /Tx >> ".repeat(4096));
+    let mut asset =
+        Asset::from_source(Cursor::new(form_pdf(fields.as_bytes(), &[], false))).unwrap();
+    asset
+        .write(
+            &mut Cursor::new(Vec::new()),
+            &Updates::new().set_xmp(b"ok".to_vec()),
+        )
+        .unwrap();
+}
+
+#[test]
+fn populated_signature_fields_including_inherited_types_block_edits_and_patches() {
+    for compressed in [false, true] {
+        for field in [
+            b"<< /FT /Sig /V << /Type /Sig >> >>".as_slice(),
+            b"<< /FT /Sig /V 7 0 R >>",
+            b"<< /FT /Sig /Kids [5 0 R] >>",
+            b"<< /FT 6 0 R /Kids [5 0 R] >>",
+            b"<< /Kids [<< /FT /Sig /V << /Type /Sig >> >>] >>",
+        ] {
+            let bytes = form_pdf(
+                b"<< /Fields [4 0 R] >>",
+                &[
+                    (4, field),
+                    (5, b"<< /Parent 4 0 R /V 7 0 R >>"),
+                    (6, b"/Sig"),
+                    (7, b"<< /Type /Sig /Contents <0123> >>"),
+                ],
+                compressed,
+            );
+            let mut asset = Asset::from_source(Cursor::new(bytes)).unwrap();
+            let mut output = Cursor::new(b"unchanged".to_vec());
+            let error = asset
+                .write(&mut output, &Updates::new().set_jumbf(vec![0; 32]))
+                .unwrap_err();
+            assert!(
+                matches!(error, Error::UnsupportedFeature(reason) if reason.contains("populated signature")),
+                "{error}"
+            );
+            assert!(matches!(
+                asset
+                    .structure()
+                    .update_segment(&mut output, SegmentKind::Jumbf, vec![0; 32]),
+                Err(Error::UnsupportedFeature(_))
+            ));
+            assert_eq!(output.get_ref(), b"unchanged");
+        }
+    }
+}
+
+#[test]
+fn malformed_cyclic_and_deep_forms_block_edits_without_blocking_reads() {
+    let mut cases = vec![
+        form_pdf(b"<< >>", &[], false),
+        form_pdf(b"<< /Fields null >>", &[], false),
+        form_pdf(b"<< /Fields [4 0 R] >>", &[(4, b"<< /FT 10 >>")], false),
+        form_pdf(
+            b"<< /Fields [4 0 R] >>",
+            &[(4, b"<< /Parent 5 0 R >>")],
+            false,
+        ),
+        form_pdf(
+            b"<< /Fields [4 0 R] >>",
+            &[(4, b"<< /Kids [4 0 R] >>")],
+            false,
+        ),
+        form_pdf(
+            b"<< /Fields [4 0 R] >>",
+            &[(4, b"<< /Kids 5 0 R >>"), (5, b"5 0 R")],
+            false,
+        ),
+    ];
+    for depth in [32, 33] {
+        let mut pdf = Pdf::new();
+        pdf.object(
+            1,
+            0,
+            b"<< /Type /Catalog /AcroForm << /Fields [2 0 R] >> >>",
+        );
+        for level in 0..depth {
+            let id = level + 2;
+            let field = if level == depth - 1 {
+                b"<< /FT /Tx >>".to_vec()
+            } else {
+                format!("<< /Kids [{} 0 R] >>", id + 1).into_bytes()
+            };
+            pdf.object(id, 0, &field);
+        }
+        pdf.finish("/Root 1 0 R");
+        if depth == 32 {
+            let mut asset = Asset::from_source(Cursor::new(pdf.bytes)).unwrap();
+            asset
+                .write(
+                    &mut Cursor::new(Vec::new()),
+                    &Updates::new().set_xmp(b"ok".to_vec()),
+                )
+                .unwrap();
+        } else {
+            cases.push(pdf.bytes);
+        }
+    }
+    let count = format!("<< /Fields [{}] >>", "<< /FT /Tx >> ".repeat(4097));
+    cases.push(form_pdf(count.as_bytes(), &[], false));
+    for bytes in cases {
+        let mut asset = Asset::from_source(Cursor::new(bytes)).unwrap();
+        assert!(asset.xmp().unwrap().is_none());
+        let mut output = Cursor::new(b"unchanged".to_vec());
+        assert!(matches!(
+            asset.write(&mut output, &Updates::new().set_xmp(b"new".to_vec())),
+            Err(Error::InvalidFormat(_))
+        ));
+        assert_eq!(output.get_ref(), b"unchanged");
+    }
+    let mut asset = Asset::from_source(Cursor::new(form_pdf(
+        b"<< /Fields [] /XFA [(template) 3 0 R] >>",
+        &[],
+        false,
+    )))
+    .unwrap();
+    assert!(
+        matches!(asset.write(&mut Cursor::new(Vec::new()), &Updates::new().remove_xmp()), Err(Error::UnsupportedFeature(reason)) if reason.contains("XFA"))
+    );
+}
+
+#[test]
+fn write_rejects_revision_overflow_and_zero_chunk_size_without_touching_output() {
+    let mut pdf = Pdf::new();
+    pdf.object(1, 0, b"<< /Type /Catalog >>");
+    let mut previous = pdf.finish("/Root 1 0 R");
+    pdf.entries.clear();
+    for _ in 1..128 {
+        previous = pdf.finish(&format!("/Prev {previous}"));
+    }
+    let mut asset = Asset::from_source(Cursor::new(pdf.bytes)).unwrap();
+    let mut output = Cursor::new(b"unchanged".to_vec());
+    assert!(asset
+        .write(&mut output, &Updates::new().remove_xmp())
+        .is_err());
+    assert_eq!(output.get_ref(), b"unchanged");
+    assert!(asset
+        .write(&mut output, &Updates::new().with_chunk_size(0))
+        .is_err());
+    assert_eq!(output.get_ref(), b"unchanged");
+}
+
+#[test]
+fn writer_propagates_processor_cancellation() {
+    let mut asset = Asset::from_source(Cursor::new(document(b"<< /Type /Catalog >>", ""))).unwrap();
+    assert!(matches!(
+        asset.write_with_processing(
+            &mut Cursor::new(Vec::new()),
+            &Updates::new().set_xmp(b"new".to_vec()),
+            &mut |_: &dyn asset_io::ProcessChunk| Err(Error::UserCanceled)
+        ),
+        Err(Error::UserCanceled)
+    ));
+}
+
+#[test]
+fn write_preflight_enforces_xref_node_and_object_number_limits() {
+    let mut bytes = b"%PDF-1.7\n1 0 obj\n<< /Type /Catalog >>\nendobj\n".to_vec();
+    let offset = bytes.len();
+    bytes.extend_from_slice(b"xref\n0 100000\n0000000000 65535 f\n0000000009 00000 n\n");
+    for _ in 2..100000 {
+        bytes.extend_from_slice(b"0000000000 00000 f\n");
+    }
+    bytes.extend_from_slice(
+        format!("trailer\n<< /Size 100000 /Root 1 0 R >>\nstartxref\n{offset}\n%%EOF\n").as_bytes(),
+    );
+    let nodes = format!("<< /Type /Catalog /Ignored [{}] >>", "null ".repeat(99_990));
+    let mut overflow = Pdf::new();
+    overflow.object(1, 0, b"<< /Type /Catalog >>");
+    overflow.highest_id = u32::MAX - 1;
+    overflow.finish("/Root 1 0 R");
+    for source in [bytes, document(nodes.as_bytes(), ""), overflow.bytes] {
+        let mut asset = Asset::from_source(Cursor::new(source)).unwrap();
+        let mut output = Cursor::new(b"unchanged".to_vec());
+        assert!(asset
+            .write(&mut output, &Updates::new().set_xmp(b"new".to_vec()))
+            .is_err());
+        assert_eq!(output.get_ref(), b"unchanged");
+    }
+}
+
+#[test]
+fn compressed_patches_and_changed_source_length_are_rejected_before_output() {
+    let mut pdf = Pdf::new();
+    pdf.object(1, 0, b"<< /Type /Catalog /Metadata 2 0 R >>");
+    let encoded = deflate(b"<xmp/>");
+    pdf.stream(
+        2,
+        &format!(
+            "/Type /Metadata /Subtype /XML /Filter /FlateDecode /Length {}",
+            encoded.len()
+        ),
+        &encoded,
+    );
+    pdf.finish("/Root 1 0 R");
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("input.pdf");
+    std::fs::write(&input, &pdf.bytes).unwrap();
+    let mut asset = Asset::open(&input).unwrap();
+    let mut output = Cursor::new(b"unchanged".to_vec());
+    assert!(matches!(
+        asset
+            .structure()
+            .update_segment(&mut output, SegmentKind::Xmp, vec![0; encoded.len()]),
+        Err(Error::UnsupportedFeature(_))
+    ));
+    assert_eq!(output.get_ref(), b"unchanged");
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&input)
+        .unwrap()
+        .set_len(10)
+        .unwrap();
+    assert!(asset
+        .write(&mut output, &Updates::new().set_jumbf(b"new".to_vec()))
+        .is_err());
+    assert_eq!(output.get_ref(), b"unchanged");
+}
+
+#[test]
+fn malformed_attachment_tree_does_not_hide_readable_metadata_but_blocks_writing() {
+    let mut pdf = metadata_pdf();
+    pdf.object(1, 0, b"<< /Type /Catalog /Metadata 2 0 R /AF [4 0 R] /Names << /EmbeddedFiles << /Names [(missing-value)] >> >> >>");
+    pdf.finish("/Root 1 0 R");
+    let mut asset = Asset::from_source(Cursor::new(pdf.bytes)).unwrap();
+    assert_eq!(asset.jumbf().unwrap().unwrap(), b"manifest");
+    assert_eq!(asset.xmp().unwrap().unwrap(), b"<xmp/>");
+    let mut output = Cursor::new(b"unchanged".to_vec());
+    assert!(matches!(
+        asset.write(&mut output, &Updates::new().remove_jumbf()),
+        Err(Error::InvalidFormat(_))
+    ));
+    assert_eq!(output.get_ref(), b"unchanged");
 }
 
 struct Counted<R> {

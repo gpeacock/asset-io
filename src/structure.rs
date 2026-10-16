@@ -29,6 +29,9 @@ pub struct Structure {
     /// Total asset size
     pub total_size: u64,
 
+    /// Opaque container-owned context used for layout planning.
+    pub(crate) metadata: Option<crate::SegmentMetadata>,
+
     /// Quick lookup: index of XMP segment (if any)
     xmp_index: Option<usize>,
 
@@ -48,6 +51,7 @@ impl Structure {
             container,
             media_type,
             total_size: 0,
+            metadata: None,
             xmp_index: None,
             jumbf_indices: Vec::new(),
             #[cfg(feature = "memory-mapped")]
@@ -513,6 +517,8 @@ impl Structure {
     ///
     /// The new data must fit within the existing segment's capacity. If smaller,
     /// it will be zero-padded to maintain file structure.
+    /// PDF instead requires an exact-length, uncompressed payload and never pads.
+    /// PDF permissions, populated signature fields, and XFA forms block writing.
     ///
     /// # Arguments
     /// - `writer`: An open, seekable writer with the written file
@@ -568,9 +574,7 @@ impl Structure {
 
         #[cfg(feature = "pdf")]
         if self.container == ContainerKind::Pdf {
-            return Err(Error::UnsupportedFeature(
-                crate::containers::pdf_io::READ_ONLY,
-            ));
+            return crate::containers::pdf_io::patch(self, writer, kind, &data);
         }
 
         // PNG requires special handling for CRC recalculation

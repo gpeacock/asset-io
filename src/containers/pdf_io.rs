@@ -1,4 +1,9 @@
-//! Bounded, read-only PDF metadata access with lazy payload decoding.
+//! Bounded PDF metadata access with lazy decoding and incremental revisions.
+
+#[path = "pdf_write.rs"]
+mod incremental;
+pub(crate) use incremental::patch;
+pub(crate) use incremental::write_path;
 
 use super::{ContainerIO, ContainerKind};
 use crate::{ByteRange, Error, MediaType, Result, Segment, SegmentKind, Structure, Updates};
@@ -16,7 +21,6 @@ const MAX_STRUCTURAL_STREAM: usize = 8 * 1024 * 1024;
 const MAX_DECODE_WORK: usize = 32 * 1024 * 1024;
 const MAX_XREF_STORAGE: usize = 16 * 1024 * 1024;
 const MAX_DECODED_METADATA: usize = 64 * 1024 * 1024;
-pub(crate) const READ_ONLY: &str = "PDF is read-only";
 
 fn invalid(message: &str) -> Error {
     Error::InvalidFormat(format!("PDF: {message}"))
@@ -25,7 +29,14 @@ fn invalid(message: &str) -> Error {
 type Dictionary = BTreeMap<Vec<u8>, Value>;
 type Reference = (u32, u16);
 
-#[derive(Debug)]
+struct CatalogMetadata {
+    catalog: Dictionary,
+    associated: Vec<Value>,
+    active: Option<BTreeSet<Reference>>,
+    ranges: Vec<(ByteRange, SegmentKind, Option<Decode>)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Value {
     Integer(u64),
     Reference(Reference),
@@ -33,7 +44,8 @@ enum Value {
     Dictionary(Dictionary),
     Array(Vec<Value>),
     Null,
-    Other,
+    Bytes(Vec<u8>),
+    Scalar(Vec<u8>),
 }
 
 impl Value {
@@ -385,6 +397,8 @@ struct Parser<R> {
     decoding_left: usize,
     resolving: BTreeSet<Reference>,
     object_stream: Option<ObjectStream>,
+    trailer: Dictionary,
+    next_id: u32,
 }
 
 impl<R: Read + Seek> Parser<R> {
@@ -399,6 +413,8 @@ impl<R: Read + Seek> Parser<R> {
             decoding_left: MAX_DECODE_WORK,
             resolving: BTreeSet::new(),
             object_stream: None,
+            trailer: Dictionary::new(),
+            next_id: 0,
         }
     }
 
@@ -526,16 +542,26 @@ impl<R: Read + Seek> Parser<R> {
             b'<' => {
                 self.byte()?;
                 if self.peek()? != Some(b'<') {
+                    let mut bytes = Vec::new();
+                    let mut high = None;
                     loop {
                         let byte = self.byte()?;
                         if byte == b'>' {
                             break;
                         }
                         if !whitespace(byte) {
-                            hex(byte)?;
+                            let digit = hex(byte)?;
+                            if let Some(first) = high.take() {
+                                bytes.push(first * 16 + digit);
+                            } else {
+                                high = Some(digit);
+                            }
                         }
                     }
-                    return Ok(Value::Other);
+                    if let Some(first) = high {
+                        bytes.push(first * 16);
+                    }
+                    return Ok(Value::Bytes(bytes));
                 }
                 self.byte()?;
                 let mut dict = Dictionary::new();
@@ -561,22 +587,62 @@ impl<R: Read + Seek> Parser<R> {
             b'(' => {
                 self.byte()?;
                 let mut nesting = 1;
+                let mut bytes = Vec::new();
                 while nesting != 0 {
-                    match self.byte()? {
+                    let byte = self.byte()?;
+                    match byte {
                         b'\\' => {
-                            self.byte()?;
+                            let escaped = self.byte()?;
+                            match escaped {
+                                b'n' => bytes.push(b'\n'),
+                                b'r' => bytes.push(b'\r'),
+                                b't' => bytes.push(b'\t'),
+                                b'b' => bytes.push(8),
+                                b'f' => bytes.push(12),
+                                b'\n' => {}
+                                b'\r' => {
+                                    if self.peek()? == Some(b'\n') {
+                                        self.byte()?;
+                                    }
+                                }
+                                b'0'..=b'7' => {
+                                    let mut value = u16::from(escaped - b'0');
+                                    for _ in 0..2 {
+                                        if let Some(next @ b'0'..=b'7') = self.peek()? {
+                                            self.byte()?;
+                                            value = value * 8 + u16::from(next - b'0');
+                                        } else {
+                                            break;
+                                        }
+                                    }
+                                    bytes.push(value as u8);
+                                }
+                                other => bytes.push(other),
+                            }
                         }
                         b'(' => {
                             nesting += 1;
                             if nesting > MAX_DEPTH {
                                 return Err(invalid("string nesting limit exceeded"));
                             }
+                            bytes.push(byte);
                         }
-                        b')' => nesting -= 1,
-                        _ => {}
+                        b')' => {
+                            nesting -= 1;
+                            if nesting != 0 {
+                                bytes.push(byte);
+                            }
+                        }
+                        b'\r' => {
+                            if self.peek()? == Some(b'\n') {
+                                self.byte()?;
+                            }
+                            bytes.push(b'\n');
+                        }
+                        _ => bytes.push(byte),
                     }
                 }
-                Ok(Value::Other)
+                Ok(Value::Bytes(bytes))
             }
             _ => {
                 let token = self.token()?;
@@ -584,7 +650,7 @@ impl<R: Read + Seek> Parser<R> {
                     return Ok(Value::Null);
                 }
                 if token == b"true" || token == b"false" {
-                    return Ok(Value::Other);
+                    return Ok(Value::Scalar(token));
                 }
                 let digits = token.strip_prefix(b"+").unwrap_or(&token);
                 if !digits.is_empty() && digits.iter().all(u8::is_ascii_digit) {
@@ -615,7 +681,7 @@ impl<R: Read + Seek> Parser<R> {
                     && digits.iter().all(|b| b.is_ascii_digit() || *b == b'.')
                     && digits.iter().filter(|&&b| b == b'.').count() <= 1
                 {
-                    return Ok(Value::Other);
+                    return Ok(Value::Scalar(token));
                 }
                 Err(invalid("invalid value"))
             }
@@ -786,6 +852,18 @@ impl<R: Read + Seek> Parser<R> {
             let size = required(&mut trailer, b"Size")?.integer()?;
             if size > u64::from(u32::MAX) || highest.is_some_and(|id| u64::from(id) >= size) {
                 return Err(invalid("invalid trailer Size"));
+            }
+            self.next_id = self.next_id.max(size as u32);
+            if self.xrefs.is_empty() {
+                self.trailer = trailer.clone();
+            } else {
+                for key in [b"Info".as_slice(), b"ID"] {
+                    if let Some(value) = trailer.get(key) {
+                        self.trailer
+                            .entry(key.to_vec())
+                            .or_insert_with(|| value.clone());
+                    }
+                }
             }
             if trailer
                 .get(b"Encrypt".as_slice())
@@ -1076,31 +1154,33 @@ impl<R: Read + Seek> Parser<R> {
         Ok((range, decode))
     }
 
-    fn metadata(
-        &mut self,
-        root: Reference,
-    ) -> Result<Vec<(ByteRange, SegmentKind, Option<Decode>)>> {
+    fn metadata(&mut self, root: Reference) -> Result<CatalogMetadata> {
         let catalog_value = self.resolve(Value::Reference(root))?;
-        let mut catalog = catalog_value.dictionary()?;
-        if !required(&mut catalog, b"Type")?.is_name(b"Catalog") {
+        let catalog = catalog_value.dictionary()?;
+        if !catalog
+            .get(b"Type".as_slice())
+            .is_some_and(|value| value.is_name(b"Catalog"))
+        {
             return Err(invalid("Root is not a Catalog"));
         }
         let mut ranges = Vec::new();
-        if let Some(value) = catalog.remove(b"Metadata".as_slice()) {
+        let mut associated = Vec::new();
+        let mut active = Some(BTreeSet::new());
+        if let Some(value) = catalog.get(b"Metadata".as_slice()).cloned() {
             if !matches!(value, Value::Null) {
                 let (range, decode) = self.stream(value, SegmentKind::Xmp)?;
                 ranges.push((range, SegmentKind::Xmp, decode));
             }
         }
-        if let Some(value) = catalog.remove(b"AF".as_slice()) {
-            let values = match self.resolve(value)? {
+        if let Some(value) = catalog.get(b"AF".as_slice()).cloned() {
+            let values = match self.resolve(value.clone())? {
                 Value::Array(values) => values,
                 Value::Null => Vec::new(),
-                value @ Value::Dictionary(_) => vec![value],
+                Value::Dictionary(_) => vec![value],
                 _ => return Err(invalid("invalid Catalog AF")),
             };
-            for value in values {
-                let mut spec = self.resolve(value)?.dictionary()?;
+            for value in &values {
+                let mut spec = self.resolve(value.clone())?.dictionary()?;
                 let Some(relationship) = spec.remove(b"AFRelationship".as_slice()) else {
                     continue;
                 };
@@ -1110,6 +1190,14 @@ impl<R: Read + Seek> Parser<R> {
                 }
                 if !relationship.is_name(b"C2PA_Manifest") {
                     continue;
+                }
+                match value {
+                    Value::Reference(reference) => {
+                        if let Some(active) = &mut active {
+                            active.insert(*reference);
+                        }
+                    }
+                    _ => active = None,
                 }
                 if ranges
                     .iter()
@@ -1135,8 +1223,14 @@ impl<R: Read + Seek> Parser<R> {
                 let (range, decode) = self.stream(stream, SegmentKind::Jumbf)?;
                 ranges.push((range, SegmentKind::Jumbf, decode));
             }
+            associated = values;
         }
-        Ok(ranges)
+        Ok(CatalogMetadata {
+            catalog,
+            associated,
+            active,
+            ranges,
+        })
     }
 }
 
@@ -1177,17 +1271,19 @@ impl PdfIO {
         };
         let segment = &structure.segments[index];
         let range = segment.location();
-        match segment.metadata {
-            Some(crate::SegmentMetadata::PdfFlate { predictor, columns }) => {
+        match &segment.metadata {
+            Some(metadata) => {
+                let config = metadata
+                    .get::<Decode>()
+                    .ok_or_else(|| invalid("unexpected metadata on PDF stream segment"))?;
                 if range.size > crate::segment::MAX_SEGMENT_SIZE {
                     return Err(invalid("encoded metadata size limit exceeded"));
                 }
                 source.seek(SeekFrom::Start(range.offset))?;
                 let data = inflate(source, range.size, MAX_DECODED_METADATA, None)?;
-                Ok(Some(Decode { predictor, columns }.undo_predictor(data)?))
+                Ok(Some(config.undo_predictor(data)?))
             }
             None => structure.read_range(source, range).map(Some),
-            Some(_) => Err(invalid("unexpected metadata on PDF stream segment")),
         }
     }
 }
@@ -1199,13 +1295,10 @@ mod tests {
     #[test]
     fn rejects_foreign_segment_metadata_without_reading_payload() {
         let mut structure = Structure::new(ContainerKind::Pdf, MediaType::Pdf);
-        structure.add_segment(Segment::new(0, 1, SegmentKind::Xmp, None).with_metadata(
-            crate::SegmentMetadata::JpegExtendedXmp {
-                guid: String::new(),
-                chunk_offsets: Vec::new(),
-                total_size: 0,
-            },
-        ));
+        structure.add_segment(
+            Segment::new(0, 1, SegmentKind::Xmp, None)
+                .with_metadata(crate::SegmentMetadata::new("foreign metadata")),
+        );
         let mut source = Cursor::new(b"x");
         let error =
             PdfIO::read_metadata(&structure, &mut source, structure.xmp_index()).unwrap_err();
@@ -1448,10 +1541,20 @@ impl ContainerIO for PdfIO {
         let offset = unsigned(number.trim_ascii())?;
         let mut parser = Parser::new(source, size);
         let root = parser.xrefs(offset)?;
-        let mut metadata = parser.metadata(root)?;
+        let discovered = parser.metadata(root)?;
+        let mut metadata = discovered.ranges;
+        let context = incremental::context(
+            &mut parser,
+            root,
+            offset,
+            discovered.catalog,
+            discovered.associated,
+            discovered.active,
+        )?;
         metadata.sort_by_key(|(range, _, _)| range.offset);
         let mut structure = Structure::new(ContainerKind::Pdf, MediaType::Pdf);
         structure.total_size = size;
+        structure.metadata = Some(crate::SegmentMetadata::new(context));
         structure.add_segment(Segment::new(0, 9, SegmentKind::Header, Some("PDF".into())));
         let mut end = 9;
         for (range, kind, decode) in metadata {
@@ -1473,10 +1576,7 @@ impl ContainerIO for PdfIO {
                 Some(format!("PDF/{}", kind.as_str())),
             );
             if let Some(config) = decode {
-                segment.metadata = Some(crate::SegmentMetadata::PdfFlate {
-                    predictor: config.predictor,
-                    columns: config.columns,
-                });
+                segment.metadata = Some(crate::SegmentMetadata::new(config));
             }
             structure.add_segment(segment);
             end = range.end_offset();
@@ -1489,16 +1589,37 @@ impl ContainerIO for PdfIO {
 
     fn write<R: Read + Seek, W: Read + Write + Seek>(
         &self,
-        _: &Structure,
-        _: &mut R,
-        _: &mut W,
-        _: &Updates,
+        structure: &Structure,
+        source: &mut R,
+        writer: &mut W,
+        updates: &Updates,
     ) -> Result<()> {
-        Err(Error::UnsupportedFeature(READ_ONLY))
+        self.write_with_processor(
+            structure,
+            source,
+            writer,
+            updates,
+            &mut |_: &dyn crate::ProcessChunk| Ok(()),
+        )
     }
 
-    fn calculate_updated_structure(&self, _: &Structure, _: &Updates) -> Result<Structure> {
-        Err(Error::UnsupportedFeature(READ_ONLY))
+    fn calculate_updated_structure(
+        &self,
+        structure: &Structure,
+        updates: &Updates,
+    ) -> Result<Structure> {
+        Ok(incremental::plan(structure, updates)?.structure)
+    }
+
+    fn write_with_processor<R: Read + Seek, W: Read + Write + Seek, F: crate::ProcessChunkFn>(
+        &self,
+        structure: &Structure,
+        source: &mut R,
+        writer: &mut W,
+        updates: &Updates,
+        processor: &mut F,
+    ) -> Result<()> {
+        incremental::write(structure, source, writer, updates, processor)
     }
 
     fn read_xmp<R: Read + Seek>(

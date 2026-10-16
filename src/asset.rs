@@ -1241,6 +1241,8 @@ impl<R: Read + Write + Seek> Asset<R> {
     /// - New data must fit within existing segment capacity
     /// - File must be opened with read+write access
     /// - Data is padded with zeros if smaller than capacity
+    /// - PDF requires exact-length, uncompressed payloads, never pads, and rejects
+    ///   catalog permissions, populated signature fields, and XFA forms
     ///
     /// # Returns
     /// - `Ok(bytes_written)` on success
@@ -1273,9 +1275,18 @@ impl<R: Read + Write + Seek> Asset<R> {
 
         #[cfg(feature = "pdf")]
         if self.structure.container == crate::ContainerKind::Pdf {
-            return Err(Error::UnsupportedFeature(
-                crate::containers::pdf_io::READ_ONLY,
-            ));
+            let written = crate::containers::pdf_io::patch(
+                &self.structure,
+                &mut self.source,
+                kind,
+                &new_data,
+            )?;
+            for segment in &mut self.structure.segments {
+                if segment.kind == kind {
+                    segment.data = crate::segment::LazyData::NotLoaded;
+                }
+            }
+            return Ok(written);
         }
 
         // Find the segment
@@ -1372,12 +1383,19 @@ impl Asset<File> {
     ///
     /// Opens the file with read+write so BMFF can patch chunk offset tables (stco/co64)
     /// after modifying the UUID region.
+    ///
+    /// PDF preflights metadata edits, writes to a private sibling temporary file,
+    /// then atomically replaces the destination pathname on success. This permits
+    /// the source and destination paths to match without truncating the source;
+    /// reopen the asset to read the new revision.
     pub fn write_to<P: AsRef<Path>>(&mut self, path: P, updates: &Updates) -> Result<Structure> {
         #[cfg(feature = "pdf")]
         if self.structure.container == crate::ContainerKind::Pdf {
-            return Err(crate::Error::UnsupportedFeature(
-                crate::containers::pdf_io::READ_ONLY,
-            ));
+            self.handler
+                .calculate_updated_structure(&self.structure, updates)?;
+            return crate::containers::pdf_io::write_path(path.as_ref(), |output| {
+                self.write(output, updates)
+            });
         }
 
         use std::fs::OpenOptions;

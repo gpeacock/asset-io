@@ -32,7 +32,7 @@ pub enum ContainerKind {
     #[cfg(feature = "riff")]
     Riff,
 
-    /// PDF document (read-only, classic cross-reference tables)
+    /// PDF document (bounded metadata access and incremental revisions)
     #[cfg(feature = "pdf")]
     Pdf,
 }

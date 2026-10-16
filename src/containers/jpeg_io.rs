@@ -1,5 +1,18 @@
 //! JPEG container I/O implementation
 
+#[derive(Debug, Clone)]
+struct JpegExtendedXmp {
+    guid: String,
+    chunk_offsets: Vec<u32>,
+    total_size: u32,
+}
+
+impl JpegExtendedXmp {
+    fn parts(&self) -> (&str, &[u32], u32) {
+        (&self.guid, &self.chunk_offsets, self.total_size)
+    }
+}
+
 use super::{ContainerIO, ContainerKind};
 use crate::{
     error::{Error, Result},
@@ -114,7 +127,9 @@ impl JpegIO {
 
         // Check if this has extended XMP metadata
         if let Some(meta) = &segment.metadata {
-            if let Some((guid, chunk_offsets, total_size)) = meta.as_jpeg_extended_xmp() {
+            if let Some((guid, chunk_offsets, total_size)) =
+                meta.get::<JpegExtendedXmp>().map(JpegExtendedXmp::parts)
+            {
                 // JPEG Extended XMP - reassemble from parts
                 return Self::reassemble_extended_xmp(
                     source,
@@ -401,11 +416,19 @@ impl JpegIO {
 
                                     // Update or create metadata
                                     match &mut segment.metadata {
-                                        Some(crate::SegmentMetadata::JpegExtendedXmp {
-                                            guid: existing_guid,
-                                            chunk_offsets,
-                                            total_size: existing_total,
-                                        }) => {
+                                        Some(metadata) => {
+                                            let JpegExtendedXmp {
+                                                guid: existing_guid,
+                                                chunk_offsets,
+                                                total_size: existing_total,
+                                            } = metadata.get_mut::<JpegExtendedXmp>().ok_or_else(
+                                                || {
+                                                    Error::InvalidFormat(
+                                                        "Unexpected metadata on JPEG XMP segment"
+                                                            .into(),
+                                                    )
+                                                },
+                                            )?;
                                             // Validate GUID and total_size match
                                             if existing_guid != &guid {
                                                 // GUID mismatch - this shouldn't happen
@@ -418,17 +441,12 @@ impl JpegIO {
                                         }
                                         None => {
                                             // First extended part - create metadata
-                                            segment.metadata =
-                                                Some(crate::SegmentMetadata::JpegExtendedXmp {
+                                            segment.metadata = Some(crate::SegmentMetadata::new(
+                                                JpegExtendedXmp {
                                                     guid,
                                                     chunk_offsets: vec![chunk_offset],
                                                     total_size,
-                                                });
-                                        }
-                                        #[allow(unreachable_patterns)]
-                                        Some(_) => {
-                                            return Err(Error::InvalidFormat(
-                                                "Unexpected metadata on JPEG XMP segment".into(),
+                                                },
                                             ));
                                         }
                                     }
@@ -489,8 +507,7 @@ impl JpegIO {
                                     Err(_) => None, // Ignore EXIF parsing errors
                                 };
 
-                                let thumbnail_meta =
-                                    thumbnail.map(crate::SegmentMetadata::Thumbnail);
+                                let thumbnail_meta = thumbnail.map(crate::SegmentMetadata::new);
                                 let mut segment = Segment::new(
                                     segment_start,
                                     size + 2,
@@ -765,7 +782,7 @@ impl ContainerIO for JpegIO {
                                 // Handle extended XMP if present
                                 if let Some(meta) = &source_seg.metadata {
                                     if let Some((guid, chunk_offsets, _total_size)) =
-                                        meta.as_jpeg_extended_xmp()
+                                        meta.get::<JpegExtendedXmp>().map(JpegExtendedXmp::parts)
                                     {
                                         // Write main XMP segment
                                         if !source_seg.ranges.is_empty() {
@@ -972,7 +989,7 @@ impl ContainerIO for JpegIO {
                         if let Some(source_seg) = structure.segments.iter().find(|s| s.is_xmp()) {
                             if let Some(meta) = &source_seg.metadata {
                                 if let Some((guid, chunk_offsets, _total_size)) =
-                                    meta.as_jpeg_extended_xmp()
+                                    meta.get::<JpegExtendedXmp>().map(JpegExtendedXmp::parts)
                                 {
                                     if !source_seg.ranges.is_empty() {
                                         pw.write_u8(0xFF)?;

@@ -125,60 +125,70 @@ pub enum ExclusionMode {
     DataOnly,
 }
 
-/// Format-specific metadata for segments
-///
-/// This allows storing format-specific information needed for proper
-/// reassembly or interpretation of multi-part segments.
-#[derive(Debug, Clone)]
-pub enum SegmentMetadata {
-    /// PDF Flate-encoded payload. Physical ranges still address encoded file bytes.
-    #[cfg(feature = "pdf")]
-    PdfFlate {
-        /// PDF predictor (1 or PNG predictors 10-15).
-        predictor: u8,
-        /// Bytes in a predictor row (8-bit, single-component data).
-        columns: u32,
-    },
-    /// JPEG Extended XMP reassembly information
-    ///
-    /// JPEG Extended XMP uses a special format where chunks have explicit offsets
-    /// and need to be reassembled in a specific order (not just concatenated).
-    JpegExtendedXmp {
-        /// GUID identifying this XMP set (all parts share same GUID)
-        guid: String,
-        /// Offset where each chunk belongs in the reassembled XMP
-        /// Indexed by segment index in the segments Vec
-        chunk_offsets: Vec<u32>,
-        /// Total size of the complete extended XMP when reassembled
-        total_size: u32,
-    },
+trait MetadataValue: std::fmt::Debug + Send + Sync {
+    fn clone_box(&self) -> Box<dyn MetadataValue>;
+    fn as_any(&self) -> &dyn std::any::Any;
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
+}
 
-    /// Embedded thumbnail location info (from EXIF or other metadata)
-    #[cfg(feature = "exif")]
-    Thumbnail(crate::thumbnail::EmbeddedThumbnailInfo),
+impl<T: std::any::Any + Clone + std::fmt::Debug + Send + Sync> MetadataValue for T {
+    fn clone_box(&self) -> Box<dyn MetadataValue> {
+        Box::new(self.clone())
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+}
+
+/// Opaque, cloneable metadata owned by the producer of a segment.
+///
+/// The common segment model does not enumerate container-specific types.
+#[derive(Debug)]
+pub struct SegmentMetadata(Box<dyn MetadataValue>);
+
+impl Clone for SegmentMetadata {
+    fn clone(&self) -> Self {
+        Self(self.0.as_ref().clone_box())
+    }
 }
 
 impl SegmentMetadata {
-    /// Get JPEG Extended XMP metadata if this is that variant
-    pub fn as_jpeg_extended_xmp(&self) -> Option<(&str, &[u32], u32)> {
-        match self {
-            Self::JpegExtendedXmp {
-                guid,
-                chunk_offsets,
-                total_size,
-            } => Some((guid.as_str(), chunk_offsets.as_slice(), *total_size)),
-            #[allow(unreachable_patterns)]
-            _ => None,
-        }
+    /// Store a typed attachment without copying any segment payload.
+    pub fn new<T: std::any::Any + Clone + std::fmt::Debug + Send + Sync>(value: T) -> Self {
+        Self(Box::new(value))
     }
 
-    /// Get embedded thumbnail location info if this is that variant
-    #[cfg(feature = "exif")]
-    pub(crate) fn as_thumbnail_info(&self) -> Option<&crate::thumbnail::EmbeddedThumbnailInfo> {
-        match self {
-            Self::Thumbnail(info) => Some(info),
-            _ => None,
-        }
+    /// Borrow an attachment if its concrete type matches.
+    pub fn get<T: std::any::Any>(&self) -> Option<&T> {
+        self.0.as_ref().as_any().downcast_ref()
+    }
+
+    /// Mutably borrow an attachment if its concrete type matches.
+    pub fn get_mut<T: std::any::Any>(&mut self) -> Option<&mut T> {
+        self.0.as_mut().as_any_mut().downcast_mut()
+    }
+}
+
+#[cfg(test)]
+mod metadata_tests {
+    use super::*;
+
+    #[test]
+    fn attachments_are_typed_independently_cloned_and_thread_safe() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<SegmentMetadata>();
+        assert_send_sync::<Segment>();
+        let original = SegmentMetadata::new(vec![1u32, 2]);
+        let mut copy = original.clone();
+        copy.get_mut::<Vec<u32>>().unwrap().push(3);
+        assert_eq!(original.get::<Vec<u32>>().unwrap(), &[1, 2]);
+        assert_eq!(copy.get::<Vec<u32>>().unwrap(), &[1, 2, 3]);
+        assert!(copy.get::<String>().is_none());
+        assert!(copy.get_mut::<String>().is_none());
+        assert!(format!("{copy:?}").contains('3'));
     }
 }
 
@@ -526,7 +536,7 @@ impl Segment {
     /// Get embedded thumbnail location info if this segment has one
     #[cfg(feature = "exif")]
     pub(crate) fn thumbnail_info(&self) -> Option<&crate::thumbnail::EmbeddedThumbnailInfo> {
-        self.metadata.as_ref().and_then(|m| m.as_thumbnail_info())
+        self.metadata.as_ref().and_then(|m| m.get())
     }
 }
 
