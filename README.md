@@ -138,7 +138,46 @@ asset-io = { version = "0.1", features = ["jpeg", "png", "xmp"] }
 | `xmp` | XMP parsing with MiniXmp |
 | `exif` | EXIF/thumbnail extraction |
 | `all-formats` | All format handlers |
+| `futures-io` | Runtime-agnostic async driver (`sans_io::drive_async`) |
 | `test-utils` | Test fixtures and utilities |
+
+### Async / Sans-IO
+
+All operations (parse, hash, write, metadata reads, in-place updates) are implemented
+as sans-IO state machines in `asset_io::sans_io`. A machine never does I/O: each
+`step()` returns a `Read`, `Write` or `Process` request with absolute offsets, and the
+caller serves it with whatever I/O it has (tokio, HTTP range requests, ...). Progress
+is available at any time and dropping a machine cancels it. The blocking `Asset` API is
+a thin driver over the same machines, so results are identical.
+
+```rust,ignore
+use asset_io::sans_io::{self, Step};
+
+let mut parser = sans_io::parse(len);
+loop {
+    match parser.step()? {
+        Step::Read { offset, buf } => {
+            let n = fetch_range(offset, buf).await; // any async I/O
+            parser.filled(n)?;
+        }
+        Step::Done => break,
+        _ => unreachable!(),
+    }
+}
+let structure = parser.finish()?;
+```
+
+With the `futures-io` feature, `sans_io::drive_async` does this loop for
+`futures-io` readers/writers (use `tokio_util::compat` for tokio types).
+
+Machines yield once per buffered request (up to 64 KiB), not per byte, so overhead
+is negligible; with file I/O the machine-based code is at parity with or faster than
+the previous blocking implementation.
+
+Ordering guarantees: write output is always strictly sequential (append-only), and
+hashing (`read_process`) reads are forward-only. Parsing and metadata reads may seek
+backwards (PDF reads its trailer first). BMFF writes patch `stco`/`co64` chunk offsets
+in memory (the `moov` box is limited to 256 MB when offsets change).
 
 ### PDF
 
@@ -200,6 +239,9 @@ cargo run --example update_xmp_field --features jpeg,xmp -- photo.jpg dc:title "
 
 # Update JUMBF in-place
 cargo run --example update_jumbf --features jpeg -- photo.jpg
+
+# Async (tokio): drive_async over tokio files, plus hand-driven range requests
+cargo run --example async_tokio --features all-formats,futures-io -- image.jpg
 
 # Hash performance benchmark
 cargo run --release --example hash_benchmark --features jpeg

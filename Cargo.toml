@@ -25,6 +25,7 @@ rayon = { version = "1.10", optional = true }
 sha2 = { version = "0.10", optional = true }
 c2pa = { version = "0.83.0", optional = true }
 flate2 = { version = "1", optional = true, default-features = false, features = ["rust_backend"] }
+futures-io = { version = "0.3", optional = true }
 
 [dev-dependencies]
 sha2 = "0.10"  # For examples only
@@ -33,6 +34,9 @@ serde_cbor = "0.11"  # For DataHash padding
 criterion = { version = "0.5", features = ["html_reports"] }
 env_logger = "0.11"
 tempfile = "3"
+futures = "0.3"  # Async driver tests
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "time"] }  # Async examples
+tokio-util = { version = "0.7", features = ["compat"] }  # Async examples
 
 [features]
 default = ["jpeg"]
@@ -45,6 +49,8 @@ exif = []
 xmp = ["quick-xml", "md5"]
 memory-mapped = ["memmap2", "fs2"]
 parallel = ["rayon", "sha2"]
+# Runtime-agnostic async driver (`sans_io::drive_async`) over futures-io traits
+futures-io = ["dep:futures-io"]
 all-formats = ["jpeg", "png", "bmff", "riff", "pdf"]
 
 # Note: At least one format feature must be enabled for the library to compile.
@@ -71,12 +77,20 @@ required-features = ["all-formats", "parallel"]
 name = "progress_cancel"
 required-features = ["all-formats"]
 
+[[example]]
+name = "async_tokio"
+required-features = ["all-formats", "futures-io"]
+
 [[test]]
 name = "integration_test"
 required-features = ["test-utils"]
 
 [[test]]
 name = "safety_test"
+
+[[test]]
+name = "async_driver_test"
+required-features = ["all-formats", "futures-io"]
 
 [[bench]]
 name = "io"

@@ -83,6 +83,19 @@
 //! # Ok(())
 //! # }
 //! ```
+//!
+//! # Async and Non-Blocking Use
+//!
+//! Every operation is also available as a sans-IO state machine in [`sans_io`]. A
+//! [`sans_io::Machine`] never performs I/O itself: it yields read, write and processing
+//! requests with absolute offsets, and the caller serves them with any I/O stack (tokio,
+//! async-std, HTTP range requests, ...). State lives inside the machine between steps,
+//! [`sans_io::Machine::progress`] can be queried at any time, and dropping a machine
+//! cancels it. The [`Asset`] API above is a thin blocking driver over the same machines.
+//!
+//! With the `futures-io` feature, `sans_io::drive_async` runs a machine over
+//! `AsyncRead + AsyncSeek` / `AsyncWrite + AsyncSeek` objects (tokio types can be adapted
+//! with `tokio_util::compat`). See `examples/async_tokio.rs`.
 
 mod asset;
 mod containers;

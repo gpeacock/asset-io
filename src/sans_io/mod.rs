@@ -88,10 +88,14 @@
 //! # }
 //! ```
 
+#[cfg(feature = "futures-io")]
+mod async_driver;
 mod driver;
 pub(crate) mod io;
 mod ops;
 
+#[cfg(feature = "futures-io")]
+pub use async_driver::{drive_async, AsyncProcessorFn, AsyncReadSeek, AsyncWriteSeek};
 pub(crate) use driver::drive;
 pub use driver::{drive_sync, ProcessorFn, ReadSeek, WriteSeek};
 pub use ops::*;
