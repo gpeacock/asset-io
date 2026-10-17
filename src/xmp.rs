@@ -338,8 +338,7 @@ fn adjust_packet_padding(xmp: String, target_size: usize) -> String {
         None => return xmp,
     };
     // Find where non-whitespace content ends before the end marker
-    let content_end = xmp[..end_pos]
-        .as_bytes()
+    let content_end = xmp.as_bytes()[..end_pos]
         .iter()
         .rposition(|&b| !b.is_ascii_whitespace())
         .map(|i| i + 1)

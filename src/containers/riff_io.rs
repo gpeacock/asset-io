@@ -30,14 +30,14 @@
 //! - All arithmetic uses checked or saturating operations.
 
 use super::{ContainerIO, ContainerKind};
+use crate::sans_io::io::{PDst, Src};
 use crate::{
     error::{Error, Result},
     segment::{ByteRange, Segment, SegmentKind, MAX_SEGMENT_SIZE},
     structure::Structure,
     MediaType, Updates,
 };
-use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::SeekFrom;
 
 /// Maximum allocation for a single RIFF chunk (256 MB)
 ///
@@ -93,45 +93,31 @@ impl RiffIO {
         8 + Self::padded(data_size)
     }
 
-    /// Write a RIFF chunk: [id:4][size:4 LE][data][pad:0 or 1]
-    fn write_chunk<W: Write>(writer: &mut W, id: &[u8; 4], data: &[u8]) -> Result<()> {
-        writer.write_all(id)?;
-        writer.write_u32::<LittleEndian>(data.len() as u32)?;
-        writer.write_all(data)?;
-        if data.len() % 2 == 1 {
-            writer.write_u8(0)?; // RIFF alignment padding
-        }
-        Ok(())
-    }
-
     /// Parse the RIFF file structure in a single sequential pass
-    fn parse_impl<R: Read + Seek>(&self, source: &mut R) -> Result<Structure> {
+    pub(crate) async fn parse_async(&self, source: &mut Src) -> Result<Structure> {
         source.seek(SeekFrom::Start(0))?;
 
         // Validate RIFF signature
         let mut sig = [0u8; 4];
-        source.read_exact(&mut sig)?;
+        source.read_exact(&mut sig).await?;
         if &sig != b"RIFF" {
             return Err(Error::InvalidFormat("Not a RIFF file".into()));
         }
 
         // Read declared data size (total file - 8 bytes for root chunk header)
-        let riff_data_size = source.read_u32::<LittleEndian>()? as u64;
+        let riff_data_size = source.read_u32_le().await? as u64;
         let declared_end = riff_data_size.saturating_add(8);
 
         // Read format code (bytes 8–11) to determine media type
         let mut format = [0u8; 4];
-        source.read_exact(&mut format)?;
+        source.read_exact(&mut format).await?;
 
         let media_type = Self::detect_media_type(&format);
         let mut structure = Structure::new(ContainerKind::Riff, media_type);
 
         // Clamp against actual file size to handle truncated/malformed files
-        let actual_end = {
-            let pos = source.seek(SeekFrom::End(0))?;
-            source.seek(SeekFrom::Start(12))?;
-            pos.min(declared_end)
-        };
+        let actual_end = source.len().min(declared_end);
+        source.seek(SeekFrom::Start(12))?;
 
         log::debug!(
             "parse: format='{}' declared_end={} actual_end={}",
@@ -153,17 +139,17 @@ impl RiffIO {
         while offset + 8 <= actual_end {
             // Read chunk ID
             let mut chunk_id = [0u8; 4];
-            match source.read_exact(&mut chunk_id) {
+            match source.read_exact(&mut chunk_id).await {
                 Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
-                Err(e) => return Err(e.into()),
+                Err(Error::Io(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                Err(e) => return Err(e),
             }
 
             // Read chunk data size (LE u32)
-            let data_size = match source.read_u32::<LittleEndian>() {
+            let data_size = match source.read_u32_le().await {
                 Ok(s) => s as u64,
-                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
-                Err(e) => return Err(e.into()),
+                Err(Error::Io(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                Err(e) => return Err(e),
             };
 
             let data_offset = offset + 8;
@@ -291,6 +277,150 @@ impl RiffIO {
         Ok(structure)
     }
 
+    pub(crate) async fn read_xmp_async(
+        &self,
+        structure: &Structure,
+        source: &mut Src,
+    ) -> Result<Option<Vec<u8>>> {
+        let Some(idx) = structure.xmp_index() else {
+            return Ok(None);
+        };
+        let location = structure.segments()[idx].location();
+        if location.size > MAX_SEGMENT_SIZE {
+            return Err(Error::InvalidSegment {
+                offset: location.offset,
+                reason: format!(
+                    "XMP chunk too large: {} bytes (max {} MB)",
+                    location.size,
+                    MAX_SEGMENT_SIZE / (1024 * 1024)
+                ),
+            });
+        }
+        source.seek(SeekFrom::Start(location.offset))?;
+        Ok(Some(source.read_vec(location.size as usize).await?))
+    }
+
+    pub(crate) async fn read_jumbf_async(
+        &self,
+        structure: &Structure,
+        source: &mut Src,
+    ) -> Result<Option<Vec<u8>>> {
+        let Some(idx) = structure.c2pa_jumbf_index() else {
+            return Ok(None);
+        };
+        let location = structure.segments()[idx].location();
+        if location.size > MAX_SEGMENT_SIZE {
+            return Err(Error::InvalidSegment {
+                offset: location.offset,
+                reason: format!(
+                    "C2PA chunk too large: {} bytes (max {} MB)",
+                    location.size,
+                    MAX_SEGMENT_SIZE / (1024 * 1024)
+                ),
+            });
+        }
+        source.seek(SeekFrom::Start(location.offset))?;
+        Ok(Some(source.read_vec(location.size as usize).await?))
+    }
+
+    #[cfg(feature = "exif")]
+    pub(crate) async fn read_embedded_thumbnail_info_async(
+        &self,
+        _structure: &Structure,
+        _source: &mut Src,
+    ) -> Result<Option<crate::thumbnail::EmbeddedThumbnailInfo>> {
+        Ok(None)
+    }
+
+    #[cfg(feature = "exif")]
+    pub(crate) async fn read_exif_info_async(
+        &self,
+        _structure: &Structure,
+        _source: &mut Src,
+    ) -> Result<Option<crate::tiff::ExifInfo>> {
+        Ok(None)
+    }
+
+    pub(crate) async fn write_async(
+        &self,
+        structure: &Structure,
+        source: &mut Src,
+        pw: &mut PDst<'_>,
+        updates: &Updates,
+    ) -> Result<()> {
+        use crate::segment::ExclusionMode;
+        use crate::updates::MetadataUpdate;
+
+        let exclude_segments = &updates.processing.exclude_segments;
+        let should_exclude_jumbf = exclude_segments.contains(&SegmentKind::Jumbf);
+        let data_only = updates.processing.exclusion_mode == ExclusionMode::DataOnly;
+        let dest = self.calculate_updated_structure(structure, updates)?;
+        let format = Self::read_format_async(source).await?;
+        let is_webp = &format == WEBP_FORMAT;
+        let adding_xmp = Self::has_xmp_output(structure, updates);
+
+        pw.write_all(b"RIFF").await?;
+        pw.write_u32_le((dest.total_size - 8) as u32).await?;
+        pw.write_all(&format).await?;
+
+        Self::write_other_chunks_async(structure, source, pw, is_webp, adding_xmp).await?;
+
+        match &updates.xmp {
+            MetadataUpdate::Set(xmp_data) => {
+                Self::write_chunk_async(pw, XMP_CHUNK_ID, xmp_data).await?;
+            }
+            MetadataUpdate::Keep => {
+                if let Some(idx) = structure.xmp_index() {
+                    let loc = structure.segments()[idx].location();
+                    if loc.size > MAX_SEGMENT_SIZE {
+                        return Err(Error::InvalidSegment {
+                            offset: loc.offset,
+                            reason: "XMP chunk too large to copy".into(),
+                        });
+                    }
+                    source.seek(SeekFrom::Start(loc.offset))?;
+                    let xmp_data = source.read_vec(loc.size as usize).await?;
+                    Self::write_chunk_async(pw, XMP_CHUNK_ID, &xmp_data).await?;
+                }
+            }
+            MetadataUpdate::Remove => {}
+        }
+
+        match &updates.jumbf {
+            MetadataUpdate::Set(jumbf_data) => {
+                Self::write_c2pa_chunk_with_exclusion_async(
+                    pw,
+                    jumbf_data,
+                    should_exclude_jumbf,
+                    data_only,
+                )
+                .await?;
+            }
+            MetadataUpdate::Keep => {
+                if let Some(idx) = structure.c2pa_jumbf_index() {
+                    let loc = structure.segments()[idx].location();
+                    if loc.size > MAX_SEGMENT_SIZE {
+                        return Err(Error::InvalidSegment {
+                            offset: loc.offset,
+                            reason: "C2PA chunk too large to copy".into(),
+                        });
+                    }
+                    source.seek(SeekFrom::Start(loc.offset))?;
+                    let jumbf_data = source.read_vec(loc.size as usize).await?;
+                    Self::write_c2pa_chunk_with_exclusion_async(
+                        pw,
+                        &jumbf_data,
+                        should_exclude_jumbf,
+                        data_only,
+                    )
+                    .await?;
+                }
+            }
+            MetadataUpdate::Remove => {}
+        }
+        Ok(())
+    }
+
     /// Returns true if the destination will contain XMP
     fn has_xmp_output(source: &Structure, updates: &Updates) -> bool {
         use crate::updates::MetadataUpdate;
@@ -301,58 +431,58 @@ impl RiffIO {
         }
     }
 
-    /// Read the 4-byte RIFF format code from a source stream
-    fn read_format<R: Read + Seek>(source: &mut R) -> Result<[u8; 4]> {
+    /// Read the 4-byte RIFF format code from a source stream.
+    async fn read_format_async(source: &mut Src) -> Result<[u8; 4]> {
         source.seek(SeekFrom::Start(8))?;
         let mut format = [0u8; 4];
-        source.read_exact(&mut format)?;
+        source.read_exact(&mut format).await?;
         Ok(format)
     }
 
-    /// Write the C2PA chunk with proper exclusion handling for ProcessingWriter
-    ///
-    /// Per C2PA spec DataOnly mode: the chunk header (ID + 4-byte size = 8 bytes) is
-    /// included in the hash; only the manifest data (and alignment padding) is excluded.
-    fn write_c2pa_chunk_with_exclusion<W: Write, F>(
-        pw: &mut crate::processing_writer::ProcessingWriter<'_, W, F>,
-        data: &[u8],
-        should_exclude: bool,
-        data_only: bool,
-    ) -> Result<()>
-    where
-        F: crate::ProcessChunkFn,
-    {
-        if should_exclude {
-            if data_only {
-                // Include header in hash, exclude data+padding
-                pw.write_all(C2PA_CHUNK_ID)?;
-                pw.write_u32::<LittleEndian>(data.len() as u32)?;
-                pw.set_exclude_mode(true);
-                pw.write_all(data)?;
-                if data.len() % 2 == 1 {
-                    pw.write_u8(0)?;
-                }
-                pw.set_exclude_mode(false);
-            } else {
-                // Exclude entire chunk
-                pw.set_exclude_mode(true);
-                Self::write_chunk(pw, C2PA_CHUNK_ID, data)?;
-                pw.set_exclude_mode(false);
-            }
-        } else {
-            Self::write_chunk(pw, C2PA_CHUNK_ID, data)?;
+    /// Write a RIFF chunk: [id:4][size:4 LE][data][pad:0 or 1].
+    async fn write_chunk_async(pw: &mut PDst<'_>, id: &[u8; 4], data: &[u8]) -> Result<()> {
+        pw.write_all(id).await?;
+        pw.write_u32_le(data.len() as u32).await?;
+        pw.write_all(data).await?;
+        if data.len() % 2 == 1 {
+            pw.write_u8(0).await?;
         }
         Ok(())
     }
 
-    /// Write all "other" chunks from source, with optional VP8X flag patching
-    ///
-    /// VP8X is a WebP-specific chunk that declares optional feature flags.
-    /// When XMP is being added, bit 2 (0x0004) of the VP8X flags must be set.
-    fn write_other_chunks<R: Read + Seek, W: Write>(
+    /// Write the C2PA chunk with proper exclusion handling for ProcessingWriter.
+    async fn write_c2pa_chunk_with_exclusion_async(
+        pw: &mut PDst<'_>,
+        data: &[u8],
+        should_exclude: bool,
+        data_only: bool,
+    ) -> Result<()> {
+        if should_exclude {
+            if data_only {
+                pw.write_all(C2PA_CHUNK_ID).await?;
+                pw.write_u32_le(data.len() as u32).await?;
+                pw.set_exclude_mode(true);
+                pw.write_all(data).await?;
+                if data.len() % 2 == 1 {
+                    pw.write_u8(0).await?;
+                }
+                pw.set_exclude_mode(false);
+            } else {
+                pw.set_exclude_mode(true);
+                Self::write_chunk_async(pw, C2PA_CHUNK_ID, data).await?;
+                pw.set_exclude_mode(false);
+            }
+        } else {
+            Self::write_chunk_async(pw, C2PA_CHUNK_ID, data).await?;
+        }
+        Ok(())
+    }
+
+    /// Copy non-metadata chunks with the same 8 KiB write granularity as std::io::copy.
+    async fn write_other_chunks_async(
         source_structure: &Structure,
-        source: &mut R,
-        writer: &mut W,
+        source: &mut Src,
+        pw: &mut PDst<'_>,
         is_webp: bool,
         adding_xmp: bool,
     ) -> Result<()> {
@@ -363,6 +493,7 @@ impl RiffIO {
             .count();
         log::debug!("write_other_chunks: {} chunks to copy", other_count);
 
+        let mut buffer = vec![0u8; crate::segment::DEFAULT_CHUNK_SIZE];
         for seg in source_structure.segments() {
             if seg.is_type(SegmentKind::Header) || seg.is_xmp() || seg.is_jumbf() {
                 continue;
@@ -376,25 +507,29 @@ impl RiffIO {
                 location.size
             );
 
-            // Special case: VP8X chunk in WebP when XMP is being added
             if is_webp
                 && adding_xmp
                 && seg.path.as_deref() == Some("VP8X")
                 && location.size == 8 + VP8X_DATA_SIZE
             {
                 source.seek(SeekFrom::Start(location.offset))?;
-                let mut buf = vec![0u8; location.size as usize];
-                source.read_exact(&mut buf)?;
-
-                // Flags are a LE u32 at bytes 8–11 (after the 8-byte chunk header)
+                let mut buf = source.read_vec(location.size as usize).await?;
                 if let Ok(arr) = buf[8..12].try_into() {
                     let flags = u32::from_le_bytes(arr) | VP8X_XMP_FLAG;
                     buf[8..12].copy_from_slice(&flags.to_le_bytes());
                 }
-                writer.write_all(&buf)?;
+                pw.write_all(&buf).await?;
             } else {
                 source.seek(SeekFrom::Start(location.offset))?;
-                let copied = std::io::copy(&mut source.by_ref().take(location.size), writer)?;
+                let mut remaining = location.size;
+                let mut copied = 0u64;
+                while remaining > 0 {
+                    let n = remaining.min(buffer.len() as u64) as usize;
+                    source.read_exact_direct(&mut buffer[..n]).await?;
+                    pw.write_all_split(&buffer[..n], 8192).await?;
+                    remaining -= n as u64;
+                    copied += n as u64;
+                }
                 log::debug!("write_other_chunks: copied {} bytes", copied);
             }
         }
@@ -443,68 +578,6 @@ impl ContainerIO for RiffIO {
         } else {
             None
         }
-    }
-
-    fn parse<R: Read + Seek>(&self, source: &mut R) -> Result<Structure> {
-        self.parse_impl(source)
-    }
-
-    fn read_xmp<R: Read + Seek>(
-        &self,
-        structure: &Structure,
-        source: &mut R,
-    ) -> Result<Option<Vec<u8>>> {
-        let idx = match structure.xmp_index() {
-            Some(i) => i,
-            None => return Ok(None),
-        };
-
-        let location = structure.segments()[idx].location();
-
-        if location.size > MAX_SEGMENT_SIZE {
-            return Err(Error::InvalidSegment {
-                offset: location.offset,
-                reason: format!(
-                    "XMP chunk too large: {} bytes (max {} MB)",
-                    location.size,
-                    MAX_SEGMENT_SIZE / (1024 * 1024)
-                ),
-            });
-        }
-
-        source.seek(SeekFrom::Start(location.offset))?;
-        let mut data = vec![0u8; location.size as usize];
-        source.read_exact(&mut data)?;
-        Ok(Some(data))
-    }
-
-    fn read_jumbf<R: Read + Seek>(
-        &self,
-        structure: &Structure,
-        source: &mut R,
-    ) -> Result<Option<Vec<u8>>> {
-        let idx = match structure.c2pa_jumbf_index() {
-            Some(i) => i,
-            None => return Ok(None),
-        };
-
-        let location = structure.segments()[idx].location();
-
-        if location.size > MAX_SEGMENT_SIZE {
-            return Err(Error::InvalidSegment {
-                offset: location.offset,
-                reason: format!(
-                    "C2PA chunk too large: {} bytes (max {} MB)",
-                    location.size,
-                    MAX_SEGMENT_SIZE / (1024 * 1024)
-                ),
-            });
-        }
-
-        source.seek(SeekFrom::Start(location.offset))?;
-        let mut data = vec![0u8; location.size as usize];
-        source.read_exact(&mut data)?;
-        Ok(Some(data))
     }
 
     fn calculate_updated_structure(
@@ -589,207 +662,6 @@ impl ContainerIO for RiffIO {
         Ok(dest)
     }
 
-    fn write<R: Read + Seek, W: Write>(
-        &self,
-        structure: &Structure,
-        source: &mut R,
-        writer: &mut W,
-        updates: &Updates,
-    ) -> Result<()> {
-        use crate::updates::MetadataUpdate;
-
-        // Compute output structure to determine the correct RIFF size field
-        let dest = self.calculate_updated_structure(structure, updates)?;
-
-        let format = Self::read_format(source)?;
-        let is_webp = &format == WEBP_FORMAT;
-        let adding_xmp = Self::has_xmp_output(structure, updates);
-
-        log::debug!(
-            "write: format='{}' source_segments={} dest_total_size={} is_webp={} adding_xmp={}",
-            String::from_utf8_lossy(&format),
-            structure.segments().len(),
-            dest.total_size,
-            is_webp,
-            adding_xmp
-        );
-
-        // RIFF root header: "RIFF" + (total - 8) + format
-        writer.write_all(b"RIFF")?;
-        writer.write_u32::<LittleEndian>((dest.total_size - 8) as u32)?;
-        writer.write_all(&format)?;
-
-        // Stream all non-metadata chunks in original order
-        Self::write_other_chunks(structure, source, writer, is_webp, adding_xmp)?;
-
-        // Append XMP
-        match &updates.xmp {
-            MetadataUpdate::Set(xmp_data) => {
-                Self::write_chunk(writer, XMP_CHUNK_ID, xmp_data)?;
-            }
-            MetadataUpdate::Keep => {
-                if let Some(idx) = structure.xmp_index() {
-                    let loc = structure.segments()[idx].location();
-                    if loc.size > MAX_SEGMENT_SIZE {
-                        return Err(Error::InvalidSegment {
-                            offset: loc.offset,
-                            reason: "XMP chunk too large to copy".into(),
-                        });
-                    }
-                    source.seek(SeekFrom::Start(loc.offset))?;
-                    let mut xmp_data = vec![0u8; loc.size as usize];
-                    source.read_exact(&mut xmp_data)?;
-                    Self::write_chunk(writer, XMP_CHUNK_ID, &xmp_data)?;
-                }
-            }
-            MetadataUpdate::Remove => {}
-        }
-
-        // Append C2PA manifest
-        match &updates.jumbf {
-            MetadataUpdate::Set(jumbf_data) => {
-                Self::write_chunk(writer, C2PA_CHUNK_ID, jumbf_data)?;
-            }
-            MetadataUpdate::Keep => {
-                if let Some(idx) = structure.c2pa_jumbf_index() {
-                    let loc = structure.segments()[idx].location();
-                    if loc.size > MAX_SEGMENT_SIZE {
-                        return Err(Error::InvalidSegment {
-                            offset: loc.offset,
-                            reason: "C2PA chunk too large to copy".into(),
-                        });
-                    }
-                    source.seek(SeekFrom::Start(loc.offset))?;
-                    let mut jumbf_data = vec![0u8; loc.size as usize];
-                    source.read_exact(&mut jumbf_data)?;
-                    Self::write_chunk(writer, C2PA_CHUNK_ID, &jumbf_data)?;
-                }
-            }
-            MetadataUpdate::Remove => {}
-        }
-
-        Ok(())
-    }
-
-    fn write_with_processor<R: Read + Seek, W: Write, F>(
-        &self,
-        structure: &Structure,
-        source: &mut R,
-        writer: &mut W,
-        updates: &Updates,
-        processor: &mut F,
-    ) -> Result<()>
-    where
-        F: crate::ProcessChunkFn,
-    {
-        use crate::processing_writer::ProcessingWriter;
-        use crate::segment::ExclusionMode;
-        use crate::updates::MetadataUpdate;
-
-        let exclude_segments = &updates.processing.exclude_segments;
-        let exclusion_mode = updates.processing.exclusion_mode;
-        let should_exclude_jumbf = exclude_segments.contains(&SegmentKind::Jumbf);
-        let data_only = exclusion_mode == ExclusionMode::DataOnly;
-
-        let mut pw = ProcessingWriter::new(writer, processor);
-
-        let dest = self.calculate_updated_structure(structure, updates)?;
-        let format = Self::read_format(source)?;
-        let is_webp = &format == WEBP_FORMAT;
-        let adding_xmp = Self::has_xmp_output(structure, updates);
-
-        // RIFF root header (always hashed – changes in total size are part of hash)
-        pw.write_all(b"RIFF")?;
-        pw.write_u32::<LittleEndian>((dest.total_size - 8) as u32)?;
-        pw.write_all(&format)?;
-
-        // Stream all non-metadata chunks through the processor
-        for seg in structure.segments() {
-            if seg.is_type(SegmentKind::Header) || seg.is_xmp() || seg.is_jumbf() {
-                continue;
-            }
-
-            let location = seg.location();
-
-            if is_webp
-                && adding_xmp
-                && seg.path.as_deref() == Some("VP8X")
-                && location.size == 8 + VP8X_DATA_SIZE
-            {
-                // VP8X: load, patch flags, write through processor
-                source.seek(SeekFrom::Start(location.offset))?;
-                let mut buf = vec![0u8; location.size as usize];
-                source.read_exact(&mut buf)?;
-                if let Ok(arr) = buf[8..12].try_into() {
-                    let flags = u32::from_le_bytes(arr) | VP8X_XMP_FLAG;
-                    buf[8..12].copy_from_slice(&flags.to_le_bytes());
-                }
-                pw.write_all(&buf)?;
-            } else {
-                source.seek(SeekFrom::Start(location.offset))?;
-                std::io::copy(&mut source.by_ref().take(location.size), &mut pw)?;
-            }
-        }
-
-        // XMP chunk – not excluded from hash (only C2PA is excluded per C2PA spec)
-        match &updates.xmp {
-            MetadataUpdate::Set(xmp_data) => {
-                Self::write_chunk(&mut pw, XMP_CHUNK_ID, xmp_data)?;
-            }
-            MetadataUpdate::Keep => {
-                if let Some(idx) = structure.xmp_index() {
-                    let loc = structure.segments()[idx].location();
-                    if loc.size > MAX_SEGMENT_SIZE {
-                        return Err(Error::InvalidSegment {
-                            offset: loc.offset,
-                            reason: "XMP chunk too large to copy".into(),
-                        });
-                    }
-                    source.seek(SeekFrom::Start(loc.offset))?;
-                    let mut xmp_data = vec![0u8; loc.size as usize];
-                    source.read_exact(&mut xmp_data)?;
-                    Self::write_chunk(&mut pw, XMP_CHUNK_ID, &xmp_data)?;
-                }
-            }
-            MetadataUpdate::Remove => {}
-        }
-
-        // C2PA chunk – exclusion applied here per DataOnly or EntireSegment mode
-        match &updates.jumbf {
-            MetadataUpdate::Set(jumbf_data) => {
-                Self::write_c2pa_chunk_with_exclusion(
-                    &mut pw,
-                    jumbf_data,
-                    should_exclude_jumbf,
-                    data_only,
-                )?;
-            }
-            MetadataUpdate::Keep => {
-                if let Some(idx) = structure.c2pa_jumbf_index() {
-                    let loc = structure.segments()[idx].location();
-                    if loc.size > MAX_SEGMENT_SIZE {
-                        return Err(Error::InvalidSegment {
-                            offset: loc.offset,
-                            reason: "C2PA chunk too large to copy".into(),
-                        });
-                    }
-                    source.seek(SeekFrom::Start(loc.offset))?;
-                    let mut jumbf_data = vec![0u8; loc.size as usize];
-                    source.read_exact(&mut jumbf_data)?;
-                    Self::write_c2pa_chunk_with_exclusion(
-                        &mut pw,
-                        &jumbf_data,
-                        should_exclude_jumbf,
-                        data_only,
-                    )?;
-                }
-            }
-            MetadataUpdate::Remove => {}
-        }
-
-        Ok(())
-    }
-
     fn exclusion_range_for_segment(structure: &Structure, kind: SegmentKind) -> Option<(u64, u64)> {
         let segment = match kind {
             SegmentKind::Jumbf => structure
@@ -805,32 +677,12 @@ impl ContainerIO for RiffIO {
         let padded_size = Self::padded(loc.size);
         Some((loc.offset, padded_size))
     }
-
-    #[cfg(feature = "exif")]
-    fn read_embedded_thumbnail_info<R: Read + Seek>(
-        &self,
-        _structure: &Structure,
-        _source: &mut R,
-    ) -> Result<Option<crate::thumbnail::EmbeddedThumbnailInfo>> {
-        // RIFF formats (WAV, AVI, WebP) do not embed EXIF thumbnails
-        Ok(None)
-    }
-
-    #[cfg(feature = "exif")]
-    fn read_exif_info<R: Read + Seek>(
-        &self,
-        _structure: &Structure,
-        _source: &mut R,
-    ) -> Result<Option<crate::tiff::ExifInfo>> {
-        // RIFF formats do not use standard EXIF IFD structure
-        Ok(None)
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Cursor;
+    use std::io::{Cursor, Seek};
 
     /// Build a minimal RIFF file with the given format code and chunks
     fn make_riff(format: &[u8; 4], chunks: &[(&[u8; 4], &[u8])]) -> Vec<u8> {

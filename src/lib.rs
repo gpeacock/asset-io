@@ -89,6 +89,7 @@ mod containers;
 mod error;
 mod media_type;
 mod processing_writer;
+pub mod sans_io;
 mod segment;
 mod structure;
 mod thumbnail;
@@ -119,7 +120,6 @@ pub use updates::Updates;
 pub use xmp::MiniXmp;
 
 // Internal re-exports
-pub(crate) use containers::{detect_container, get_handler, Handler};
 pub(crate) use media_type::MediaType;
 pub(crate) use segment::ChunkedSegmentReader;
 pub(crate) use updates::MetadataUpdate;

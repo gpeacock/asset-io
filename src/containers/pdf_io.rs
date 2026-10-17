@@ -2,13 +2,18 @@
 
 #[path = "pdf_write.rs"]
 mod incremental;
-pub(crate) use incremental::patch;
+pub(crate) use incremental::patch_plan;
 pub(crate) use incremental::write_path;
 
 use super::{ContainerIO, ContainerKind};
+use crate::sans_io::io::{PDst, Src};
 use crate::{ByteRange, Error, MediaType, Result, Segment, SegmentKind, Structure, Updates};
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::{BufRead, BufReader, Cursor, Read, Seek, SeekFrom, Write};
+use std::future::Future;
+#[cfg(test)]
+use std::io::{BufRead, BufReader, Cursor};
+use std::io::{SeekFrom, Write};
+use std::pin::Pin;
 
 const MAX_ENTRIES: usize = 1_000_000;
 const MAX_REVISIONS: usize = 128;
@@ -315,7 +320,8 @@ impl Decode {
     }
 }
 
-fn inflate<R: Read>(
+#[cfg(test)]
+fn inflate<R: std::io::Read>(
     source: R,
     length: u64,
     limit: usize,
@@ -387,8 +393,17 @@ fn inflate<R: Read>(
     }
 }
 
-struct Parser<R> {
-    input: BufReader<R>,
+enum Input<'a> {
+    Source(&'a mut Src),
+    Memory(&'a [u8], usize),
+}
+
+struct Parser<'a> {
+    input: Input<'a>,
+    buffer: Vec<u8>,
+    buffer_offset: u64,
+    buffer_pos: usize,
+    buffer_len: usize,
     size: u64,
     budget: u64,
     nodes: usize,
@@ -401,10 +416,15 @@ struct Parser<R> {
     next_id: u32,
 }
 
-impl<R: Read + Seek> Parser<R> {
-    fn new(input: R, size: u64) -> Self {
+impl<'a> Parser<'a> {
+    fn new(input: &'a mut Src, size: u64) -> Self {
+        let position = input.position();
         Self {
-            input: BufReader::new(input),
+            input: Input::Source(input),
+            buffer: vec![0; 8192],
+            buffer_offset: position,
+            buffer_pos: 0,
+            buffer_len: 0,
             size,
             budget: MAX_SYNTAX_BYTES,
             nodes: 0,
@@ -418,49 +438,110 @@ impl<R: Read + Seek> Parser<R> {
         }
     }
 
+    fn memory(input: &'a [u8]) -> Self {
+        Self {
+            input: Input::Memory(input, 0),
+            buffer: vec![0; 8192],
+            buffer_offset: 0,
+            buffer_pos: 0,
+            buffer_len: 0,
+            size: input.len() as u64,
+            budget: MAX_SYNTAX_BYTES,
+            nodes: 0,
+            objects: 0,
+            xrefs: Vec::new(),
+            decoding_left: MAX_DECODE_WORK,
+            resolving: BTreeSet::new(),
+            object_stream: None,
+            trailer: Dictionary::new(),
+            next_id: 0,
+        }
+    }
+
     fn position(&mut self) -> Result<u64> {
-        Ok(self.input.stream_position()?)
+        Ok(self.buffer_offset + self.buffer_pos as u64)
     }
 
     fn seek(&mut self, offset: u64) -> Result<()> {
         if offset > self.size {
             return Err(invalid("offset outside file"));
         }
-        // Retain the buffer for local lexer lookahead.
-        let current = self.position()?;
-        if let Ok(delta) = i64::try_from(i128::from(offset) - i128::from(current)) {
-            self.input.seek_relative(delta)?;
-        } else {
-            self.input.seek(SeekFrom::Start(offset))?;
+        match &mut self.input {
+            Input::Source(source) => {
+                source.seek(SeekFrom::Start(offset))?;
+            }
+            Input::Memory(_, position) => *position = offset as usize,
+        }
+        self.buffer_offset = offset;
+        self.buffer_pos = 0;
+        self.buffer_len = 0;
+        Ok(())
+    }
+
+    async fn peek(&mut self) -> Result<Option<u8>> {
+        if self.buffer_pos == self.buffer_len {
+            self.buffer_offset += self.buffer_len as u64;
+            self.buffer_pos = 0;
+            self.buffer_len = match &mut self.input {
+                Input::Source(source) => source.read_direct(&mut self.buffer).await?,
+                Input::Memory(data, position) => {
+                    let count = self.buffer.len().min(data.len().saturating_sub(*position));
+                    self.buffer[..count].copy_from_slice(&data[*position..*position + count]);
+                    *position += count;
+                    count
+                }
+            };
+        }
+        Ok((self.buffer_pos < self.buffer_len).then(|| self.buffer[self.buffer_pos]))
+    }
+
+    async fn read_exact_direct(&mut self, mut out: &mut [u8]) -> Result<()> {
+        let position = self.position()?;
+        self.seek(position)?;
+        while !out.is_empty() {
+            let n = match &mut self.input {
+                Input::Source(source) => source.read_direct(out).await?,
+                Input::Memory(data, cursor) => {
+                    let n = out.len().min(data.len().saturating_sub(*cursor));
+                    out[..n].copy_from_slice(&data[*cursor..*cursor + n]);
+                    *cursor += n;
+                    n
+                }
+            };
+            if n == 0 {
+                return Err(Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "failed to fill whole buffer",
+                )));
+            }
+            self.buffer_offset += n as u64;
+            out = &mut out[n..];
         }
         Ok(())
     }
 
-    fn peek(&mut self) -> Result<Option<u8>> {
-        Ok(self.input.fill_buf()?.first().copied())
-    }
-
-    fn byte(&mut self) -> Result<u8> {
+    async fn byte(&mut self) -> Result<u8> {
         self.budget = self
             .budget
             .checked_sub(1)
             .ok_or_else(|| invalid("syntax work limit exceeded"))?;
         let byte = self
-            .peek()?
+            .peek()
+            .await?
             .ok_or_else(|| invalid("unexpected end of file"))?;
-        self.input.consume(1);
+        self.buffer_pos += 1;
         Ok(byte)
     }
 
-    fn skip_space(&mut self) -> Result<()> {
+    async fn skip_space(&mut self) -> Result<()> {
         loop {
-            match self.peek()? {
+            match self.peek().await? {
                 Some(byte) if whitespace(byte) => {
-                    self.byte()?;
+                    self.byte().await?;
                 }
                 Some(b'%') => {
-                    while let Some(byte) = self.peek()? {
-                        self.byte()?;
+                    while let Some(byte) = self.peek().await? {
+                        self.byte().await?;
                         if matches!(byte, b'\r' | b'\n') {
                             break;
                         }
@@ -471,17 +552,17 @@ impl<R: Read + Seek> Parser<R> {
         }
     }
 
-    fn token(&mut self) -> Result<Vec<u8>> {
-        self.skip_space()?;
+    async fn token(&mut self) -> Result<Vec<u8>> {
+        self.skip_space().await?;
         let mut token = Vec::new();
-        while let Some(byte) = self.peek()? {
+        while let Some(byte) = self.peek().await? {
             if delimiter(byte) {
                 break;
             }
             if token.len() == MAX_TOKEN {
                 return Err(invalid("token limit exceeded"));
             }
-            token.push(self.byte()?);
+            token.push(self.byte().await?);
         }
         if token.is_empty() {
             return Err(invalid("expected token"));
@@ -489,221 +570,228 @@ impl<R: Read + Seek> Parser<R> {
         Ok(token)
     }
 
-    fn expect(&mut self, expected: &[u8]) -> Result<()> {
-        if self.token()? != expected {
+    async fn expect(&mut self, expected: &[u8]) -> Result<()> {
+        if self.token().await? != expected {
             return Err(invalid("unexpected keyword"));
         }
         Ok(())
     }
 
-    fn number(&mut self) -> Result<u64> {
-        unsigned(&self.token()?)
+    async fn number(&mut self) -> Result<u64> {
+        unsigned(&self.token().await?)
     }
 
-    fn value(&mut self, depth: usize) -> Result<Value> {
-        if depth >= MAX_DEPTH || self.nodes >= MAX_NODES {
-            return Err(invalid("object complexity limit exceeded"));
-        }
-        self.nodes += 1;
-        self.skip_space()?;
-        match self.peek()?.ok_or_else(|| invalid("missing value"))? {
-            b'/' => {
-                self.byte()?;
-                let mut name = Vec::new();
-                while let Some(byte) = self.peek()? {
-                    if delimiter(byte) {
-                        break;
-                    }
-                    if name.len() == MAX_TOKEN {
-                        return Err(invalid("name limit exceeded"));
-                    }
-                    let byte = self.byte()?;
-                    name.push(if byte == b'#' {
-                        (hex(self.byte()?)? << 4) | hex(self.byte()?)?
-                    } else {
-                        byte
-                    });
-                }
-                Ok(Value::Name(name))
+    fn value<'b>(
+        &'b mut self,
+        depth: usize,
+    ) -> Pin<Box<dyn Future<Output = Result<Value>> + Send + 'b>> {
+        Box::pin(async move {
+            if depth >= MAX_DEPTH || self.nodes >= MAX_NODES {
+                return Err(invalid("object complexity limit exceeded"));
             }
-            b'[' => {
-                self.byte()?;
-                let mut values = Vec::new();
-                loop {
-                    self.skip_space()?;
-                    if self.peek()? == Some(b']') {
-                        self.byte()?;
-                        break;
-                    }
-                    values.push(self.value(depth + 1)?);
-                }
-                Ok(Value::Array(values))
-            }
-            b'<' => {
-                self.byte()?;
-                if self.peek()? != Some(b'<') {
-                    let mut bytes = Vec::new();
-                    let mut high = None;
-                    loop {
-                        let byte = self.byte()?;
-                        if byte == b'>' {
+            self.nodes += 1;
+            self.skip_space().await?;
+            match self.peek().await?.ok_or_else(|| invalid("missing value"))? {
+                b'/' => {
+                    self.byte().await?;
+                    let mut name = Vec::new();
+                    while let Some(byte) = self.peek().await? {
+                        if delimiter(byte) {
                             break;
                         }
-                        if !whitespace(byte) {
-                            let digit = hex(byte)?;
-                            if let Some(first) = high.take() {
-                                bytes.push(first * 16 + digit);
-                            } else {
-                                high = Some(digit);
+                        if name.len() == MAX_TOKEN {
+                            return Err(invalid("name limit exceeded"));
+                        }
+                        let byte = self.byte().await?;
+                        name.push(if byte == b'#' {
+                            (hex(self.byte().await?)? << 4) | hex(self.byte().await?)?
+                        } else {
+                            byte
+                        });
+                    }
+                    Ok(Value::Name(name))
+                }
+                b'[' => {
+                    self.byte().await?;
+                    let mut values = Vec::new();
+                    loop {
+                        self.skip_space().await?;
+                        if self.peek().await? == Some(b']') {
+                            self.byte().await?;
+                            break;
+                        }
+                        values.push(self.value(depth + 1).await?);
+                    }
+                    Ok(Value::Array(values))
+                }
+                b'<' => {
+                    self.byte().await?;
+                    if self.peek().await? != Some(b'<') {
+                        let mut bytes = Vec::new();
+                        let mut high = None;
+                        loop {
+                            let byte = self.byte().await?;
+                            if byte == b'>' {
+                                break;
+                            }
+                            if !whitespace(byte) {
+                                let digit = hex(byte)?;
+                                if let Some(first) = high.take() {
+                                    bytes.push(first * 16 + digit);
+                                } else {
+                                    high = Some(digit);
+                                }
                             }
                         }
-                    }
-                    if let Some(first) = high {
-                        bytes.push(first * 16);
-                    }
-                    return Ok(Value::Bytes(bytes));
-                }
-                self.byte()?;
-                let mut dict = Dictionary::new();
-                loop {
-                    self.skip_space()?;
-                    if self.peek()? == Some(b'>') {
-                        self.byte()?;
-                        if self.byte()? != b'>' {
-                            return Err(invalid("unterminated dictionary"));
+                        if let Some(first) = high {
+                            bytes.push(first * 16);
                         }
-                        break;
+                        return Ok(Value::Bytes(bytes));
                     }
-                    let Value::Name(key) = self.value(depth + 1)? else {
-                        return Err(invalid("dictionary key is not a name"));
-                    };
-                    let value = self.value(depth + 1)?;
-                    if dict.insert(key, value).is_some() {
-                        return Err(invalid("duplicate dictionary key"));
+                    self.byte().await?;
+                    let mut dict = Dictionary::new();
+                    loop {
+                        self.skip_space().await?;
+                        if self.peek().await? == Some(b'>') {
+                            self.byte().await?;
+                            if self.byte().await? != b'>' {
+                                return Err(invalid("unterminated dictionary"));
+                            }
+                            break;
+                        }
+                        let Value::Name(key) = self.value(depth + 1).await? else {
+                            return Err(invalid("dictionary key is not a name"));
+                        };
+                        let value = self.value(depth + 1).await?;
+                        if dict.insert(key, value).is_some() {
+                            return Err(invalid("duplicate dictionary key"));
+                        }
                     }
+                    Ok(Value::Dictionary(dict))
                 }
-                Ok(Value::Dictionary(dict))
-            }
-            b'(' => {
-                self.byte()?;
-                let mut nesting = 1;
-                let mut bytes = Vec::new();
-                while nesting != 0 {
-                    let byte = self.byte()?;
-                    match byte {
-                        b'\\' => {
-                            let escaped = self.byte()?;
-                            match escaped {
-                                b'n' => bytes.push(b'\n'),
-                                b'r' => bytes.push(b'\r'),
-                                b't' => bytes.push(b'\t'),
-                                b'b' => bytes.push(8),
-                                b'f' => bytes.push(12),
-                                b'\n' => {}
-                                b'\r' => {
-                                    if self.peek()? == Some(b'\n') {
-                                        self.byte()?;
-                                    }
-                                }
-                                b'0'..=b'7' => {
-                                    let mut value = u16::from(escaped - b'0');
-                                    for _ in 0..2 {
-                                        if let Some(next @ b'0'..=b'7') = self.peek()? {
-                                            self.byte()?;
-                                            value = value * 8 + u16::from(next - b'0');
-                                        } else {
-                                            break;
+                b'(' => {
+                    self.byte().await?;
+                    let mut nesting = 1;
+                    let mut bytes = Vec::new();
+                    while nesting != 0 {
+                        let byte = self.byte().await?;
+                        match byte {
+                            b'\\' => {
+                                let escaped = self.byte().await?;
+                                match escaped {
+                                    b'n' => bytes.push(b'\n'),
+                                    b'r' => bytes.push(b'\r'),
+                                    b't' => bytes.push(b'\t'),
+                                    b'b' => bytes.push(8),
+                                    b'f' => bytes.push(12),
+                                    b'\n' => {}
+                                    b'\r' => {
+                                        if self.peek().await? == Some(b'\n') {
+                                            self.byte().await?;
                                         }
                                     }
-                                    bytes.push(value as u8);
+                                    b'0'..=b'7' => {
+                                        let mut value = u16::from(escaped - b'0');
+                                        for _ in 0..2 {
+                                            if let Some(next @ b'0'..=b'7') = self.peek().await? {
+                                                self.byte().await?;
+                                                value = value * 8 + u16::from(next - b'0');
+                                            } else {
+                                                break;
+                                            }
+                                        }
+                                        bytes.push(value as u8);
+                                    }
+                                    other => bytes.push(other),
                                 }
-                                other => bytes.push(other),
                             }
-                        }
-                        b'(' => {
-                            nesting += 1;
-                            if nesting > MAX_DEPTH {
-                                return Err(invalid("string nesting limit exceeded"));
-                            }
-                            bytes.push(byte);
-                        }
-                        b')' => {
-                            nesting -= 1;
-                            if nesting != 0 {
+                            b'(' => {
+                                nesting += 1;
+                                if nesting > MAX_DEPTH {
+                                    return Err(invalid("string nesting limit exceeded"));
+                                }
                                 bytes.push(byte);
                             }
-                        }
-                        b'\r' => {
-                            if self.peek()? == Some(b'\n') {
-                                self.byte()?;
+                            b')' => {
+                                nesting -= 1;
+                                if nesting != 0 {
+                                    bytes.push(byte);
+                                }
                             }
-                            bytes.push(b'\n');
-                        }
-                        _ => bytes.push(byte),
-                    }
-                }
-                Ok(Value::Bytes(bytes))
-            }
-            _ => {
-                let token = self.token()?;
-                if token == b"null" {
-                    return Ok(Value::Null);
-                }
-                if token == b"true" || token == b"false" {
-                    return Ok(Value::Scalar(token));
-                }
-                let digits = token.strip_prefix(b"+").unwrap_or(&token);
-                if !digits.is_empty() && digits.iter().all(u8::is_ascii_digit) {
-                    let number = unsigned(&token)?;
-                    let end = self.position()?;
-                    self.skip_space()?;
-                    if matches!(self.peek()?, Some(b'0'..=b'9')) {
-                        let generation = self.token()?;
-                        self.skip_space()?;
-                        if generation.iter().all(u8::is_ascii_digit) && self.peek()? == Some(b'R') {
-                            self.expect(b"R")?;
-                            return Ok(Value::Reference((
-                                u32::try_from(number)
-                                    .map_err(|_| invalid("object number overflow"))?,
-                                u16::try_from(unsigned(&generation)?)
-                                    .map_err(|_| invalid("generation overflow"))?,
-                            )));
+                            b'\r' => {
+                                if self.peek().await? == Some(b'\n') {
+                                    self.byte().await?;
+                                }
+                                bytes.push(b'\n');
+                            }
+                            _ => bytes.push(byte),
                         }
                     }
-                    self.seek(end)?;
-                    return Ok(Value::Integer(number));
+                    Ok(Value::Bytes(bytes))
                 }
-                let digits = token
-                    .strip_prefix(b"-")
-                    .or_else(|| token.strip_prefix(b"+"))
-                    .unwrap_or(&token);
-                if digits.iter().any(u8::is_ascii_digit)
-                    && digits.iter().all(|b| b.is_ascii_digit() || *b == b'.')
-                    && digits.iter().filter(|&&b| b == b'.').count() <= 1
-                {
-                    return Ok(Value::Scalar(token));
+                _ => {
+                    let token = self.token().await?;
+                    if token == b"null" {
+                        return Ok(Value::Null);
+                    }
+                    if token == b"true" || token == b"false" {
+                        return Ok(Value::Scalar(token));
+                    }
+                    let digits = token.strip_prefix(b"+").unwrap_or(&token);
+                    if !digits.is_empty() && digits.iter().all(u8::is_ascii_digit) {
+                        let number = unsigned(&token)?;
+                        let end = self.position()?;
+                        self.skip_space().await?;
+                        if matches!(self.peek().await?, Some(b'0'..=b'9')) {
+                            let generation = self.token().await?;
+                            self.skip_space().await?;
+                            if generation.iter().all(u8::is_ascii_digit)
+                                && self.peek().await? == Some(b'R')
+                            {
+                                self.expect(b"R").await?;
+                                return Ok(Value::Reference((
+                                    u32::try_from(number)
+                                        .map_err(|_| invalid("object number overflow"))?,
+                                    u16::try_from(unsigned(&generation)?)
+                                        .map_err(|_| invalid("generation overflow"))?,
+                                )));
+                            }
+                        }
+                        self.seek(end)?;
+                        return Ok(Value::Integer(number));
+                    }
+                    let digits = token
+                        .strip_prefix(b"-")
+                        .or_else(|| token.strip_prefix(b"+"))
+                        .unwrap_or(&token);
+                    if digits.iter().any(u8::is_ascii_digit)
+                        && digits.iter().all(|b| b.is_ascii_digit() || *b == b'.')
+                        && digits.iter().filter(|&&b| b == b'.').count() <= 1
+                    {
+                        return Ok(Value::Scalar(token));
+                    }
+                    Err(invalid("invalid value"))
                 }
-                Err(invalid("invalid value"))
             }
-        }
+        })
     }
 
-    fn xrefs(&mut self, mut offset: u64) -> Result<Reference> {
+    async fn xrefs(&mut self, mut offset: u64) -> Result<Reference> {
         let mut root = None;
         let mut entry_count = 0usize;
         let mut classic_count = 0usize;
         let mut storage = 0usize;
         for _ in 0..MAX_REVISIONS {
             self.seek(offset)?;
-            let (mut trailer, section, highest) = if self.token()? == b"xref" {
+            let (mut trailer, section, highest) = if self.token().await? == b"xref" {
                 let mut entries = BTreeMap::new();
                 loop {
-                    self.skip_space()?;
-                    if self.peek()? == Some(b't') {
+                    self.skip_space().await?;
+                    if self.peek().await? == Some(b't') {
                         break;
                     }
-                    let first = self.number()?;
-                    let count = self.number()?;
+                    let first = self.number().await?;
+                    let count = self.number().await?;
                     let count =
                         usize::try_from(count).map_err(|_| invalid("xref count overflow"))?;
                     entry_count = entry_count
@@ -720,10 +808,10 @@ impl<R: Read + Seek> Parser<R> {
                         .filter(|end| *end <= u64::from(u32::MAX))
                         .ok_or_else(|| invalid("xref object number overflow"))?;
                     for id in first..end {
-                        let object_offset = self.number()?;
-                        let generation = u16::try_from(self.number()?)
+                        let object_offset = self.number().await?;
+                        let generation = u16::try_from(self.number().await?)
                             .map_err(|_| invalid("generation overflow"))?;
-                        let entry = match self.token()?.as_slice() {
+                        let entry = match self.token().await?.as_slice() {
                             b"n" if object_offset < self.size => Entry::Normal {
                                 offset: object_offset,
                                 generation,
@@ -736,15 +824,15 @@ impl<R: Read + Seek> Parser<R> {
                         }
                     }
                 }
-                self.expect(b"trailer")?;
+                self.expect(b"trailer").await?;
                 let highest = entries.last_key_value().map(|(&id, _)| id);
                 (
-                    self.value(0)?.dictionary()?,
+                    self.value(0).await?.dictionary()?,
                     Xrefs::Classic(entries),
                     highest,
                 )
             } else {
-                let object = self.raw_object(offset, None)?;
+                let object = self.raw_object(offset, None).await?;
                 let mut dict = object.value.dictionary()?;
                 if !required(&mut dict, b"Type")?.is_name(b"XRef") {
                     return Err(invalid(
@@ -826,8 +914,9 @@ impl<R: Read + Seek> Parser<R> {
                 } else {
                     decoded_size
                 };
-                let data =
-                    self.structural_stream(object.stream, &mut dict, decode, Some(expected))?;
+                let data = self
+                    .structural_stream(object.stream, &mut dict, decode, Some(expected))
+                    .await?;
                 if data.len() != decoded_size {
                     return Err(invalid("xref decoded length mismatch"));
                 }
@@ -899,25 +988,30 @@ impl<R: Read + Seek> Parser<R> {
         Err(invalid("revision limit exceeded"))
     }
 
-    fn object(&mut self, reference: Reference) -> Result<Object> {
-        self.objects += 1;
-        if self.objects > MAX_OBJECTS {
-            return Err(invalid("object resolution limit exceeded"));
-        }
-        if self.resolving.len() >= MAX_DEPTH || !self.resolving.insert(reference) {
-            return Err(invalid("cyclic or excessively nested object resolution"));
-        }
-        let result = (|| match self.entry(reference.0)? {
-            Entry::Normal { offset, generation } if generation == reference.1 => {
-                self.raw_object(offset, Some(reference))
+    fn object<'b>(
+        &'b mut self,
+        reference: Reference,
+    ) -> Pin<Box<dyn Future<Output = Result<Object>> + Send + 'b>> {
+        Box::pin(async move {
+            self.objects += 1;
+            if self.objects > MAX_OBJECTS {
+                return Err(invalid("object resolution limit exceeded"));
             }
-            Entry::Compressed { container, index } if reference.1 == 0 => {
-                self.compressed_object(reference.0, container, index)
+            if self.resolving.len() >= MAX_DEPTH || !self.resolving.insert(reference) {
+                return Err(invalid("cyclic or excessively nested object resolution"));
             }
-            _ => Err(invalid("stale or free object reference")),
-        })();
-        self.resolving.remove(&reference);
-        result
+            let result = match self.entry(reference.0)? {
+                Entry::Normal { offset, generation } if generation == reference.1 => {
+                    self.raw_object(offset, Some(reference)).await
+                }
+                Entry::Compressed { container, index } if reference.1 == 0 => {
+                    self.compressed_object(reference.0, container, index).await
+                }
+                _ => Err(invalid("stale or free object reference")),
+            };
+            self.resolving.remove(&reference);
+            result
+        })
     }
 
     fn entry(&self, id: u32) -> Result<Entry> {
@@ -929,25 +1023,25 @@ impl<R: Read + Seek> Parser<R> {
         Err(invalid("unresolved object"))
     }
 
-    fn raw_object(&mut self, offset: u64, reference: Option<Reference>) -> Result<Object> {
+    async fn raw_object(&mut self, offset: u64, reference: Option<Reference>) -> Result<Object> {
         self.seek(offset)?;
-        let number = self.number()?;
-        let generation = self.number()?;
+        let number = self.number().await?;
+        let generation = self.number().await?;
         if reference.is_some_and(|r| number != u64::from(r.0) || generation != u64::from(r.1)) {
             return Err(invalid("xref/object identity mismatch"));
         }
-        self.expect(b"obj")?;
-        let value = self.value(0)?;
-        let ending = self.token()?;
+        self.expect(b"obj").await?;
+        let value = self.value(0).await?;
+        let ending = self.token().await?;
         let stream = if ending == b"stream" {
             if !matches!(value, Value::Dictionary(_)) {
                 return Err(invalid("stream without dictionary"));
             }
-            match self.byte()? {
+            match self.byte().await? {
                 b'\n' => {}
                 b'\r' => {
-                    if self.peek()? == Some(b'\n') {
-                        self.byte()?;
+                    if self.peek().await? == Some(b'\n') {
+                        self.byte().await?;
                     }
                 }
                 _ => return Err(invalid("stream keyword requires newline")),
@@ -961,7 +1055,7 @@ impl<R: Read + Seek> Parser<R> {
         Ok(Object { value, stream })
     }
 
-    fn stream_range(
+    async fn stream_range(
         &mut self,
         offset: Option<u64>,
         dict: &mut Dictionary,
@@ -972,26 +1066,26 @@ impl<R: Read + Seek> Parser<R> {
         let length = if direct_length {
             value.integer()?
         } else {
-            self.resolve(value)?.integer()?
+            self.resolve(value).await?.integer()?
         };
         let end = offset
             .checked_add(length)
             .filter(|end| *end < self.size)
             .ok_or_else(|| invalid("stream length outside file"))?;
         self.seek(end)?;
-        self.expect(b"endstream")?;
-        self.expect(b"endobj")?;
+        self.expect(b"endstream").await?;
+        self.expect(b"endobj").await?;
         Ok(ByteRange::new(offset, length))
     }
 
-    fn structural_stream(
+    async fn structural_stream(
         &mut self,
         offset: Option<u64>,
         dict: &mut Dictionary,
         decode: Option<Decode>,
         expected: Option<usize>,
     ) -> Result<Vec<u8>> {
-        let range = self.stream_range(offset, dict, expected.is_some())?;
+        let range = self.stream_range(offset, dict, expected.is_some()).await?;
         let encoded = usize::try_from(range.size).map_err(|_| invalid("stream length overflow"))?;
         if encoded > MAX_STRUCTURAL_STREAM || encoded > self.decoding_left {
             return Err(invalid(
@@ -1003,7 +1097,7 @@ impl<R: Read + Seek> Parser<R> {
         let limit = expected.map_or(limit, |size| size.min(limit));
         self.seek(range.offset)?;
         let data = if let Some(config) = decode {
-            let data = inflate(&mut self.input, range.size, limit, expected)?;
+            let data = inflate_async(self, range.size, limit, expected).await?;
             self.decoding_left -= data.len();
             config.undo_predictor(data)?
         } else {
@@ -1011,14 +1105,14 @@ impl<R: Read + Seek> Parser<R> {
                 return Err(invalid("decoded structural stream work limit exceeded"));
             }
             let mut data = vec![0; encoded];
-            self.input.read_exact(&mut data)?;
+            self.read_exact_direct(&mut data).await?;
             self.decoding_left -= data.len();
             data
         };
         Ok(data)
     }
 
-    fn compressed_object(&mut self, id: u32, container: u32, index: u32) -> Result<Object> {
+    async fn compressed_object(&mut self, id: u32, container: u32, index: u32) -> Result<Object> {
         if self
             .object_stream
             .as_ref()
@@ -1027,7 +1121,7 @@ impl<R: Read + Seek> Parser<R> {
             if !matches!(self.entry(container)?, Entry::Normal { .. }) {
                 return Err(invalid("object stream container is not an ordinary object"));
             }
-            let object = self.object((container, 0))?;
+            let object = self.object((container, 0)).await?;
             let mut dict = object.value.dictionary()?;
             if !required(&mut dict, b"Type")?.is_name(b"ObjStm") {
                 return Err(invalid("compressed object container is not ObjStm"));
@@ -1038,19 +1132,21 @@ impl<R: Read + Seek> Parser<R> {
                 return Err(invalid("object stream entry limit exceeded"));
             }
             let decode = Decode::from_dictionary(&mut dict)?;
-            let data = self.structural_stream(object.stream, &mut dict, decode, None)?;
+            let data = self
+                .structural_stream(object.stream, &mut dict, decode, None)
+                .await?;
             let first = usize::try_from(first)
                 .ok()
                 .filter(|n| *n <= data.len())
                 .ok_or_else(|| invalid("object stream First outside payload"))?;
-            let mut parser = Parser::new(Cursor::new(&data[..first]), first as u64);
+            let mut parser = Parser::memory(&data[..first]);
             parser.budget = self.budget;
             let mut objects = Vec::new();
             let mut ids = BTreeSet::new();
             for _ in 0..count {
-                let object_id = u32::try_from(parser.number()?)
+                let object_id = u32::try_from(parser.number().await?)
                     .map_err(|_| invalid("object number overflow"))?;
-                let offset = usize::try_from(parser.number()?)
+                let offset = usize::try_from(parser.number().await?)
                     .map_err(|_| invalid("object offset overflow"))?;
                 if offset >= data.len() - first
                     || objects
@@ -1064,7 +1160,7 @@ impl<R: Read + Seek> Parser<R> {
                 }
                 objects.push((object_id, offset));
             }
-            parser.skip_space()?;
+            parser.skip_space().await?;
             if parser.position()? != first as u64 {
                 return Err(invalid("object stream header length mismatch"));
             }
@@ -1093,11 +1189,11 @@ impl<R: Read + Seek> Parser<R> {
             .map(|&(_, offset)| offset)
             .unwrap_or(stream.data.len() - stream.first);
         let slice = &stream.data[stream.first + start..stream.first + end];
-        let mut parser = Parser::new(Cursor::new(slice), slice.len() as u64);
+        let mut parser = Parser::memory(slice);
         parser.budget = self.budget;
         parser.nodes = self.nodes;
-        let value = parser.value(0)?;
-        parser.skip_space()?;
+        let value = parser.value(0).await?;
+        parser.skip_space().await?;
         if parser.position()? != slice.len() as u64 {
             return Err(invalid("trailing syntax in compressed object"));
         }
@@ -1109,7 +1205,7 @@ impl<R: Read + Seek> Parser<R> {
         })
     }
 
-    fn resolve(&mut self, mut value: Value) -> Result<Value> {
+    async fn resolve(&mut self, mut value: Value) -> Result<Value> {
         let mut seen = BTreeSet::new();
         loop {
             let Value::Reference(reference) = value else {
@@ -1121,7 +1217,7 @@ impl<R: Read + Seek> Parser<R> {
             if !seen.insert(reference) {
                 return Err(invalid("cyclic indirect reference"));
             }
-            let object = self.object(reference)?;
+            let object = self.object(reference).await?;
             if object.stream.is_some() {
                 return Err(invalid("unexpected stream reference"));
             }
@@ -1129,11 +1225,15 @@ impl<R: Read + Seek> Parser<R> {
         }
     }
 
-    fn stream(&mut self, value: Value, kind: SegmentKind) -> Result<(ByteRange, Option<Decode>)> {
+    async fn stream(
+        &mut self,
+        value: Value,
+        kind: SegmentKind,
+    ) -> Result<(ByteRange, Option<Decode>)> {
         let Value::Reference(reference) = value else {
             return Err(invalid("stream must be indirect"));
         };
-        let object = self.object(reference)?;
+        let object = self.object(reference).await?;
         let mut dict = object.value.dictionary()?;
         let expected_type: &[u8] = if kind == SegmentKind::Xmp {
             b"Metadata"
@@ -1147,15 +1247,15 @@ impl<R: Read + Seek> Parser<R> {
             return Err(invalid("XMP stream must have XML subtype"));
         }
         let decode = Decode::from_dictionary(&mut dict)?;
-        let range = self.stream_range(object.stream, &mut dict, false)?;
+        let range = self.stream_range(object.stream, &mut dict, false).await?;
         if range.size > crate::segment::MAX_SEGMENT_SIZE {
             return Err(invalid("metadata stream exceeds 256 MiB limit"));
         }
         Ok((range, decode))
     }
 
-    fn metadata(&mut self, root: Reference) -> Result<CatalogMetadata> {
-        let catalog_value = self.resolve(Value::Reference(root))?;
+    async fn metadata(&mut self, root: Reference) -> Result<CatalogMetadata> {
+        let catalog_value = self.resolve(Value::Reference(root)).await?;
         let catalog = catalog_value.dictionary()?;
         if !catalog
             .get(b"Type".as_slice())
@@ -1168,23 +1268,23 @@ impl<R: Read + Seek> Parser<R> {
         let mut active = Some(BTreeSet::new());
         if let Some(value) = catalog.get(b"Metadata".as_slice()).cloned() {
             if !matches!(value, Value::Null) {
-                let (range, decode) = self.stream(value, SegmentKind::Xmp)?;
+                let (range, decode) = self.stream(value, SegmentKind::Xmp).await?;
                 ranges.push((range, SegmentKind::Xmp, decode));
             }
         }
         if let Some(value) = catalog.get(b"AF".as_slice()).cloned() {
-            let values = match self.resolve(value.clone())? {
+            let values = match self.resolve(value.clone()).await? {
                 Value::Array(values) => values,
                 Value::Null => Vec::new(),
                 Value::Dictionary(_) => vec![value],
                 _ => return Err(invalid("invalid Catalog AF")),
             };
             for value in &values {
-                let mut spec = self.resolve(value.clone())?.dictionary()?;
+                let mut spec = self.resolve(value.clone()).await?.dictionary()?;
                 let Some(relationship) = spec.remove(b"AFRelationship".as_slice()) else {
                     continue;
                 };
-                let relationship = self.resolve(relationship)?;
+                let relationship = self.resolve(relationship).await?;
                 if !matches!(relationship, Value::Name(_)) {
                     return Err(invalid("AFRelationship must be a name"));
                 }
@@ -1209,7 +1309,7 @@ impl<R: Read + Seek> Parser<R> {
                     return Err(invalid("C2PA file specification has wrong subtype"));
                 }
                 let ef_value = required(&mut spec, b"EF")?;
-                let mut ef = self.resolve(ef_value)?.dictionary()?;
+                let mut ef = self.resolve(ef_value).await?.dictionary()?;
                 let stream = match (ef.remove(b"F".as_slice()), ef.remove(b"UF".as_slice())) {
                     (Some(Value::Reference(f)), Some(Value::Reference(uf))) if f == uf => {
                         Value::Reference(f)
@@ -1220,7 +1320,7 @@ impl<R: Read + Seek> Parser<R> {
                     (Some(value), None) | (None, Some(value)) => value,
                     (None, None) => return Err(invalid("missing C2PA embedded file")),
                 };
-                let (range, decode) = self.stream(stream, SegmentKind::Jumbf)?;
+                let (range, decode) = self.stream(stream, SegmentKind::Jumbf).await?;
                 ranges.push((range, SegmentKind::Jumbf, decode));
             }
             associated = values;
@@ -1231,6 +1331,97 @@ impl<R: Read + Seek> Parser<R> {
             active,
             ranges,
         })
+    }
+}
+
+async fn inflate_async(
+    parser: &mut Parser<'_>,
+    length: u64,
+    limit: usize,
+    sync_flush_size: Option<usize>,
+) -> Result<Vec<u8>> {
+    use flate2::{Decompress, FlushDecompress, Status};
+    let mut decoder = Decompress::new(true);
+    let mut output = Vec::new();
+    let mut input = [0u8; 8192];
+    let mut input_at = 0usize;
+    let mut input_len = 0usize;
+    let mut unread = length;
+    let mut buffer = [0u8; 8192];
+    let mut suffix = 0u32;
+    loop {
+        if input_at == input_len && unread != 0 {
+            input_len = unread.min(input.len() as u64) as usize;
+            parser.read_exact_direct(&mut input[..input_len]).await?;
+            unread -= input_len as u64;
+            input_at = 0;
+        }
+        let at_eof = input_at == input_len && unread == 0;
+        let bytes = &input[input_at..input_len];
+        let before_in = decoder.total_in();
+        let before_out = decoder.total_out();
+        let status = decoder
+            .decompress(bytes, &mut buffer, FlushDecompress::None)
+            .map_err(|_| invalid("invalid Flate stream or checksum"))?;
+        let consumed = (decoder.total_in() - before_in) as usize;
+        let produced = (decoder.total_out() - before_out) as usize;
+        for &byte in &bytes[consumed.saturating_sub(4)..consumed] {
+            suffix = (suffix << 8) | u32::from(byte);
+        }
+        input_at += consumed;
+        if output
+            .len()
+            .checked_add(produced)
+            .is_none_or(|size| size > limit)
+        {
+            return Err(invalid("decoded stream size limit exceeded"));
+        }
+        let needed = output.len() + produced;
+        if needed > output.capacity() {
+            let capacity = output
+                .capacity()
+                .saturating_mul(2)
+                .max(8192)
+                .min(limit)
+                .max(needed);
+            output
+                .try_reserve_exact(capacity - output.len())
+                .map_err(|_| invalid("unable to allocate decoded stream buffer"))?;
+        }
+        output.extend_from_slice(&buffer[..produced]);
+        if status == Status::StreamEnd {
+            if decoder.total_in() != length {
+                return Err(invalid("trailing data in Flate stream"));
+            }
+            return Ok(output);
+        }
+        if at_eof && consumed == 0 && produced == 0 {
+            if decoder.total_in() == length
+                && suffix == 0x0000ffff
+                && sync_flush_size == Some(output.len())
+            {
+                log::warn!(
+                    "PDF xref stream uses legacy sync-flush termination without a zlib trailer"
+                );
+                return Ok(output);
+            }
+            return Err(invalid("incomplete Flate stream"));
+        }
+        if consumed == 0 && produced == 0 {
+            return Err(invalid("Flate decoder made no progress"));
+        }
+    }
+}
+
+#[cfg(test)]
+pub(super) fn test_block_on<T>(future: impl Future<Output = Result<T>>) -> Result<T> {
+    use std::task::{Context, Poll, Waker};
+    let waker = Waker::noop();
+    let mut context = Context::from_waker(waker);
+    let mut future = Box::pin(future);
+    match future.as_mut().poll(&mut context) {
+        Poll::Ready(result) => result,
+        Poll::Pending => panic!("in-memory PDF parser unexpectedly suspended"),
     }
 }
 
@@ -1261,9 +1452,9 @@ impl PdfIO {
         .then_some(ContainerKind::Pdf)
     }
 
-    fn read_metadata<R: Read + Seek>(
+    async fn read_metadata_async(
         structure: &Structure,
-        source: &mut R,
+        src: &mut Src,
         index: Option<usize>,
     ) -> Result<Option<Vec<u8>>> {
         let Some(index) = index else {
@@ -1271,6 +1462,7 @@ impl PdfIO {
         };
         let segment = &structure.segments[index];
         let range = segment.location();
+        src.seek(SeekFrom::Start(range.offset))?;
         match &segment.metadata {
             Some(metadata) => {
                 let config = metadata
@@ -1279,12 +1471,175 @@ impl PdfIO {
                 if range.size > crate::segment::MAX_SEGMENT_SIZE {
                     return Err(invalid("encoded metadata size limit exceeded"));
                 }
-                source.seek(SeekFrom::Start(range.offset))?;
-                let data = inflate(source, range.size, MAX_DECODED_METADATA, None)?;
+                let mut parser = Parser::new(src, src.len());
+                let data =
+                    inflate_async(&mut parser, range.size, MAX_DECODED_METADATA, None).await?;
                 Ok(Some(config.undo_predictor(data)?))
             }
-            None => structure.read_range(source, range).map(Some),
+            None => {
+                let size =
+                    usize::try_from(range.size).map_err(|_| invalid("stream length overflow"))?;
+                let mut data = vec![0; size];
+                src.read_exact(&mut data).await?;
+                Ok(Some(data))
+            }
         }
+    }
+
+    pub(crate) async fn parse_async(&self, src: &mut Src) -> Result<Structure> {
+        let size = src.len();
+        src.seek(SeekFrom::Start(0))?;
+        let mut header = [0; 9];
+        src.read_exact_direct(&mut header).await?;
+        if Self::detect(&header).is_none() {
+            return Err(invalid("invalid header"));
+        }
+        let tail_size = size.min(1024);
+        src.seek(SeekFrom::Start(size - tail_size))?;
+        let mut tail = vec![0; tail_size as usize];
+        src.read_exact_direct(&mut tail).await?;
+        let tail = tail.trim_ascii_end();
+        let tail = tail
+            .strip_suffix(b"%%EOF")
+            .ok_or_else(|| invalid("missing final EOF marker"))?;
+        let start = tail
+            .windows(9)
+            .rposition(|window| window == b"startxref")
+            .ok_or_else(|| invalid("missing startxref in final 1024 bytes"))?;
+        let number = &tail[start + 9..];
+        if !number.first().is_some_and(|b| whitespace(*b)) {
+            return Err(invalid("invalid startxref"));
+        }
+        let offset = unsigned(number.trim_ascii())?;
+        // PDF necessarily starts at the tail and follows cross-reference offsets.
+        let mut parser = Parser::new(src, size);
+        let root = parser.xrefs(offset).await?;
+        let discovered = parser.metadata(root).await?;
+        let mut metadata = discovered.ranges;
+        let context = incremental::context(
+            &mut parser,
+            root,
+            offset,
+            discovered.catalog,
+            discovered.associated,
+            discovered.active,
+        )
+        .await?;
+        metadata.sort_by_key(|(range, _, _)| range.offset);
+        let mut structure = Structure::new(ContainerKind::Pdf, MediaType::Pdf);
+        structure.total_size = size;
+        structure.metadata = Some(crate::SegmentMetadata::new(context));
+        structure.add_segment(Segment::new(0, 9, SegmentKind::Header, Some("PDF".into())));
+        let mut end = 9;
+        for (range, kind, decode) in metadata {
+            if range.offset < end {
+                return Err(invalid("overlapping metadata streams"));
+            }
+            if range.offset > end {
+                structure.add_segment(Segment::new(
+                    end,
+                    range.offset - end,
+                    SegmentKind::Other,
+                    None,
+                ));
+            }
+            let mut segment = Segment::new(
+                range.offset,
+                range.size,
+                kind,
+                Some(format!("PDF/{}", kind.as_str())),
+            );
+            if let Some(config) = decode {
+                segment.metadata = Some(crate::SegmentMetadata::new(config));
+            }
+            structure.add_segment(segment);
+            end = range.end_offset();
+        }
+        if end < size {
+            structure.add_segment(Segment::new(end, size - end, SegmentKind::Other, None));
+        }
+        Ok(structure)
+    }
+
+    pub(crate) async fn read_xmp_async(
+        &self,
+        structure: &Structure,
+        src: &mut Src,
+    ) -> Result<Option<Vec<u8>>> {
+        Self::read_metadata_async(structure, src, structure.xmp_index()).await
+    }
+
+    pub(crate) async fn read_jumbf_async(
+        &self,
+        structure: &Structure,
+        src: &mut Src,
+    ) -> Result<Option<Vec<u8>>> {
+        Self::read_metadata_async(structure, src, structure.c2pa_jumbf_index()).await
+    }
+
+    #[cfg(feature = "exif")]
+    pub(crate) async fn read_embedded_thumbnail_info_async(
+        &self,
+        _: &Structure,
+        _: &mut Src,
+    ) -> Result<Option<crate::thumbnail::EmbeddedThumbnailInfo>> {
+        Ok(None)
+    }
+
+    #[cfg(feature = "exif")]
+    pub(crate) async fn read_exif_info_async(
+        &self,
+        _: &Structure,
+        _: &mut Src,
+    ) -> Result<Option<crate::tiff::ExifInfo>> {
+        Ok(None)
+    }
+
+    pub(crate) async fn write_async(
+        &self,
+        structure: &Structure,
+        src: &mut Src,
+        pw: &mut PDst<'_>,
+        updates: &Updates,
+    ) -> Result<()> {
+        incremental::write_async(structure, src, pw, updates).await
+    }
+}
+
+impl ContainerIO for PdfIO {
+    fn container_type() -> ContainerKind {
+        Self::container_type()
+    }
+    fn supported_media_types() -> &'static [MediaType] {
+        Self::supported_media_types()
+    }
+    fn extensions() -> &'static [&'static str] {
+        Self::extensions()
+    }
+    fn mime_types() -> &'static [&'static str] {
+        Self::mime_types()
+    }
+    fn detect(header: &[u8]) -> Option<ContainerKind> {
+        Self::detect(header)
+    }
+
+    fn calculate_updated_structure(
+        &self,
+        structure: &Structure,
+        updates: &Updates,
+    ) -> Result<Structure> {
+        Ok(incremental::plan(structure, updates)?.structure)
+    }
+
+    fn exclusion_range_for_segment(structure: &Structure, kind: SegmentKind) -> Option<(u64, u64)> {
+        structure
+            .segments
+            .iter()
+            .find(|segment| segment.is_type(kind))
+            .map(|segment| {
+                let range = segment.location();
+                (range.offset, range.size)
+            })
     }
 }
 
@@ -1300,8 +1655,11 @@ mod tests {
                 .with_metadata(crate::SegmentMetadata::new("foreign metadata")),
         );
         let mut source = Cursor::new(b"x");
-        let error =
-            PdfIO::read_metadata(&structure, &mut source, structure.xmp_index()).unwrap_err();
+        let machine = crate::sans_io::Machine::new(|io| async move {
+            let mut src = Src::new(io, 1);
+            PdfIO::read_metadata_async(&structure, &mut src, structure.xmp_index()).await
+        });
+        let error = crate::sans_io::drive(machine, Some(&mut source), None, 0, None).unwrap_err();
         assert!(error.to_string().contains("unexpected metadata"));
         assert_eq!(source.position(), 0);
     }
@@ -1421,42 +1779,62 @@ mod tests {
         .is_err());
     }
 
+    fn run_structural(
+        data: Vec<u8>,
+        encoded_len: usize,
+        decode: Option<Decode>,
+        expected: Option<usize>,
+        initial_budget: usize,
+        repeat: usize,
+    ) -> Result<(Vec<Result<usize>>, usize)> {
+        let len = data.len() as u64;
+        let mut source = Cursor::new(data);
+        let machine = crate::sans_io::Machine::new(move |io| async move {
+            let mut src = Src::new(io, len);
+            let mut parser = Parser::new(&mut src, len);
+            parser.decoding_left = initial_budget;
+            let mut results = Vec::new();
+            for _ in 0..repeat {
+                let mut dict =
+                    Dictionary::from([(b"Length".to_vec(), Value::Integer(encoded_len as u64))]);
+                results.push(
+                    parser
+                        .structural_stream(Some(0), &mut dict, decode, expected)
+                        .await
+                        .map(|data| data.len()),
+                );
+            }
+            Ok((results, parser.decoding_left))
+        });
+        crate::sans_io::drive(machine, Some(&mut source), None, 0, None)
+    }
+
     #[test]
     fn structural_decode_has_cumulative_not_just_per_stream_limits() {
         let data = deflate(&[b'x'; 1024]);
+        let encoded = data.len();
         let mut source = data.clone();
         source.extend_from_slice(b"\nendstream\nendobj\n");
-        let mut parser = Parser::new(Cursor::new(&source), source.len() as u64);
-        parser.decoding_left = (data.len() + 1024) * 2;
-        for _ in 0..2 {
-            let mut dict =
-                Dictionary::from([(b"Length".to_vec(), Value::Integer(data.len() as u64))]);
-            let decoded = parser
-                .structural_stream(
-                    Some(0),
-                    &mut dict,
-                    Some(Decode {
-                        predictor: 1,
-                        columns: 1,
-                    }),
-                    None,
-                )
-                .unwrap();
-            assert_eq!(decoded.len(), 1024);
-        }
-        assert_eq!(parser.decoding_left, 0);
-        let mut dict = Dictionary::from([(b"Length".to_vec(), Value::Integer(data.len() as u64))]);
-        assert!(parser
-            .structural_stream(
-                Some(0),
-                &mut dict,
-                Some(Decode {
-                    predictor: 1,
-                    columns: 1
-                }),
-                None
-            )
-            .is_err());
+        let (results, left) = run_structural(
+            source,
+            encoded,
+            Some(Decode {
+                predictor: 1,
+                columns: 1,
+            }),
+            None,
+            (encoded + 1024) * 2,
+            3,
+        )
+        .unwrap();
+        assert_eq!(results[0].as_ref().unwrap(), &1024);
+        assert_eq!(results[1].as_ref().unwrap(), &1024);
+        assert!(results[2]
+            .as_ref()
+            .unwrap_err()
+            .to_string()
+            .contains("encoded structural stream"));
+        assert_eq!(left, 0);
     }
 
     #[test]
@@ -1464,206 +1842,37 @@ mod tests {
         let length = MAX_STRUCTURAL_STREAM + 1;
         let mut data = vec![0u8; length];
         data.extend_from_slice(b"\nendstream\nendobj\n");
-        let mut parser = Parser::new(Cursor::new(&data), data.len() as u64);
-        let mut dict = Dictionary::from([(b"Length".to_vec(), Value::Integer(length as u64))]);
-        assert!(parser
-            .structural_stream(Some(0), &mut dict, None, None)
+        let (results, left) = run_structural(data, length, None, None, MAX_DECODE_WORK, 1).unwrap();
+        assert!(results[0]
+            .as_ref()
             .unwrap_err()
             .to_string()
             .contains("encoded structural stream"));
-        assert_eq!(parser.decoding_left, MAX_DECODE_WORK);
+        assert_eq!(left, MAX_DECODE_WORK);
     }
 
     #[test]
     fn xref_decoding_stops_at_declared_table_size_not_general_stream_limit() {
         let data = deflate(&[b'x'; 1024]);
+        let encoded = data.len();
         let mut source = data.clone();
         source.extend_from_slice(b"\nendstream\nendobj\n");
-        let mut parser = Parser::new(Cursor::new(&source), source.len() as u64);
-        let mut dict = Dictionary::from([(b"Length".to_vec(), Value::Integer(data.len() as u64))]);
-        let result = parser.structural_stream(
-            Some(0),
-            &mut dict,
+        let (results, _) = run_structural(
+            source,
+            encoded,
             Some(Decode {
                 predictor: 1,
                 columns: 1,
             }),
             Some(7),
-        );
-        assert!(result
+            MAX_DECODE_WORK,
+            1,
+        )
+        .unwrap();
+        assert!(results[0]
+            .as_ref()
             .unwrap_err()
             .to_string()
             .contains("decoded stream size limit"));
-    }
-}
-impl ContainerIO for PdfIO {
-    fn container_type() -> ContainerKind {
-        Self::container_type()
-    }
-
-    fn supported_media_types() -> &'static [MediaType] {
-        Self::supported_media_types()
-    }
-    fn extensions() -> &'static [&'static str] {
-        Self::extensions()
-    }
-    fn mime_types() -> &'static [&'static str] {
-        Self::mime_types()
-    }
-    fn detect(header: &[u8]) -> Option<ContainerKind> {
-        Self::detect(header)
-    }
-
-    fn parse<R: Read + Seek>(&self, source: &mut R) -> Result<Structure> {
-        let size = source.seek(SeekFrom::End(0))?;
-        source.seek(SeekFrom::Start(0))?;
-        let mut header = [0; 9];
-        source.read_exact(&mut header)?;
-        if Self::detect(&header).is_none() {
-            return Err(invalid("invalid header"));
-        }
-        let tail_size = size.min(1024);
-        source.seek(SeekFrom::Start(size - tail_size))?;
-        let mut tail = vec![0; tail_size as usize];
-        source.read_exact(&mut tail)?;
-        let tail = tail.trim_ascii_end();
-        let tail = tail
-            .strip_suffix(b"%%EOF")
-            .ok_or_else(|| invalid("missing final EOF marker"))?;
-        let start = tail
-            .windows(9)
-            .rposition(|window| window == b"startxref")
-            .ok_or_else(|| invalid("missing startxref in final 1024 bytes"))?;
-        let number = &tail[start + 9..];
-        if !number.first().is_some_and(|b| whitespace(*b)) {
-            return Err(invalid("invalid startxref"));
-        }
-        let offset = unsigned(number.trim_ascii())?;
-        let mut parser = Parser::new(source, size);
-        let root = parser.xrefs(offset)?;
-        let discovered = parser.metadata(root)?;
-        let mut metadata = discovered.ranges;
-        let context = incremental::context(
-            &mut parser,
-            root,
-            offset,
-            discovered.catalog,
-            discovered.associated,
-            discovered.active,
-        )?;
-        metadata.sort_by_key(|(range, _, _)| range.offset);
-        let mut structure = Structure::new(ContainerKind::Pdf, MediaType::Pdf);
-        structure.total_size = size;
-        structure.metadata = Some(crate::SegmentMetadata::new(context));
-        structure.add_segment(Segment::new(0, 9, SegmentKind::Header, Some("PDF".into())));
-        let mut end = 9;
-        for (range, kind, decode) in metadata {
-            if range.offset < end {
-                return Err(invalid("overlapping metadata streams"));
-            }
-            if range.offset > end {
-                structure.add_segment(Segment::new(
-                    end,
-                    range.offset - end,
-                    SegmentKind::Other,
-                    None,
-                ));
-            }
-            let mut segment = Segment::new(
-                range.offset,
-                range.size,
-                kind,
-                Some(format!("PDF/{}", kind.as_str())),
-            );
-            if let Some(config) = decode {
-                segment.metadata = Some(crate::SegmentMetadata::new(config));
-            }
-            structure.add_segment(segment);
-            end = range.end_offset();
-        }
-        if end < size {
-            structure.add_segment(Segment::new(end, size - end, SegmentKind::Other, None));
-        }
-        Ok(structure)
-    }
-
-    fn write<R: Read + Seek, W: Read + Write + Seek>(
-        &self,
-        structure: &Structure,
-        source: &mut R,
-        writer: &mut W,
-        updates: &Updates,
-    ) -> Result<()> {
-        self.write_with_processor(
-            structure,
-            source,
-            writer,
-            updates,
-            &mut |_: &dyn crate::ProcessChunk| Ok(()),
-        )
-    }
-
-    fn calculate_updated_structure(
-        &self,
-        structure: &Structure,
-        updates: &Updates,
-    ) -> Result<Structure> {
-        Ok(incremental::plan(structure, updates)?.structure)
-    }
-
-    fn write_with_processor<R: Read + Seek, W: Read + Write + Seek, F: crate::ProcessChunkFn>(
-        &self,
-        structure: &Structure,
-        source: &mut R,
-        writer: &mut W,
-        updates: &Updates,
-        processor: &mut F,
-    ) -> Result<()> {
-        incremental::write(structure, source, writer, updates, processor)
-    }
-
-    fn read_xmp<R: Read + Seek>(
-        &self,
-        structure: &Structure,
-        source: &mut R,
-    ) -> Result<Option<Vec<u8>>> {
-        Self::read_metadata(structure, source, structure.xmp_index())
-    }
-
-    fn read_jumbf<R: Read + Seek>(
-        &self,
-        structure: &Structure,
-        source: &mut R,
-    ) -> Result<Option<Vec<u8>>> {
-        Self::read_metadata(structure, source, structure.c2pa_jumbf_index())
-    }
-
-    #[cfg(feature = "exif")]
-    fn read_embedded_thumbnail_info<R: Read + Seek>(
-        &self,
-        _: &Structure,
-        _: &mut R,
-    ) -> Result<Option<crate::thumbnail::EmbeddedThumbnailInfo>> {
-        Ok(None)
-    }
-
-    #[cfg(feature = "exif")]
-    fn read_exif_info<R: Read + Seek>(
-        &self,
-        _: &Structure,
-        _: &mut R,
-    ) -> Result<Option<crate::tiff::ExifInfo>> {
-        Ok(None)
-    }
-
-    fn exclusion_range_for_segment(structure: &Structure, kind: SegmentKind) -> Option<(u64, u64)> {
-        structure
-            .segments
-            .iter()
-            .find(|segment| segment.is_type(kind))
-            .map(|segment| {
-                let range = segment.location();
-                (range.offset, range.size)
-            })
     }
 }

@@ -1,14 +1,14 @@
 //! PNG container I/O implementation
 
 use super::{ContainerIO, ContainerKind};
+use crate::sans_io::io::{PDst, Src};
 use crate::{
     error::{Error, Result},
     segment::{ByteRange, Segment, SegmentKind, DEFAULT_CHUNK_SIZE},
     structure::Structure,
     Updates,
 };
-use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::SeekFrom;
 
 // PNG signature
 const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
@@ -89,9 +89,10 @@ impl PngIO {
     }
 
     /// Extract XMP data from PNG file (simple iTXt chunk, no extended XMP)
-    pub fn read_xmp_impl<R: Read + Seek>(
-        structure: &crate::structure::Structure,
-        source: &mut R,
+    pub(crate) async fn read_xmp_async(
+        &self,
+        structure: &Structure,
+        source: &mut Src,
     ) -> Result<Option<Vec<u8>>> {
         let Some(index) = structure.xmp_index() else {
             return Ok(None);
@@ -104,7 +105,7 @@ impl PngIO {
             source.seek(SeekFrom::Start(location.offset))?;
 
             let mut xmp_data = vec![0u8; location.size as usize];
-            source.read_exact(&mut xmp_data)?;
+            source.read_exact(&mut xmp_data).await?;
 
             return Ok(Some(xmp_data));
         }
@@ -113,9 +114,10 @@ impl PngIO {
     }
 
     /// Extract JUMBF data from PNG file (direct data from caBX chunks, no headers to strip)
-    pub fn read_jumbf_impl<R: Read + Seek>(
-        structure: &crate::structure::Structure,
-        source: &mut R,
+    pub(crate) async fn read_jumbf_async(
+        &self,
+        structure: &Structure,
+        source: &mut Src,
     ) -> Result<Option<Vec<u8>>> {
         if structure.jumbf_indices().is_empty() {
             return Ok(None);
@@ -145,7 +147,7 @@ impl PngIO {
 
                 source.seek(SeekFrom::Start(location.offset))?;
                 let mut buf = vec![0u8; location.size as usize];
-                source.read_exact(&mut buf)?;
+                source.read_exact(&mut buf).await?;
                 result.extend_from_slice(&buf);
             }
         }
@@ -158,12 +160,12 @@ impl PngIO {
     }
 
     /// Fast single-pass parser
-    fn parse_impl<R: Read + Seek>(&self, source: &mut R) -> Result<Structure> {
+    pub(crate) async fn parse_async(&self, source: &mut Src) -> Result<Structure> {
         let mut structure = Structure::new(ContainerKind::Png, crate::MediaType::Png);
 
         // Check PNG signature
         let mut sig = [0u8; 8];
-        source.read_exact(&mut sig)?;
+        source.read_exact(&mut sig).await?;
         if sig != PNG_SIGNATURE {
             return Err(Error::InvalidFormat("Not a PNG file".into()));
         }
@@ -180,15 +182,15 @@ impl PngIO {
 
         loop {
             // Read chunk length
-            let chunk_len = match source.read_u32::<BigEndian>() {
+            let chunk_len = match source.read_u32_be().await {
                 Ok(len) => len as u64,
-                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
-                Err(e) => return Err(e.into()),
+                Err(Error::Io(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                Err(e) => return Err(e),
             };
 
             // Read chunk type
             let mut chunk_type = [0u8; 4];
-            source.read_exact(&mut chunk_type)?;
+            source.read_exact(&mut chunk_type).await?;
 
             let chunk_start = offset;
             let data_offset = offset + 8; // After length (4) + type (4)
@@ -242,7 +244,7 @@ impl PngIO {
                     // Check if this is XMP
                     let keyword_len = XMP_KEYWORD.len().min(chunk_len as usize);
                     let mut keyword_buf = vec![0u8; keyword_len];
-                    source.read_exact(&mut keyword_buf)?;
+                    source.read_exact(&mut keyword_buf).await?;
 
                     if keyword_buf == XMP_KEYWORD {
                         // This is XMP data
@@ -251,13 +253,13 @@ impl PngIO {
                         // Skip: compression_flag(1) + compression_method(1) + language_tag\0 + translated_keyword\0
 
                         // Read compression flag and method
-                        let _compression_flag = source.read_u8()?;
-                        let _compression_method = source.read_u8()?;
+                        let _compression_flag = source.read_u8().await?;
+                        let _compression_method = source.read_u8().await?;
 
                         // Skip language tag (null-terminated)
                         let mut lang_consumed = 0;
                         loop {
-                            let byte = source.read_u8()?;
+                            let byte = source.read_u8().await?;
                             lang_consumed += 1;
                             if byte == 0 || lang_consumed > 100 {
                                 break;
@@ -267,7 +269,7 @@ impl PngIO {
                         // Skip translated keyword (null-terminated)
                         let mut trans_consumed = 0;
                         loop {
-                            let byte = source.read_u8()?;
+                            let byte = source.read_u8().await?;
                             trans_consumed += 1;
                             if byte == 0 || trans_consumed > 100 {
                                 break;
@@ -378,112 +380,233 @@ impl PngIO {
         crc ^ 0xFFFFFFFF
     }
 
-    /// Efficiently copy bytes from source to writer using chunked I/O
-    /// This avoids large allocations for big segments
-    fn copy_bytes<R: Read, W: Write>(source: &mut R, writer: &mut W, size: u64) -> Result<()> {
-        if size > DEFAULT_CHUNK_SIZE as u64 {
-            let mut buffer = vec![0u8; DEFAULT_CHUNK_SIZE];
-            let mut remaining = size;
-
-            while remaining > 0 {
-                let to_copy = remaining.min(DEFAULT_CHUNK_SIZE as u64) as usize;
-                source.read_exact(&mut buffer[..to_copy])?;
-                writer.write_all(&buffer[..to_copy])?;
-                remaining -= to_copy as u64;
-            }
-        } else {
-            // Small data - single allocation is fine
-            let mut buffer = vec![0u8; size as usize];
-            source.read_exact(&mut buffer)?;
-            writer.write_all(&buffer)?;
+    /// Efficiently copy bytes from source to writer using chunked I/O.
+    async fn copy_bytes_async(source: &mut Src, writer: &mut PDst<'_>, size: u64) -> Result<()> {
+        let mut buffer = vec![0u8; size.min(DEFAULT_CHUNK_SIZE as u64) as usize];
+        let mut remaining = size;
+        while remaining > 0 {
+            let to_copy = remaining.min(buffer.len() as u64) as usize;
+            source.read_exact_direct(&mut buffer[..to_copy]).await?;
+            writer.write_all(&buffer[..to_copy]).await?;
+            remaining -= to_copy as u64;
         }
-
         Ok(())
     }
 
-    /// Write a PNG chunk with proper CRC
-    fn write_chunk<W: Write>(writer: &mut W, chunk_type: &[u8], data: &[u8]) -> Result<()> {
-        // Write length
-        writer.write_u32::<BigEndian>(data.len() as u32)?;
-
-        // Write type
-        writer.write_all(chunk_type)?;
-
-        // Write data
-        writer.write_all(data)?;
-
-        // Calculate and write CRC
+    /// Write a PNG chunk with proper CRC.
+    async fn write_chunk_async(
+        writer: &mut PDst<'_>,
+        chunk_type: &[u8],
+        data: &[u8],
+    ) -> Result<()> {
+        writer.write_u32_be(data.len() as u32).await?;
+        writer.write_all(chunk_type).await?;
+        writer.write_all(data).await?;
         let crc = Self::calculate_crc(chunk_type, data);
-        writer.write_u32::<BigEndian>(crc)?;
-
+        writer.write_u32_be(crc).await?;
         Ok(())
     }
 
     /// Write a PNG chunk, optionally excluding the payload from processing.
-    ///
-    /// When exclusion is enabled, only the chunk data and its dependent CRC are
-    /// withheld from the processor. The length and type fields are always
-    /// included, so the container structure remains verifiable independently of
-    /// the payload contents.
-    fn write_chunk_with_exclusion<W: Write, F>(
-        pw: &mut crate::processing_writer::ProcessingWriter<'_, W, F>,
+    async fn write_chunk_with_exclusion_async(
+        pw: &mut PDst<'_>,
         chunk_type: &[u8],
         data: &[u8],
         should_exclude: bool,
-    ) -> Result<()>
-    where
-        F: crate::ProcessChunkFn,
-    {
-        // Write length (included in hash)
-        pw.write_u32::<BigEndian>(data.len() as u32)?;
-
-        // Write type (included in hash)
-        pw.write_all(chunk_type)?;
-
-        // Enable exclusion for data + CRC
+    ) -> Result<()> {
+        pw.write_u32_be(data.len() as u32).await?;
+        pw.write_all(chunk_type).await?;
         if should_exclude {
             pw.set_exclude_mode(true);
         }
-
-        // Write data (excluded from hash)
-        pw.write_all(data)?;
-
-        // Calculate and write CRC (excluded from hash - it depends on data)
+        pw.write_all(data).await?;
         let crc = Self::calculate_crc(chunk_type, data);
-        pw.write_u32::<BigEndian>(crc)?;
-
-        // Disable exclusion
+        pw.write_u32_be(crc).await?;
         if should_exclude {
             pw.set_exclude_mode(false);
         }
-
         Ok(())
     }
 
-    /// Write XMP as iTXt chunk
-    fn write_xmp_chunk<W: Write>(writer: &mut W, xmp_data: &[u8]) -> Result<()> {
-        // Build iTXt data: keyword + flags + language + translated keyword + XMP
+    /// Write XMP as an iTXt chunk.
+    async fn write_xmp_chunk_async(writer: &mut PDst<'_>, xmp_data: &[u8]) -> Result<()> {
         let mut chunk_data = Vec::with_capacity(XMP_KEYWORD.len() + 4 + xmp_data.len());
-
-        // Keyword
         chunk_data.extend_from_slice(XMP_KEYWORD);
-
-        // Compression flag (0 = uncompressed)
         chunk_data.push(0);
-
-        // Compression method (0 = none)
         chunk_data.push(0);
-
-        // Language tag (empty, null-terminated)
         chunk_data.push(0);
-
-        // Translated keyword (empty, null-terminated)
         chunk_data.push(0);
-
-        // XMP data
         chunk_data.extend_from_slice(xmp_data);
+        Self::write_chunk_async(writer, ITXT, &chunk_data).await
+    }
 
-        Self::write_chunk(writer, ITXT, &chunk_data)
+    pub(crate) async fn write_async(
+        &self,
+        structure: &Structure,
+        source: &mut Src,
+        pw: &mut PDst<'_>,
+        updates: &Updates,
+    ) -> Result<()> {
+        let dest_structure = self.calculate_updated_structure(structure, updates)?;
+        let should_exclude_jumbf = updates
+            .processing
+            .exclude_segments
+            .contains(&SegmentKind::Jumbf);
+        let data_only_mode = updates.processing.exclusion_mode == crate::ExclusionMode::DataOnly;
+        source.seek(SeekFrom::Start(0))?;
+
+        let source_idats: Vec<_> = structure
+            .segments
+            .iter()
+            .filter(|s| s.is_type(SegmentKind::ImageData))
+            .collect();
+        let mut idat_index = 0;
+        let source_others: Vec<_> = structure
+            .segments
+            .iter()
+            .filter(|s| s.kind == SegmentKind::Other)
+            .collect();
+        let mut other_index = 0;
+
+        for dest_segment in &dest_structure.segments {
+            pw.begin_segment(dest_segment).await?;
+            match dest_segment {
+                seg if seg.is_type(SegmentKind::Header) => {
+                    pw.write_all(PNG_SIGNATURE).await?;
+                }
+                seg if seg.is_xmp() => match &updates.xmp {
+                    crate::MetadataUpdate::Set(new_xmp) => {
+                        Self::write_xmp_chunk_async(pw, new_xmp).await?;
+                    }
+                    crate::MetadataUpdate::Keep => {
+                        if let Some(source_seg) = structure.segments.iter().find(|s| s.is_xmp()) {
+                            let location = source_seg.location();
+                            source.seek(SeekFrom::Start(location.offset))?;
+                            let mut xmp_data = vec![0u8; location.size as usize];
+                            source.read_exact(&mut xmp_data).await?;
+                            Self::write_xmp_chunk_async(pw, &xmp_data).await?;
+                        }
+                    }
+                    crate::MetadataUpdate::Remove => {}
+                },
+                seg if seg.is_jumbf() => match &updates.jumbf {
+                    crate::MetadataUpdate::Set(new_jumbf) => {
+                        if data_only_mode {
+                            Self::write_chunk_with_exclusion_async(
+                                pw,
+                                C2PA,
+                                new_jumbf,
+                                should_exclude_jumbf,
+                            )
+                            .await?;
+                        } else {
+                            if should_exclude_jumbf {
+                                pw.set_exclude_mode(true);
+                            }
+                            Self::write_chunk_async(pw, C2PA, new_jumbf).await?;
+                            if should_exclude_jumbf {
+                                pw.set_exclude_mode(false);
+                            }
+                        }
+                    }
+                    crate::MetadataUpdate::Keep => {
+                        if let Some(source_seg) = structure.segments.iter().find(|s| s.is_jumbf()) {
+                            let location = source_seg.location();
+                            source.seek(SeekFrom::Start(location.offset))?;
+                            let mut jumbf_data = vec![0u8; location.size as usize];
+                            source.read_exact(&mut jumbf_data).await?;
+                            if data_only_mode {
+                                Self::write_chunk_with_exclusion_async(
+                                    pw,
+                                    C2PA,
+                                    &jumbf_data,
+                                    should_exclude_jumbf,
+                                )
+                                .await?;
+                            } else {
+                                if should_exclude_jumbf {
+                                    pw.set_exclude_mode(true);
+                                }
+                                Self::write_chunk_async(pw, C2PA, &jumbf_data).await?;
+                                if should_exclude_jumbf {
+                                    pw.set_exclude_mode(false);
+                                }
+                            }
+                        }
+                    }
+                    crate::MetadataUpdate::Remove => {}
+                },
+                seg if seg.is_type(SegmentKind::ImageData) => {
+                    if idat_index < source_idats.len() {
+                        let location = source_idats[idat_index].location();
+                        let chunk_start = location.offset - 8;
+                        let chunk_size = 8 + location.size + 4;
+                        source.seek(SeekFrom::Start(chunk_start))?;
+                        Self::copy_bytes_async(source, pw, chunk_size).await?;
+                        idat_index += 1;
+                    }
+                }
+                seg if seg.is_type(SegmentKind::Exif) => {
+                    if let Some(source_seg) = structure
+                        .segments
+                        .iter()
+                        .find(|s| s.is_type(SegmentKind::Exif))
+                    {
+                        let location = source_seg.location();
+                        let chunk_start = location.offset - 8;
+                        let chunk_size = 8 + location.size + 4;
+                        source.seek(SeekFrom::Start(chunk_start))?;
+                        Self::copy_bytes_async(source, pw, chunk_size).await?;
+                    }
+                }
+                _ => {
+                    if other_index < source_others.len() {
+                        let location = source_others[other_index].location();
+                        source.seek(SeekFrom::Start(location.offset))?;
+                        Self::copy_bytes_async(source, pw, location.size).await?;
+                        other_index += 1;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(feature = "exif")]
+impl PngIO {
+    pub(crate) async fn read_embedded_thumbnail_info_async(
+        &self,
+        structure: &Structure,
+        _source: &mut Src,
+    ) -> Result<Option<crate::thumbnail::EmbeddedThumbnailInfo>> {
+        for segment in structure.segments() {
+            if segment.is_type(SegmentKind::Exif) {
+                if let Some(info) = segment.thumbnail_info() {
+                    return Ok(Some(info.clone()));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    pub(crate) async fn read_exif_info_async(
+        &self,
+        structure: &Structure,
+        source: &mut Src,
+    ) -> Result<Option<crate::tiff::ExifInfo>> {
+        let Some(segment) = structure
+            .segments()
+            .iter()
+            .find(|s| s.is_type(SegmentKind::Exif))
+        else {
+            return Ok(None);
+        };
+        let location = segment.location();
+        source.seek(SeekFrom::Start(location.offset))?;
+        let mut data = vec![0u8; location.size as usize];
+        source.read_exact(&mut data).await?;
+        crate::tiff::parse_exif_info(&data)
     }
 }
 
@@ -516,325 +639,6 @@ impl ContainerIO for PngIO {
         } else {
             None
         }
-    }
-
-    fn parse<R: Read + Seek>(&self, source: &mut R) -> Result<Structure> {
-        self.parse_impl(source)
-    }
-
-    fn read_xmp<R: Read + Seek>(
-        &self,
-        structure: &Structure,
-        source: &mut R,
-    ) -> Result<Option<Vec<u8>>> {
-        Self::read_xmp_impl(structure, source)
-    }
-
-    fn read_jumbf<R: Read + Seek>(
-        &self,
-        structure: &Structure,
-        source: &mut R,
-    ) -> Result<Option<Vec<u8>>> {
-        Self::read_jumbf_impl(structure, source)
-    }
-
-    fn write<R: Read + Seek, W: Write>(
-        &self,
-        structure: &Structure,
-        source: &mut R,
-        writer: &mut W,
-        updates: &Updates,
-    ) -> Result<()> {
-        // Calculate the destination structure first - this tells us exactly what to write
-        // This is the SAME structure that will be returned for updates
-        let dest_structure = self.calculate_updated_structure(structure, updates)?;
-
-        source.seek(SeekFrom::Start(0))?;
-
-        // Write PNG signature
-        writer.write_all(PNG_SIGNATURE)?;
-
-        // Collect source segments by type for ordered iteration
-        let source_idats: Vec<_> = structure
-            .segments
-            .iter()
-            .filter(|s| s.is_type(SegmentKind::ImageData))
-            .collect();
-        let mut idat_index = 0;
-
-        // For "Other" segments, we need to track which ones we've used
-        // since multiple chunks can have the same path (e.g., multiple tEXt)
-        let source_others: Vec<_> = structure
-            .segments
-            .iter()
-            .filter(|s| s.kind == SegmentKind::Other)
-            .collect();
-        let mut other_index = 0;
-
-        // Iterate through destination structure and write each segment
-        for dest_segment in &dest_structure.segments {
-            match dest_segment {
-                seg if seg.is_type(SegmentKind::Header) => {
-                    // Already wrote signature
-                    continue;
-                }
-
-                seg if seg.is_xmp() => {
-                    // Write XMP based on updates
-                    match &updates.xmp {
-                        crate::MetadataUpdate::Set(new_xmp) => {
-                            Self::write_xmp_chunk(writer, new_xmp)?;
-                        }
-                        crate::MetadataUpdate::Keep => {
-                            // Find corresponding source segment and copy XMP data
-                            if let Some(source_seg) = structure.segments.iter().find(|s| s.is_xmp())
-                            {
-                                let location = source_seg.location();
-                                source.seek(SeekFrom::Start(location.offset))?;
-
-                                let mut xmp_data = vec![0u8; location.size as usize];
-                                source.read_exact(&mut xmp_data)?;
-
-                                Self::write_xmp_chunk(writer, &xmp_data)?;
-                            }
-                        }
-                        crate::MetadataUpdate::Remove => {
-                            // Skip - segment not in destination
-                        }
-                    }
-                }
-
-                seg if seg.is_jumbf() => {
-                    // Write JUMBF based on updates
-                    match &updates.jumbf {
-                        crate::MetadataUpdate::Set(new_jumbf) => {
-                            Self::write_chunk(writer, C2PA, new_jumbf)?;
-                        }
-                        crate::MetadataUpdate::Keep => {
-                            // Find corresponding source segment and copy it
-                            if let Some(source_seg) =
-                                structure.segments.iter().find(|s| s.is_jumbf())
-                            {
-                                let location = source_seg.location();
-                                source.seek(SeekFrom::Start(location.offset))?;
-
-                                let mut jumbf_data = vec![0u8; location.size as usize];
-                                source.read_exact(&mut jumbf_data)?;
-
-                                Self::write_chunk(writer, C2PA, &jumbf_data)?;
-                            }
-                        }
-                        crate::MetadataUpdate::Remove => {
-                            // Skip - segment not in destination
-                        }
-                    }
-                }
-
-                _seg if _seg.is_type(SegmentKind::ImageData) => {
-                    // Use ordered iteration through source IDAT segments
-                    if idat_index < source_idats.len() {
-                        let source_seg = source_idats[idat_index];
-                        let location = source_seg.location();
-                        let chunk_start = location.offset - 8; // Back to length field
-                        let chunk_size = 8 + location.size + 4;
-
-                        source.seek(SeekFrom::Start(chunk_start))?;
-                        Self::copy_bytes(source, writer, chunk_size)?;
-                        idat_index += 1;
-                    }
-                }
-
-                _seg if _seg.is_type(SegmentKind::Exif) => {
-                    // Find corresponding source segment (typically only one EXIF)
-                    if let Some(source_seg) = structure
-                        .segments
-                        .iter()
-                        .find(|s| s.is_type(SegmentKind::Exif))
-                    {
-                        let location = source_seg.location();
-                        let chunk_start = location.offset - 8; // Back to length field
-                        let chunk_size = 8 + location.size + 4;
-
-                        source.seek(SeekFrom::Start(chunk_start))?;
-                        Self::copy_bytes(source, writer, chunk_size)?;
-                    }
-                }
-
-                _ => {
-                    // Copy other chunks from source in order
-                    if other_index < source_others.len() {
-                        let source_seg = source_others[other_index];
-                        let location = source_seg.location();
-                        source.seek(SeekFrom::Start(location.offset))?;
-                        Self::copy_bytes(source, writer, location.size)?;
-                        other_index += 1;
-                    }
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    fn write_with_processor<R: Read + Seek, W: Write, F>(
-        &self,
-        structure: &Structure,
-        source: &mut R,
-        writer: &mut W,
-        updates: &Updates,
-        processor: &mut F,
-    ) -> Result<()>
-    where
-        F: crate::ProcessChunkFn,
-    {
-        use crate::processing_writer::ProcessingWriter;
-
-        let exclude_segments = &updates.processing.exclude_segments;
-        let exclusion_mode = updates.processing.exclusion_mode;
-
-        let mut pw = ProcessingWriter::new(writer, processor);
-        let should_exclude_jumbf = exclude_segments.contains(&SegmentKind::Jumbf);
-        let data_only_mode = exclusion_mode == crate::ExclusionMode::DataOnly;
-
-        // Calculate the destination structure first
-        let dest_structure = self.calculate_updated_structure(structure, updates)?;
-
-        source.seek(SeekFrom::Start(0))?;
-
-        // Collect source segments by type for ordered iteration
-        let source_idats: Vec<_> = structure
-            .segments
-            .iter()
-            .filter(|s| s.is_type(SegmentKind::ImageData))
-            .collect();
-        let mut idat_index = 0;
-
-        let source_others: Vec<_> = structure
-            .segments
-            .iter()
-            .filter(|s| s.kind == SegmentKind::Other)
-            .collect();
-        let mut other_index = 0;
-
-        // Iterate through destination structure and write each segment.
-        // A boundary signal is emitted once at the top of each iteration so no
-        // arm needs to handle boundary signalling directly.
-        for dest_segment in &dest_structure.segments {
-            pw.begin_segment(dest_segment)?;
-
-            match dest_segment {
-                seg if seg.is_type(SegmentKind::Header) => {
-                    pw.write_all(PNG_SIGNATURE)?;
-                }
-
-                seg if seg.is_xmp() => match &updates.xmp {
-                    crate::MetadataUpdate::Set(new_xmp) => {
-                        Self::write_xmp_chunk(&mut pw, new_xmp)?;
-                    }
-                    crate::MetadataUpdate::Keep => {
-                        if let Some(source_seg) = structure.segments.iter().find(|s| s.is_xmp()) {
-                            let location = source_seg.location();
-                            source.seek(SeekFrom::Start(location.offset))?;
-                            let mut xmp_data = vec![0u8; location.size as usize];
-                            source.read_exact(&mut xmp_data)?;
-                            Self::write_xmp_chunk(&mut pw, &xmp_data)?;
-                        }
-                    }
-                    crate::MetadataUpdate::Remove => {}
-                },
-
-                seg if seg.is_jumbf() => {
-                    // Handle JUMBF based on exclusion mode:
-                    // - DataOnly: Include length+type in hash, exclude data+CRC
-                    // - EntireSegment: Exclude entire chunk including headers
-                    match &updates.jumbf {
-                        crate::MetadataUpdate::Set(new_jumbf) => {
-                            if data_only_mode {
-                                Self::write_chunk_with_exclusion(
-                                    &mut pw,
-                                    C2PA,
-                                    new_jumbf,
-                                    should_exclude_jumbf,
-                                )?;
-                            } else {
-                                if should_exclude_jumbf {
-                                    pw.set_exclude_mode(true);
-                                }
-                                Self::write_chunk(&mut pw, C2PA, new_jumbf)?;
-                                if should_exclude_jumbf {
-                                    pw.set_exclude_mode(false);
-                                }
-                            }
-                        }
-                        crate::MetadataUpdate::Keep => {
-                            if let Some(source_seg) =
-                                structure.segments.iter().find(|s| s.is_jumbf())
-                            {
-                                let location = source_seg.location();
-                                source.seek(SeekFrom::Start(location.offset))?;
-                                let mut jumbf_data = vec![0u8; location.size as usize];
-                                source.read_exact(&mut jumbf_data)?;
-                                if data_only_mode {
-                                    Self::write_chunk_with_exclusion(
-                                        &mut pw,
-                                        C2PA,
-                                        &jumbf_data,
-                                        should_exclude_jumbf,
-                                    )?;
-                                } else {
-                                    if should_exclude_jumbf {
-                                        pw.set_exclude_mode(true);
-                                    }
-                                    Self::write_chunk(&mut pw, C2PA, &jumbf_data)?;
-                                    if should_exclude_jumbf {
-                                        pw.set_exclude_mode(false);
-                                    }
-                                }
-                            }
-                        }
-                        crate::MetadataUpdate::Remove => {}
-                    }
-                }
-
-                _seg if _seg.is_type(SegmentKind::ImageData) => {
-                    if idat_index < source_idats.len() {
-                        let source_seg = source_idats[idat_index];
-                        let location = source_seg.location();
-                        let chunk_start = location.offset - 8;
-                        let chunk_size = 8 + location.size + 4;
-                        source.seek(SeekFrom::Start(chunk_start))?;
-                        Self::copy_bytes(source, &mut pw, chunk_size)?;
-                        idat_index += 1;
-                    }
-                }
-
-                _seg if _seg.is_type(SegmentKind::Exif) => {
-                    if let Some(source_seg) = structure
-                        .segments
-                        .iter()
-                        .find(|s| s.is_type(SegmentKind::Exif))
-                    {
-                        let location = source_seg.location();
-                        let chunk_start = location.offset - 8;
-                        let chunk_size = 8 + location.size + 4;
-                        source.seek(SeekFrom::Start(chunk_start))?;
-                        Self::copy_bytes(source, &mut pw, chunk_size)?;
-                    }
-                }
-
-                _ => {
-                    if other_index < source_others.len() {
-                        let source_seg = source_others[other_index];
-                        let location = source_seg.location();
-                        source.seek(SeekFrom::Start(location.offset))?;
-                        Self::copy_bytes(source, &mut pw, location.size)?;
-                        other_index += 1;
-                    }
-                }
-            }
-        }
-
-        Ok(())
     }
 
     fn calculate_updated_structure(
@@ -1025,52 +829,6 @@ impl ContainerIO for PngIO {
         Ok(dest_structure)
     }
 
-    #[cfg(feature = "exif")]
-    fn read_embedded_thumbnail_info<R: Read + Seek>(
-        &self,
-        structure: &Structure,
-        _source: &mut R,
-    ) -> Result<Option<crate::thumbnail::EmbeddedThumbnailInfo>> {
-        // PNG doesn't typically have embedded thumbnails, but check EXIF anyway
-        for segment in structure.segments() {
-            if segment.is_type(SegmentKind::Exif) {
-                if let Some(info) = segment.thumbnail_info() {
-                    return Ok(Some(info.clone()));
-                }
-            }
-        }
-        Ok(None)
-    }
-
-    #[cfg(feature = "exif")]
-    fn read_exif_info<R: Read + Seek>(
-        &self,
-        structure: &Structure,
-        source: &mut R,
-    ) -> Result<Option<crate::tiff::ExifInfo>> {
-        use std::io::SeekFrom;
-
-        // Find EXIF segment
-        let exif_segment = structure
-            .segments()
-            .iter()
-            .find(|s| s.is_type(SegmentKind::Exif));
-
-        let segment = match exif_segment {
-            Some(s) => s,
-            None => return Ok(None),
-        };
-
-        // Read the EXIF data
-        let location = segment.location();
-        source.seek(SeekFrom::Start(location.offset))?;
-        let mut data = vec![0u8; location.size as usize];
-        source.read_exact(&mut data)?;
-
-        // PNG eXIf chunk: just raw TIFF data (no Exif\0\0 prefix)
-        crate::tiff::parse_exif_info(&data)
-    }
-
     fn exclusion_range_for_segment(structure: &Structure, kind: SegmentKind) -> Option<(u64, u64)> {
         let segment = match kind {
             SegmentKind::Jumbf => structure
@@ -1088,27 +846,18 @@ impl ContainerIO for PngIO {
     }
 }
 
-/// Update a PNG segment in-place with proper CRC recalculation
+/// Plan an in-place PNG segment update with CRC recalculation.
 ///
-/// PNG chunks have a CRC that must be recalculated when data changes.
-/// This function handles the PNG-specific update:
+/// PNG chunks have a CRC that must be recalculated when data changes:
 /// - For JUMBF (caBX): Updates data and recalculates CRC
 /// - For XMP (iTXt): Updates XMP data portion and recalculates CRC
 ///
-/// # Arguments
-/// - `writer`: A seekable writer positioned at the file
-/// - `structure`: The destination structure with segment positions
-/// - `kind`: SegmentKind::Jumbf or SegmentKind::Xmp
-/// - `data`: The new data (will be padded to fit existing capacity)
-///
-/// # Returns
-/// Number of bytes written (the padded data size)
-pub fn update_png_segment_in_stream<W: Write + Seek>(
-    writer: &mut W,
+/// Returns the positioned writes and the number of payload bytes (padded to capacity).
+pub(crate) fn png_segment_update_plan(
     structure: &Structure,
     kind: SegmentKind,
     data: Vec<u8>,
-) -> Result<usize> {
+) -> Result<crate::structure::SegmentUpdatePlan> {
     // Find the segment
     let segment_idx = match kind {
         SegmentKind::Jumbf => structure.c2pa_jumbf_index(),
@@ -1138,58 +887,27 @@ pub fn update_png_segment_in_stream<W: Write + Seek>(
     // Pad data to exact capacity
     let mut padded_data = data;
     padded_data.resize(data_capacity as usize, 0);
+    let written = padded_data.len();
 
-    match kind {
-        SegmentKind::Jumbf => {
-            // caBX chunk layout:
-            // [length:4][type:4][data:N][crc:4]
-            // data_offset points to start of data (after type)
-
-            // Write the data
-            writer.seek(SeekFrom::Start(data_offset))?;
-            writer.write_all(&padded_data)?;
-
-            // Calculate CRC over chunk_type + data
-            let crc = PngIO::calculate_crc(C2PA, &padded_data);
-
-            // CRC is immediately after data
-            // (we're already positioned there after writing data)
-            writer.write_u32::<BigEndian>(crc)?;
-        }
-
+    // The chunk CRC immediately follows the data, so data + CRC is one contiguous write.
+    let crc = match kind {
+        // caBX chunk: [length:4][type:4][data:N][crc:4]; data_offset points at data.
+        SegmentKind::Jumbf => PngIO::calculate_crc(C2PA, &padded_data),
+        // iTXt XMP chunk: [length:4][type:4][header:22][xmp:N][crc:4]; data_offset points
+        // at the XMP data. CRC covers "iTXt" + keyword(18) + 4 flag/null bytes + XMP.
         SegmentKind::Xmp => {
-            // iTXt XMP chunk layout:
-            // [length:4][type:4][header:22][xmp_data:N][crc:4]
-            // data_offset points to start of XMP data (after header)
-            // header = keyword(18) + flags(4)
-
-            // Write the XMP data
-            writer.seek(SeekFrom::Start(data_offset))?;
-            writer.write_all(&padded_data)?;
-
-            // Build complete chunk data for CRC calculation
-            // iTXt chunk data = keyword + flags + XMP data
             let mut chunk_data =
                 Vec::with_capacity(ITXT_XMP_HEADER_SIZE as usize + padded_data.len());
-            chunk_data.extend_from_slice(XMP_KEYWORD); // 18 bytes
-            chunk_data.push(0); // compression flag
-            chunk_data.push(0); // compression method
-            chunk_data.push(0); // language tag null
-            chunk_data.push(0); // translated keyword null
+            chunk_data.extend_from_slice(XMP_KEYWORD);
+            chunk_data.extend_from_slice(&[0, 0, 0, 0]);
             chunk_data.extend_from_slice(&padded_data);
-
-            // Calculate CRC over "iTXt" + chunk_data
-            let crc = PngIO::calculate_crc(ITXT, &chunk_data);
-
-            // CRC is immediately after XMP data
-            writer.write_u32::<BigEndian>(crc)?;
+            PngIO::calculate_crc(ITXT, &chunk_data)
         }
-
         _ => unreachable!(),
-    }
+    };
+    padded_data.extend_from_slice(&crc.to_be_bytes());
 
-    writer.flush()?;
-    Ok(padded_data.len())
+    Ok((vec![(data_offset, padded_data)], written))
 }
 
 #[cfg(test)]

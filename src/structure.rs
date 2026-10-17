@@ -10,6 +10,9 @@ use crate::{
 };
 use std::io::{Read, Seek, SeekFrom, Take};
 
+/// Positioned writes `(absolute offset, bytes)` plus the number of payload bytes written.
+pub(crate) type SegmentUpdatePlan = (Vec<(u64, Vec<u8>)>, usize);
+
 /// Represents the discovered structure of a parsed asset
 ///
 /// This structure works with any `Read + Seek` source (files, buffers, streams).
@@ -570,19 +573,37 @@ impl Structure {
         kind: SegmentKind,
         data: Vec<u8>,
     ) -> Result<usize> {
+        let (writes, written) = self.segment_update_plan(kind, data)?;
+        for (offset, bytes) in writes {
+            writer.seek(SeekFrom::Start(offset))?;
+            writer.write_all(&bytes)?;
+        }
+        writer.flush()?;
+        Ok(written)
+    }
+
+    /// Compute the positioned writes for an in-place update of `kind` with `data`.
+    ///
+    /// Returns `(writes, bytes_written)` where `writes` are `(absolute offset, bytes)` pairs.
+    /// Shared by [`Structure::update_segment`] and [`crate::sans_io::update_segment`].
+    pub(crate) fn segment_update_plan(
+        &self,
+        kind: SegmentKind,
+        data: Vec<u8>,
+    ) -> Result<SegmentUpdatePlan> {
         use crate::error::Error;
 
         #[cfg(feature = "pdf")]
         if self.container == ContainerKind::Pdf {
-            return crate::containers::pdf_io::patch(self, writer, kind, &data);
+            let len = data.len();
+            let write = crate::containers::pdf_io::patch_plan(self, kind, data)?;
+            return Ok((vec![write], len));
         }
 
         // PNG requires special handling for CRC recalculation
         #[cfg(feature = "png")]
         if self.container == ContainerKind::Png {
-            return crate::containers::png_io::update_png_segment_in_stream(
-                writer, self, kind, data,
-            );
+            return crate::containers::png_io::png_segment_update_plan(self, kind, data);
         }
 
         // Find the segment
@@ -629,19 +650,16 @@ impl Structure {
         let mut padded = data;
         padded.resize(total_capacity as usize, 0);
 
-        // Write the data to the writeable ranges
+        let mut writes = Vec::with_capacity(writeable_ranges.len());
         let mut offset = 0;
         for range in writeable_ranges {
-            writer.seek(SeekFrom::Start(range.offset))?;
             let to_write = (padded.len() - offset).min(range.size as usize);
-            writer.write_all(&padded[offset..offset + to_write])?;
+            writes.push((range.offset, padded[offset..offset + to_write].to_vec()));
             offset += to_write;
             if offset >= padded.len() {
                 break;
             }
         }
-
-        writer.flush()?;
-        Ok(padded.len())
+        Ok((writes, padded.len()))
     }
 }

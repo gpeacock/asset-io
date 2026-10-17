@@ -4,7 +4,6 @@
 //! parse and write that specific file structure.
 
 use crate::{error::Result, structure::Structure, MediaType, Updates};
-use std::io::{Read, Seek, Write};
 
 /// Container format - defines how a file is structured on disk
 ///
@@ -69,118 +68,6 @@ pub trait ContainerIO: Send + Sync {
     where
         Self: Sized;
 
-    /// Parse file structure in single pass
-    ///
-    /// This discovers all segments, XMP, and JUMBF locations without
-    /// loading the actual data into memory. It also determines the specific
-    /// media type within the container.
-    fn parse<R: Read + Seek>(&self, source: &mut R) -> Result<Structure>;
-
-    /// Write file with updates in single streaming pass
-    ///
-    /// This streams from the source to destination, applying updates
-    /// without loading the entire file into memory.
-    ///
-    /// For BMFF, the writer must support Read + Write + Seek (e.g. `File`) so that
-    /// chunk offset tables (stco/co64) can be patched after UUID region changes.
-    fn write<R: Read + Seek, W: Read + Write + Seek>(
-        &self,
-        structure: &Structure,
-        source: &mut R,
-        writer: &mut W,
-        updates: &Updates,
-    ) -> Result<()>;
-
-    /// Write file with processor callback for single-pass processing
-    ///
-    /// This is an optimized version of `write` that allows processing data
-    /// (e.g., hashing) as it's being written, without needing to re-read the output.
-    ///
-    /// Handlers can override this to provide true single-pass operation by:
-    /// 1. Wrapping the writer in a `ProcessingWriter`
-    /// 2. Controlling exclude mode based on `exclude_segments` and `exclusion_mode`
-    ///
-    /// # Exclusion Modes
-    ///
-    /// - [`ExclusionMode::EntireSegment`]: Exclude entire segment including headers
-    /// - [`ExclusionMode::DataOnly`]: Exclude only data, include headers in processing
-    ///   (required for C2PA compliance)
-    ///
-    /// # Default Implementation
-    ///
-    /// The default implementation wraps the writer in a `ProcessingWriter` and
-    /// calls the regular `write` method. This provides some benefit (no re-read)
-    /// but cannot intelligently exclude specific segments. Handlers should override
-    /// this for optimal performance.
-    ///
-    /// # Arguments
-    ///
-    /// * `structure` - Source file structure
-    /// * `source` - Source data reader
-    /// * `writer` - Destination writer
-    /// * `updates` - Metadata updates to apply (includes processing options for exclusions)
-    /// * `processor` - Callback function that processes each data chunk
-    ///
-    /// # Processing Options
-    ///
-    /// The `updates.processing` field controls processing behavior:
-    /// - `exclude_segments` - Segment kinds to exclude from processing
-    /// - `exclusion_mode` - How to handle excluded segments (DataOnly vs EntireSegment)
-    /// - `chunk_size` - Buffer size for streaming (optional)
-    ///
-    /// # Example Handler Override
-    ///
-    /// ```rust,ignore
-    /// fn write_with_processor<R: Read + Seek, W: Write, F>(
-    ///     &self,
-    ///     structure: &Structure,
-    ///     source: &mut R,
-    ///     writer: &mut W,
-    ///     updates: &Updates,
-    ///     processor: &mut F,
-    /// ) -> Result<()>
-    /// where
-    ///     F: crate::ProcessChunkFn,
-    /// {
-    ///     use crate::processing_writer::ProcessingWriter;
-    ///     
-    ///     let exclude_segments = &updates.processing.exclude_segments;
-    ///     let exclusion_mode = updates.processing.exclusion_mode;
-    ///     
-    ///     let mut pw = ProcessingWriter::new(writer, processor);
-    ///     
-    ///     // For C2PA (DataOnly mode): only exclude the data portion
-    ///     if exclude_segments.contains(&SegmentKind::Jumbf) {
-    ///         if exclusion_mode == ExclusionMode::DataOnly {
-    ///             pw.set_exclude_mode(true);
-    ///             self.write_jumbf_data(&mut pw, jumbf_data)?;
-    ///             pw.set_exclude_mode(false);
-    ///         }
-    ///     }
-    ///     
-    ///     Ok(())
-    /// }
-    /// ```
-    fn write_with_processor<R: Read + Seek, W: Read + Write + Seek, F>(
-        &self,
-        structure: &Structure,
-        source: &mut R,
-        writer: &mut W,
-        updates: &Updates,
-        processor: &mut F,
-    ) -> Result<()>
-    where
-        F: crate::ProcessChunkFn,
-    {
-        use crate::processing_writer::ProcessingWriter;
-
-        // Default implementation: wrap writer and process everything
-        // This doesn't intelligently exclude segments, but handlers can override
-        let mut processing_writer = ProcessingWriter::new(writer, processor);
-        self.write(structure, source, &mut processing_writer, updates)?;
-        Ok(())
-    }
-
     /// Calculate the structure that would result from applying updates
     ///
     /// This computes the destination file's structure (segment locations, offsets)
@@ -195,58 +82,6 @@ pub trait ContainerIO: Send + Sync {
         source_structure: &Structure,
         updates: &Updates,
     ) -> Result<Structure>;
-
-    /// Read XMP data from file (container-specific)
-    ///
-    /// This handles container-specific details like JPEG's extended XMP
-    /// with multi-segment assembly, or PNG's simple iTXt chunks.
-    fn read_xmp<R: Read + Seek>(
-        &self,
-        structure: &Structure,
-        source: &mut R,
-    ) -> Result<Option<Vec<u8>>>;
-
-    /// Read JUMBF data from file (container-specific)
-    ///
-    /// This handles container-specific details like JPEG XT headers,
-    /// multi-segment assembly, etc.
-    fn read_jumbf<R: Read + Seek>(
-        &self,
-        structure: &Structure,
-        source: &mut R,
-    ) -> Result<Option<Vec<u8>>>;
-
-    /// Read embedded thumbnail location from container-specific metadata
-    ///
-    /// Some containers embed pre-rendered thumbnails in their metadata:
-    /// - JPEG: EXIF IFD1 thumbnail (typically ~160x120)
-    /// - HEIF: 'thmb' item reference
-    /// - WebP: VP8L thumbnail chunk
-    /// - PNG: No embedded thumbnails (returns None)
-    ///
-    /// This is the fastest thumbnail path - no decoding needed!
-    /// Returns location info; use Asset::read_embedded_thumbnail() to get actual bytes.
-    #[cfg(feature = "exif")]
-    fn read_embedded_thumbnail_info<R: Read + Seek>(
-        &self,
-        structure: &Structure,
-        source: &mut R,
-    ) -> Result<Option<crate::thumbnail::EmbeddedThumbnailInfo>>;
-
-    /// Read EXIF metadata as parsed info (container-specific)
-    ///
-    /// Handles container-specific EXIF storage formats:
-    /// - JPEG: APP1 segment with "Exif\0\0" prefix
-    /// - HEIF/HEIC: Exif item in meta box with 4-byte offset prefix
-    /// - PNG: eXIf chunk (raw TIFF data)
-    ///
-    /// Returns parsed EXIF info (Make, Model, DateTime, etc.) or None if not present.
-    #[cfg(feature = "exif")]
-    fn read_exif_info<R: Read + Seek>(
-        &self,
-        structure: &Structure,
-        source: &mut R,
-    ) -> Result<Option<crate::tiff::ExifInfo>>;
 
     /// Calculate the C2PA exclusion range for a segment kind
     ///
@@ -312,51 +147,6 @@ macro_rules! register_containers {
 
         // Generate Handler implementation - delegates to specific I/O implementations
         impl Handler {
-            #[allow(unreachable_patterns)]
-            pub(crate) fn parse<R: std::io::Read + std::io::Seek>(&self, source: &mut R) -> $crate::Result<$crate::Structure> {
-                match self {
-                    $(
-                        $(#[$meta])*
-                        Handler::$variant(h) => h.parse(source),
-                    )*
-                }
-            }
-
-            #[allow(unreachable_patterns)]
-            pub(crate) fn write<R: std::io::Read + std::io::Seek, W: std::io::Read + std::io::Write + std::io::Seek>(
-                &self,
-                structure: &$crate::Structure,
-                source: &mut R,
-                writer: &mut W,
-                updates: &$crate::Updates,
-            ) -> $crate::Result<()> {
-                match self {
-                    $(
-                        $(#[$meta])*
-                        Handler::$variant(h) => h.write(structure, source, writer, updates),
-                    )*
-                }
-            }
-
-            #[allow(unreachable_patterns)]
-            pub(crate) fn write_with_processor<R: std::io::Read + std::io::Seek, W: std::io::Read + std::io::Write + std::io::Seek, F>(
-                &self,
-                structure: &$crate::Structure,
-                source: &mut R,
-                writer: &mut W,
-                updates: &$crate::Updates,
-                processor: &mut F,
-            ) -> $crate::Result<()>
-            where
-                F: $crate::ProcessChunkFn,
-            {
-                match self {
-                    $(
-                        $(#[$meta])*
-                        Handler::$variant(h) => h.write_with_processor(structure, source, writer, updates, processor),
-                    )*
-                }
-            }
 
             #[allow(unreachable_patterns)]
             pub(crate) fn calculate_updated_structure(
@@ -373,59 +163,88 @@ macro_rules! register_containers {
             }
 
             #[allow(unreachable_patterns)]
-            pub(crate) fn read_xmp<R: std::io::Read + std::io::Seek>(
+            pub(crate) async fn parse_async(
                 &self,
-                structure: &$crate::Structure,
-                source: &mut R,
-            ) -> $crate::Result<Option<Vec<u8>>> {
+                src: &mut $crate::sans_io::io::Src,
+            ) -> $crate::Result<$crate::Structure> {
                 match self {
                     $(
                         $(#[$meta])*
-                        Handler::$variant(h) => h.read_xmp(structure, source),
+                        Handler::$variant(h) => h.parse_async(src).await,
                     )*
                 }
             }
 
             #[allow(unreachable_patterns)]
-            pub(crate) fn read_jumbf<R: std::io::Read + std::io::Seek>(
+            pub(crate) async fn write_async(
                 &self,
                 structure: &$crate::Structure,
-                source: &mut R,
+                src: &mut $crate::sans_io::io::Src,
+                pw: &mut $crate::sans_io::io::PDst<'_>,
+                updates: &$crate::Updates,
+            ) -> $crate::Result<()> {
+                match self {
+                    $(
+                        $(#[$meta])*
+                        Handler::$variant(h) => h.write_async(structure, src, pw, updates).await,
+                    )*
+                }
+            }
+
+            #[allow(unreachable_patterns)]
+            pub(crate) async fn read_xmp_async(
+                &self,
+                structure: &$crate::Structure,
+                src: &mut $crate::sans_io::io::Src,
             ) -> $crate::Result<Option<Vec<u8>>> {
                 match self {
                     $(
                         $(#[$meta])*
-                        Handler::$variant(h) => h.read_jumbf(structure, source),
+                        Handler::$variant(h) => h.read_xmp_async(structure, src).await,
+                    )*
+                }
+            }
+
+            #[allow(unreachable_patterns)]
+            pub(crate) async fn read_jumbf_async(
+                &self,
+                structure: &$crate::Structure,
+                src: &mut $crate::sans_io::io::Src,
+            ) -> $crate::Result<Option<Vec<u8>>> {
+                match self {
+                    $(
+                        $(#[$meta])*
+                        Handler::$variant(h) => h.read_jumbf_async(structure, src).await,
                     )*
                 }
             }
 
             #[cfg(feature = "exif")]
             #[allow(unreachable_patterns)]
-            pub(crate) fn read_embedded_thumbnail_info<R: std::io::Read + std::io::Seek>(
+            pub(crate) async fn read_embedded_thumbnail_info_async(
                 &self,
                 structure: &$crate::Structure,
-                source: &mut R,
+                src: &mut $crate::sans_io::io::Src,
             ) -> $crate::Result<Option<$crate::thumbnail::EmbeddedThumbnailInfo>> {
                 match self {
                     $(
                         $(#[$meta])*
-                        Handler::$variant(h) => h.read_embedded_thumbnail_info(structure, source),
+                        Handler::$variant(h) => h.read_embedded_thumbnail_info_async(structure, src).await,
                     )*
                 }
             }
 
             #[cfg(feature = "exif")]
             #[allow(unreachable_patterns)]
-            pub(crate) fn read_exif_info<R: std::io::Read + std::io::Seek>(
+            pub(crate) async fn read_exif_info_async(
                 &self,
                 structure: &$crate::Structure,
-                source: &mut R,
+                src: &mut $crate::sans_io::io::Src,
             ) -> $crate::Result<Option<$crate::tiff::ExifInfo>> {
                 match self {
                     $(
                         $(#[$meta])*
-                        Handler::$variant(h) => h.read_exif_info(structure, source),
+                        Handler::$variant(h) => h.read_exif_info_async(structure, src).await,
                     )*
                 }
             }
@@ -445,18 +264,17 @@ macro_rules! register_containers {
             }
         }
 
-        /// Detect container from file header
-        pub(crate) fn detect_container<R: std::io::Read + std::io::Seek>(
-            source: &mut R
+        /// Detect container from the first bytes of `src` (reads at most 16 bytes at offset 0).
+        pub(crate) async fn detect_container_async(
+            src: &mut $crate::sans_io::io::Src,
         ) -> $crate::Result<ContainerKind> {
-            use std::io::SeekFrom;
-
-            source.seek(SeekFrom::Start(0))?;
+            src.seek(std::io::SeekFrom::Start(0))?;
+            let want = src.len().min(16) as usize;
             let mut header = [0u8; 16];
-            let n = source.read(&mut header)?;
-            let header = &header[..n];
+            src.read_exact_direct(&mut header[..want]).await?;
+            let header = &header[..want];
 
-            if n < 2 {
+            if want < 2 {
                 return Err($crate::Error::InvalidFormat("File too small".into()));
             }
 
@@ -469,6 +287,84 @@ macro_rules! register_containers {
 
             Err($crate::Error::UnsupportedFormat)
         }
+
+        // Blocking shims over the async container methods, for unit tests only.
+        $(
+            $(#[$meta])*
+            #[cfg(test)]
+            #[allow(dead_code)]
+            impl $module::$io {
+                pub(crate) fn parse<R: std::io::Read + std::io::Seek>(&self, source: &mut R) -> $crate::Result<$crate::Structure> {
+                    let len = source.seek(std::io::SeekFrom::End(0))?;
+                    let m = $crate::sans_io::Machine::new(|io| async move {
+                        let mut src = $crate::sans_io::io::Src::new(io, len);
+                        self.parse_async(&mut src).await
+                    });
+                    $crate::sans_io::drive(m, Some(source), None, 0, None)
+                }
+
+                pub(crate) fn read_xmp<R: std::io::Read + std::io::Seek>(&self, structure: &$crate::Structure, source: &mut R) -> $crate::Result<Option<Vec<u8>>> {
+                    let len = source.seek(std::io::SeekFrom::End(0))?;
+                    let m = $crate::sans_io::Machine::new(|io| async move {
+                        let mut src = $crate::sans_io::io::Src::new(io, len);
+                        self.read_xmp_async(structure, &mut src).await
+                    });
+                    $crate::sans_io::drive(m, Some(source), None, 0, None)
+                }
+
+                pub(crate) fn read_jumbf<R: std::io::Read + std::io::Seek>(&self, structure: &$crate::Structure, source: &mut R) -> $crate::Result<Option<Vec<u8>>> {
+                    let len = source.seek(std::io::SeekFrom::End(0))?;
+                    let m = $crate::sans_io::Machine::new(|io| async move {
+                        let mut src = $crate::sans_io::io::Src::new(io, len);
+                        self.read_jumbf_async(structure, &mut src).await
+                    });
+                    $crate::sans_io::drive(m, Some(source), None, 0, None)
+                }
+
+                #[cfg(feature = "exif")]
+                pub(crate) fn read_exif_info<R: std::io::Read + std::io::Seek>(&self, structure: &$crate::Structure, source: &mut R) -> $crate::Result<Option<$crate::tiff::ExifInfo>> {
+                    let len = source.seek(std::io::SeekFrom::End(0))?;
+                    let m = $crate::sans_io::Machine::new(|io| async move {
+                        let mut src = $crate::sans_io::io::Src::new(io, len);
+                        self.read_exif_info_async(structure, &mut src).await
+                    });
+                    $crate::sans_io::drive(m, Some(source), None, 0, None)
+                }
+
+                #[cfg(feature = "exif")]
+                pub(crate) fn read_embedded_thumbnail_info<R: std::io::Read + std::io::Seek>(&self, structure: &$crate::Structure, source: &mut R) -> $crate::Result<Option<$crate::thumbnail::EmbeddedThumbnailInfo>> {
+                    let len = source.seek(std::io::SeekFrom::End(0))?;
+                    let m = $crate::sans_io::Machine::new(|io| async move {
+                        let mut src = $crate::sans_io::io::Src::new(io, len);
+                        self.read_embedded_thumbnail_info_async(structure, &mut src).await
+                    });
+                    $crate::sans_io::drive(m, Some(source), None, 0, None)
+                }
+
+                pub(crate) fn write<R: std::io::Read + std::io::Seek, W: std::io::Write + std::io::Seek>(&self, structure: &$crate::Structure, source: &mut R, writer: &mut W, updates: &$crate::Updates) -> $crate::Result<()> {
+                    self.write_inner(structure, source, writer, updates, None)
+                }
+
+                pub(crate) fn write_with_processor<R: std::io::Read + std::io::Seek, W: std::io::Write + std::io::Seek, F: $crate::ProcessChunkFn>(&self, structure: &$crate::Structure, source: &mut R, writer: &mut W, updates: &$crate::Updates, processor: &mut F) -> $crate::Result<()> {
+                    let mut p = |c: &dyn $crate::ProcessChunk| processor(c);
+                    self.write_inner(structure, source, writer, updates, Some(&mut p))
+                }
+
+                fn write_inner<R: std::io::Read + std::io::Seek, W: std::io::Write + std::io::Seek>(&self, structure: &$crate::Structure, source: &mut R, writer: &mut W, updates: &$crate::Updates, processor: Option<&mut dyn FnMut(&dyn $crate::ProcessChunk) -> $crate::Result<()>>) -> $crate::Result<()> {
+                    let len = source.seek(std::io::SeekFrom::End(0))?;
+                    let base = writer.stream_position()?;
+                    let process = processor.is_some();
+                    let m = $crate::sans_io::Machine::new(|io| async move {
+                        let mut src = $crate::sans_io::io::Src::new(io.clone(), len);
+                        let mut dst = $crate::sans_io::io::Dst::new(io);
+                        let mut pw = $crate::sans_io::io::PDst::new(&mut dst, process);
+                        self.write_async(structure, &mut src, &mut pw, updates).await?;
+                        pw.flush().await
+                    });
+                    $crate::sans_io::drive(m, Some(source), Some(writer), base, processor)
+                }
+            }
+        )*
 
         /// Get handler for a container
         pub(crate) fn get_handler(container: ContainerKind) -> $crate::Result<Handler> {

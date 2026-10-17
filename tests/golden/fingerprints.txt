@@ -1,0 +1,273 @@
+Designer.jpeg::jumbf = 13052:1831487ee85bfda9f00fe8cf
+Designer.jpeg::parse = 180951b449ec422bc9c93fc1
+Designer.jpeg::read_process/keep = ev=2 bytes=129597 9022ebf18402d48a27e0ae6b
+Designer.jpeg::read_process/remove_all = ev=2 bytes=129597 9022ebf18402d48a27e0ae6b
+Designer.jpeg::read_process/set_both_excl_data = ev=3 bytes=116545 54c2a0f4db2afdb9d9a60199
+Designer.jpeg::read_process/set_jumbf = ev=2 bytes=129597 9022ebf18402d48a27e0ae6b
+Designer.jpeg::read_process/set_jumbf_excl_entire = ev=30 bytes=116545 9620f0f8aff05d4b40cf6a04
+Designer.jpeg::read_process/set_xmp = ev=2 bytes=129597 9022ebf18402d48a27e0ae6b
+Designer.jpeg::write/keep = 129297:4c024f4579818cad6c502de2 dest=180951b449ec422bc9c93fc1
+Designer.jpeg::write/remove_all = 116233:3b59c02597c3fb78a827d41f dest=c017a80a8365830526e3e629
+Designer.jpeg::write/set_both_excl_data = 121392:cbd311c29dfc3bcd39689d67 dest=ff4c2d543b3e05d5b237eda4
+Designer.jpeg::write/set_jumbf = 121245:598a05656ad7efa943d9c4b5 dest=974738454eef8ddc71a3cb2a
+Designer.jpeg::write/set_jumbf_excl_entire = 121245:598a05656ad7efa943d9c4b5 dest=974738454eef8ddc71a3cb2a
+Designer.jpeg::write/set_xmp = 129444:63caf2f6aa1fd7f3b2ad0678 dest=62b8fb85cede730bcc188397
+Designer.jpeg::write_process/keep = 129297:4c024f4579818cad6c502de2 ev=46 bytes=129297 1db2d4b77b87c56336989b0e
+Designer.jpeg::write_process/remove_all = 116233:3b59c02597c3fb78a827d41f ev=38 bytes=116233 76eb8d51ecb736992ea7a818
+Designer.jpeg::write_process/set_both_excl_data = 121392:cbd311c29dfc3bcd39689d67 ev=51 bytes=116392 72836efea3d68a4878aa059d
+Designer.jpeg::write_process/set_jumbf = 121245:598a05656ad7efa943d9c4b5 ev=46 bytes=121245 9b7c9f62651dbed60849bb0c
+Designer.jpeg::write_process/set_jumbf_excl_entire = 121245:598a05656ad7efa943d9c4b5 ev=39 bytes=116233 859dc58a4bf1b95696234c69
+Designer.jpeg::write_process/set_xmp = 129444:63caf2f6aa1fd7f3b2ad0678 ev=52 bytes=129444 5d43f8ab0823cbe5260fc7a3
+Designer.jpeg::xmp = none
+FireflyTrain.jpg::jumbf = 97886:c6c14a952bf1aa2d6f27f748
+FireflyTrain.jpg::parse = d503c804b282f635c5a54435
+FireflyTrain.jpg::read_process/keep = ev=3 bytes=165213 5f6929c135b41668b139118a
+FireflyTrain.jpg::read_process/remove_all = ev=3 bytes=165213 5f6929c135b41668b139118a
+FireflyTrain.jpg::read_process/set_both_excl_data = ev=3 bytes=101213 70159b2b095659e7446ad12f
+FireflyTrain.jpg::read_process/set_jumbf = ev=3 bytes=165213 5f6929c135b41668b139118a
+FireflyTrain.jpg::read_process/set_jumbf_excl_entire = ev=26 bytes=101213 0b82f049839097fc627b7911
+FireflyTrain.jpg::read_process/set_xmp = ev=3 bytes=165213 5f6929c135b41668b139118a
+FireflyTrain.jpg::write/keep = 164913:b949088d1fa7c2052f3b69f4 dest=013fb16ecc087eb01e45feae
+FireflyTrain.jpg::write/remove_all = 66555:1ce554acb7aeacdad2453c1f dest=ae64b1c71772d625c06400fd
+FireflyTrain.jpg::write/set_both_excl_data = 71714:d5790e4bc6c8e4b9f5269837 dest=a0b8203190da698c8ac506fb
+FireflyTrain.jpg::write/set_jumbf = 72007:281d97e1c53487518f1447f9 dest=f649c3d9ce4b193951c2fe8c
+FireflyTrain.jpg::write/set_jumbf_excl_entire = 72007:281d97e1c53487518f1447f9 dest=f649c3d9ce4b193951c2fe8c
+FireflyTrain.jpg::write/set_xmp = 164620:c0f2cbed119a2f4d298ed5a9 dest=70de712259345348496d3e71
+FireflyTrain.jpg::write_process/keep = 164913:b949088d1fa7c2052f3b69f4 ev=54 bytes=164913 dee1daf8c0a8ed2f58e67f77
+FireflyTrain.jpg::write_process/remove_all = 66555:1ce554acb7aeacdad2453c1f ev=32 bytes=66555 c483583a5241e973438ee792
+FireflyTrain.jpg::write_process/set_both_excl_data = 71714:d5790e4bc6c8e4b9f5269837 ev=45 bytes=66714 8844274376a58de9f598c663
+FireflyTrain.jpg::write_process/set_jumbf = 72007:281d97e1c53487518f1447f9 ev=46 bytes=72007 a30ac72f4188c558e7e5e26a
+FireflyTrain.jpg::write_process/set_jumbf_excl_entire = 72007:281d97e1c53487518f1447f9 ev=39 bytes=66995 9c81df28d71b2c5f5ffe079c
+FireflyTrain.jpg::write_process/set_xmp = 164620:c0f2cbed119a2f4d298ed5a9 ev=54 bytes=164620 0b632d56cbdb654b7c434e68
+FireflyTrain.jpg::xmp = 407:18e360550bf9fd495cf618d1
+GreenCat.png::jumbf = 52179:7ed0f8279092a8798bce5ad5
+GreenCat.png::parse = b7b37473247cbdc7d749e049
+GreenCat.png::read_process/keep = ev=38 bytes=2466450 7771a1460e5de7593361b44c
+GreenCat.png::read_process/remove_all = ev=38 bytes=2466450 7771a1460e5de7593361b44c
+GreenCat.png::read_process/set_both_excl_data = ev=38 bytes=2414267 26481b53a4517d0c93e8fafa
+GreenCat.png::read_process/set_jumbf = ev=38 bytes=2466450 7771a1460e5de7593361b44c
+GreenCat.png::read_process/set_jumbf_excl_entire = ev=591 bytes=2414267 dff7c0ab13e20f5addbd80ec
+GreenCat.png::read_process/set_xmp = ev=38 bytes=2466450 7771a1460e5de7593361b44c
+GreenCat.png::write/keep = 2466450:8a62c7e87588d1db028ed8b7 dest=b7b37473247cbdc7d749e049
+GreenCat.png::write/remove_all = 2414259:d56d28c19674b57326331493 dest=df4b14b9c2b16de3b0cc66ed
+GreenCat.png::write/set_both_excl_data = 2419419:5a31d3baab33135587636e36 dest=24169a0a13c386dcfe1587f1
+GreenCat.png::write/set_jumbf = 2419271:bf08fb790421be98181b0d96 dest=705368222c912f7d2c3be4f7
+GreenCat.png::write/set_jumbf_excl_entire = 2419271:bf08fb790421be98181b0d96 dest=705368222c912f7d2c3be4f7
+GreenCat.png::write/set_xmp = 2466598:c5aa119ed66c8b93080fec55 dest=9a3059db92e045f9f5c4536f
+GreenCat.png::write_process/keep = 2466450:8a62c7e87588d1db028ed8b7 ev=121 bytes=2466450 62da539af9e8147547c0e449
+GreenCat.png::write_process/remove_all = 2414259:d56d28c19674b57326331493 ev=116 bytes=2414259 9bfc22c292b6d115909d86fe
+GreenCat.png::write_process/set_both_excl_data = 2419419:5a31d3baab33135587636e36 ev=124 bytes=2414415 78e9780106424979c9c11997
+GreenCat.png::write_process/set_jumbf = 2419271:bf08fb790421be98181b0d96 ev=121 bytes=2419271 e3280d2466a94311f21e8d1e
+GreenCat.png::write_process/set_jumbf_excl_entire = 2419271:bf08fb790421be98181b0d96 ev=117 bytes=2414259 18ca24773cf8cf817e1d300b
+GreenCat.png::write_process/set_xmp = 2466598:c5aa119ed66c8b93080fec55 ev=126 bytes=2466598 2396b0e77a45adcd72290328
+GreenCat.png::xmp = none
+P1000708.jpg::jumbf = none
+P1000708.jpg::parse = ac46ae6c6c2761aeab2292ed
+P1000708.jpg::read_process/keep = ev=13 bytes=829682 4a6feb2f2e65d87eb0bc4601
+P1000708.jpg::read_process/remove_all = ev=13 bytes=829682 4a6feb2f2e65d87eb0bc4601
+P1000708.jpg::read_process/set_both_excl_data = ev=13 bytes=829682 4a6feb2f2e65d87eb0bc4601
+P1000708.jpg::read_process/set_jumbf = ev=13 bytes=829682 4a6feb2f2e65d87eb0bc4601
+P1000708.jpg::read_process/set_jumbf_excl_entire = ev=203 bytes=829682 0aea6247f6a9fecf9afee3e3
+P1000708.jpg::read_process/set_xmp = ev=13 bytes=829682 4a6feb2f2e65d87eb0bc4601
+P1000708.jpg::write/keep = 829682:c18eb919bafe4cba0b9ee159 dest=70497276ff1c182467a18236
+P1000708.jpg::write/remove_all = 817756:8948b1c1752348718b117c83 dest=459e650858edcd128b88a6d7
+P1000708.jpg::write/set_both_excl_data = 822915:9899792790089fd43ebc2318 dest=d3b44825ef84843f5b0a1d96
+P1000708.jpg::write/set_jumbf = 834694:63e00812bbdfe8bc380f6707 dest=aa35c7f520aaaa7b61ce7bcd
+P1000708.jpg::write/set_jumbf_excl_entire = 834694:63e00812bbdfe8bc380f6707 dest=aa35c7f520aaaa7b61ce7bcd
+P1000708.jpg::write/set_xmp = 817903:52991211faa5b7949c671ea2 dest=cc37f9d03a2f705a728a1695
+P1000708.jpg::write_process/keep = 829682:c18eb919bafe4cba0b9ee159 ev=130 bytes=829682 d5648ed854f678ddfc57ffd5
+P1000708.jpg::write_process/remove_all = 817756:8948b1c1752348718b117c83 ev=123 bytes=817756 a17efa3615754c33c7c9ef9d
+P1000708.jpg::write_process/set_both_excl_data = 822915:9899792790089fd43ebc2318 ev=136 bytes=817915 b66cc76c5487d2982fa203a0
+P1000708.jpg::write_process/set_jumbf = 834694:63e00812bbdfe8bc380f6707 ev=138 bytes=834694 54c57825c2f97ee9751343c0
+P1000708.jpg::write_process/set_jumbf_excl_entire = 834694:63e00812bbdfe8bc380f6707 ev=131 bytes=829682 7a47ad294806c8a6609337a8
+P1000708.jpg::write_process/set_xmp = 817903:52991211faa5b7949c671ea2 ev=129 bytes=817903 e4052dad6f16d07a3cc822ab
+P1000708.jpg::xmp = 11893:798c4cb37944fd5006113864
+gen:plain.pdf::jumbf = none
+gen:plain.pdf::parse = 53fd3ddf8952c367d3f381bf
+gen:plain.pdf::read_process/keep = ev=1 bytes=233 c1ba7dced44bbe83586fa680
+gen:plain.pdf::read_process/remove_all = ev=1 bytes=233 c1ba7dced44bbe83586fa680
+gen:plain.pdf::read_process/set_both_excl_data = ev=1 bytes=233 c1ba7dced44bbe83586fa680
+gen:plain.pdf::read_process/set_jumbf = ev=1 bytes=233 c1ba7dced44bbe83586fa680
+gen:plain.pdf::read_process/set_jumbf_excl_entire = ev=1 bytes=233 c1ba7dced44bbe83586fa680
+gen:plain.pdf::read_process/set_xmp = ev=1 bytes=233 c1ba7dced44bbe83586fa680
+gen:plain.pdf::write/keep = 233:50dc246b4ff9509811a23d9f dest=53fd3ddf8952c367d3f381bf
+gen:plain.pdf::write/remove_all = 510:e0fd0d1afbee0ec8945cb923 dest=a58502b72e8e0416efc7a58f
+gen:plain.pdf::write/set_both_excl_data = 6150:1f1feb91927c4002dd9af5e0 dest=005a1667a9f8fec8064f1362
+gen:plain.pdf::write/set_jumbf = 5915:4e0e44f51f137c9bb3b0840b dest=176332d96a2d7cd08fb6909a
+gen:plain.pdf::write/set_jumbf_excl_entire = 5915:4e0e44f51f137c9bb3b0840b dest=176332d96a2d7cd08fb6909a
+gen:plain.pdf::write/set_xmp = 611:6c11dfa582799bc5fa3a0833 dest=a60266d69d3e206d9b0523d9
+gen:plain.pdf::write_process/keep = 233:50dc246b4ff9509811a23d9f ev=4 bytes=233 4ee35ee0d19c3d96e843b6e3
+gen:plain.pdf::write_process/remove_all = 510:e0fd0d1afbee0ec8945cb923 ev=9 bytes=510 6dd902ffdee496d964e575c5
+gen:plain.pdf::write_process/set_both_excl_data = 6150:1f1feb91927c4002dd9af5e0 ev=19 bytes=1150 e45154658c4d4bc5b82b688a
+gen:plain.pdf::write_process/set_jumbf = 5915:4e0e44f51f137c9bb3b0840b ev=15 bytes=5915 7fb212f60ce72886a93fb6f6
+gen:plain.pdf::write_process/set_jumbf_excl_entire = 5915:4e0e44f51f137c9bb3b0840b ev=14 bytes=915 4014be8fe8978c59bdad0035
+gen:plain.pdf::write_process/set_xmp = 611:6c11dfa582799bc5fa3a0833 ev=12 bytes=611 7c30e418d5ec2e531b4ca47d
+gen:plain.pdf::xmp = none
+pdf_metadata.pdf::jumbf = 8:05b3abf2579a5eb66403cd78
+pdf_metadata.pdf::parse = 7d91d8d0ef0007402afb3e05
+pdf_metadata.pdf::read_process/keep = ev=1 bytes=514 af4c61da3269681b8536b60c
+pdf_metadata.pdf::read_process/remove_all = ev=1 bytes=514 af4c61da3269681b8536b60c
+pdf_metadata.pdf::read_process/set_both_excl_data = ev=2 bytes=506 099127178df5698764bbb7f7
+pdf_metadata.pdf::read_process/set_jumbf = ev=1 bytes=514 af4c61da3269681b8536b60c
+pdf_metadata.pdf::read_process/set_jumbf_excl_entire = ev=2 bytes=506 099127178df5698764bbb7f7
+pdf_metadata.pdf::read_process/set_xmp = ev=1 bytes=514 af4c61da3269681b8536b60c
+pdf_metadata.pdf::write/keep = 514:dc24db94413fd6e921390607 dest=7d91d8d0ef0007402afb3e05
+pdf_metadata.pdf::write/remove_all = ERR(Unsupported feature: writing PDF C2PA requires registration in a flat EmbeddedFiles name tree)
+pdf_metadata.pdf::write/set_both_excl_data = ERR(Unsupported feature: writing PDF C2PA requires registration in a flat EmbeddedFiles name tree)
+pdf_metadata.pdf::write/set_jumbf = ERR(Unsupported feature: writing PDF C2PA requires registration in a flat EmbeddedFiles name tree)
+pdf_metadata.pdf::write/set_jumbf_excl_entire = ERR(Unsupported feature: writing PDF C2PA requires registration in a flat EmbeddedFiles name tree)
+pdf_metadata.pdf::write/set_xmp = ERR(Unsupported feature: writing PDF C2PA requires registration in a flat EmbeddedFiles name tree)
+pdf_metadata.pdf::write_process/keep = 514:dc24db94413fd6e921390607 ev=12 bytes=514 ace772e40a2d4245f1311135
+pdf_metadata.pdf::write_process/remove_all = ERR(Unsupported feature: writing PDF C2PA requires registration in a flat EmbeddedFiles name tree)
+pdf_metadata.pdf::write_process/set_both_excl_data = ERR(Unsupported feature: writing PDF C2PA requires registration in a flat EmbeddedFiles name tree)
+pdf_metadata.pdf::write_process/set_jumbf = ERR(Unsupported feature: writing PDF C2PA requires registration in a flat EmbeddedFiles name tree)
+pdf_metadata.pdf::write_process/set_jumbf_excl_entire = ERR(Unsupported feature: writing PDF C2PA requires registration in a flat EmbeddedFiles name tree)
+pdf_metadata.pdf::write_process/set_xmp = ERR(Unsupported feature: writing PDF C2PA requires registration in a flat EmbeddedFiles name tree)
+pdf_metadata.pdf::xmp = 6:0f7aaa74487f43dac073559d
+sample1.avif::jumbf = none
+sample1.avif::parse = 4c0d8e102517b56b75ce8a62
+sample1.avif::read_process/keep = ev=2 bytes=97111 c6602ed270a0cbc8409477b4
+sample1.avif::read_process/remove_all = ev=2 bytes=97111 c6602ed270a0cbc8409477b4
+sample1.avif::read_process/set_both_excl_data = ev=2 bytes=97111 c6602ed270a0cbc8409477b4
+sample1.avif::read_process/set_jumbf = ev=2 bytes=97111 c6602ed270a0cbc8409477b4
+sample1.avif::read_process/set_jumbf_excl_entire = ev=24 bytes=97111 c8e439b3e05b937b179b8715
+sample1.avif::read_process/set_xmp = ev=2 bytes=97111 c6602ed270a0cbc8409477b4
+sample1.avif::write/keep = 97436:a10de8204aee73ba1786daca dest=8f9979e569fe98a2d5d90b78
+sample1.avif::write/remove_all = 97436:a10de8204aee73ba1786daca dest=8f9979e569fe98a2d5d90b78
+sample1.avif::write/set_both_excl_data = 102619:f0c93a4556daf06d50284f9f dest=e96b8c5c75405c7bb352d167
+sample1.avif::write/set_jumbf = 102481:9cc83fbd3cea0aca0c4635ce dest=420f2f473924c7dba2bf3258
+sample1.avif::write/set_jumbf_excl_entire = 102481:9cc83fbd3cea0aca0c4635ce dest=420f2f473924c7dba2bf3258
+sample1.avif::write/set_xmp = 97574:daba583b3cdcc4d7e9b83782 dest=6e00c704e7ee7d9e932850bd
+sample1.avif::write_process/keep = 97436:a10de8204aee73ba1786daca ev=3 bytes=194507 99362d3067b87a07776a5699
+sample1.avif::write_process/remove_all = 97436:a10de8204aee73ba1786daca ev=3 bytes=194507 99362d3067b87a07776a5699
+sample1.avif::write_process/set_both_excl_data = 102619:f0c93a4556daf06d50284f9f ev=10 bytes=97566 868dbbeb75df739084c14f6d
+sample1.avif::write_process/set_jumbf = 102481:9cc83fbd3cea0aca0c4635ce ev=3 bytes=194507 99362d3067b87a07776a5699
+sample1.avif::write_process/set_jumbf_excl_entire = 102481:9cc83fbd3cea0aca0c4635ce ev=5 bytes=97420 c17ab12c3287dd570a7127b6
+sample1.avif::write_process/set_xmp = 97574:daba583b3cdcc4d7e9b83782 ev=7 bytes=194645 7c2c7551f032e80e6879594e
+sample1.avif::xmp = none
+sample1.heic::jumbf = none
+sample1.heic::parse = d84d4f827cb95fb423eea092
+sample1.heic::read_process/keep = ev=5 bytes=293066 46934c4a9f5c65f9209d7931
+sample1.heic::read_process/remove_all = ev=5 bytes=293066 46934c4a9f5c65f9209d7931
+sample1.heic::read_process/set_both_excl_data = ev=5 bytes=293066 46934c4a9f5c65f9209d7931
+sample1.heic::read_process/set_jumbf = ev=5 bytes=293066 46934c4a9f5c65f9209d7931
+sample1.heic::read_process/set_jumbf_excl_entire = ev=72 bytes=293066 141deba8ba7ba5647c08c750
+sample1.heic::read_process/set_xmp = ev=5 bytes=293066 46934c4a9f5c65f9209d7931
+sample1.heic::write/keep = 293608:00d9e0636b645036f77b3809 dest=cd377ea655db808406e90cf9
+sample1.heic::write/remove_all = 293608:00d9e0636b645036f77b3809 dest=cd377ea655db808406e90cf9
+sample1.heic::write/set_both_excl_data = 298791:e31bb587192c826932f5191d dest=99c9a9b52c9ea6786b6803c9
+sample1.heic::write/set_jumbf = 298653:f97a80329ee52ad4e73cd21d dest=6b3bbe148d00629d7d000683
+sample1.heic::write/set_jumbf_excl_entire = 298653:f97a80329ee52ad4e73cd21d dest=6b3bbe148d00629d7d000683
+sample1.heic::write/set_xmp = 293746:812fbeb6c12262dbfbb51236 dest=19b798e020cb0d1d7df18b60
+sample1.heic::write_process/keep = 293608:00d9e0636b645036f77b3809 ev=3 bytes=586642 9cdfe0a977ad6be94672718d
+sample1.heic::write_process/remove_all = 293608:00d9e0636b645036f77b3809 ev=3 bytes=586642 9cdfe0a977ad6be94672718d
+sample1.heic::write_process/set_both_excl_data = 298791:e31bb587192c826932f5191d ev=10 bytes=293746 27cb7be16c82b209fa9c9d6c
+sample1.heic::write_process/set_jumbf = 298653:f97a80329ee52ad4e73cd21d ev=3 bytes=586642 9cdfe0a977ad6be94672718d
+sample1.heic::write_process/set_jumbf_excl_entire = 298653:f97a80329ee52ad4e73cd21d ev=5 bytes=293600 d84c85b70db6b85be4011e65
+sample1.heic::write_process/set_xmp = 293746:812fbeb6c12262dbfbb51236 ev=7 bytes=586780 4e03b3be7fa5db5fc962a8f4
+sample1.heic::xmp = none
+sample1.heif::jumbf = none
+sample1.heif::parse = 62bef3b91798ae2151802911
+sample1.heif::read_process/keep = ev=39 bytes=2503075 b07f9afef55b90bce3990818
+sample1.heif::read_process/remove_all = ev=39 bytes=2503075 b07f9afef55b90bce3990818
+sample1.heif::read_process/set_both_excl_data = ev=39 bytes=2503075 b07f9afef55b90bce3990818
+sample1.heif::read_process/set_jumbf = ev=39 bytes=2503075 b07f9afef55b90bce3990818
+sample1.heif::read_process/set_jumbf_excl_entire = ev=612 bytes=2503075 b97be1bbec38efeaa76ad215
+sample1.heif::read_process/set_xmp = ev=39 bytes=2503075 b07f9afef55b90bce3990818
+sample1.heif::write/keep = 2503495:46ac93516093b70bfed23d11 dest=1cb46a99366602bab6224f45
+sample1.heif::write/remove_all = 2503495:46ac93516093b70bfed23d11 dest=1cb46a99366602bab6224f45
+sample1.heif::write/set_both_excl_data = 2508678:d5539090c6a4a3d6d441f2b7 dest=b71765fd8fdd753e03605adb
+sample1.heif::write/set_jumbf = 2508540:6403abd37eb10c0d3ed989c1 dest=d97719a7546935b7d7f6bf0e
+sample1.heif::write/set_jumbf_excl_entire = 2508540:6403abd37eb10c0d3ed989c1 dest=d97719a7546935b7d7f6bf0e
+sample1.heif::write/set_xmp = 2503633:e8b4f8c616850ec418ec410e dest=1e054ae98df5b52ed05f8217
+sample1.heif::write_process/keep = 2503495:46ac93516093b70bfed23d11 ev=3 bytes=5006538 b7f71dfa3ea7fb2283d2b79a
+sample1.heif::write_process/remove_all = 2503495:46ac93516093b70bfed23d11 ev=3 bytes=5006538 b7f71dfa3ea7fb2283d2b79a
+sample1.heif::write_process/set_both_excl_data = 2508678:d5539090c6a4a3d6d441f2b7 ev=10 bytes=2503633 0ee5561ab80a193a197869af
+sample1.heif::write_process/set_jumbf = 2508540:6403abd37eb10c0d3ed989c1 ev=3 bytes=5006538 b7f71dfa3ea7fb2283d2b79a
+sample1.heif::write_process/set_jumbf_excl_entire = 2508540:6403abd37eb10c0d3ed989c1 ev=5 bytes=2503487 cfdb8e942de23921fd6ed54f
+sample1.heif::write_process/set_xmp = 2503633:e8b4f8c616850ec418ec410e ev=7 bytes=5006676 a824209425e801ae8c1e1c4d
+sample1.heif::xmp = none
+sample1.m4a::jumbf = none
+sample1.m4a::parse = e3b93d4ad552d9a9471a4d94
+sample1.m4a::read_process/keep = ev=61 bytes=3977804 552cf112ad3bfc9c8c8abc4a
+sample1.m4a::read_process/remove_all = ev=61 bytes=3977804 552cf112ad3bfc9c8c8abc4a
+sample1.m4a::read_process/set_both_excl_data = ev=61 bytes=3977804 552cf112ad3bfc9c8c8abc4a
+sample1.m4a::read_process/set_jumbf = ev=61 bytes=3977804 552cf112ad3bfc9c8c8abc4a
+sample1.m4a::read_process/set_jumbf_excl_entire = ev=972 bytes=3977804 efdfee61f4b6fbca5ff4ddb4
+sample1.m4a::read_process/set_xmp = ev=61 bytes=3977804 552cf112ad3bfc9c8c8abc4a
+sample1.m4a::write/keep = 4026956:ccf3d4df4d927b92094473af dest=790b44b5bf721d8183b15066
+sample1.m4a::write/remove_all = 4026956:ccf3d4df4d927b92094473af dest=790b44b5bf721d8183b15066
+sample1.m4a::write/set_both_excl_data = 4032139:597d986c7aa57b36c1d5b787 dest=5f0556fd2140de760a3a834b
+sample1.m4a::write/set_jumbf = 4032001:4305d9bf481399d0ff5e5bc6 dest=e7de977a87518c04d5dabc6f
+sample1.m4a::write/set_jumbf_excl_entire = 4032001:4305d9bf481399d0ff5e5bc6 dest=e7de977a87518c04d5dabc6f
+sample1.m4a::write/set_xmp = 4027094:59d3b7cc105ac6b8b306df70 dest=50028ed84e29d565d921265a
+sample1.m4a::write_process/keep = 4026956:ccf3d4df4d927b92094473af ev=3 bytes=7980779 121d50861ee8d1a881d6e7d1
+sample1.m4a::write_process/remove_all = 4026956:ccf3d4df4d927b92094473af ev=3 bytes=7980779 121d50861ee8d1a881d6e7d1
+sample1.m4a::write_process/set_both_excl_data = 4032139:597d986c7aa57b36c1d5b787 ev=10 bytes=4003145 7e74b9532116371b05bafec6
+sample1.m4a::write_process/set_jumbf = 4032001:4305d9bf481399d0ff5e5bc6 ev=3 bytes=7980779 5dd36335b878f42f727dcc5d
+sample1.m4a::write_process/set_jumbf_excl_entire = 4032001:4305d9bf481399d0ff5e5bc6 ev=5 bytes=4002999 c87dcb57362899768e452145
+sample1.m4a::write_process/set_xmp = 4027094:59d3b7cc105ac6b8b306df70 ev=7 bytes=7980917 37cbb5ea71770c6adec0f235
+sample1.m4a::xmp = none
+sample1.png::jumbf = none
+sample1.png::parse = 8b1231872633441dd1aebfba
+sample1.png::read_process/keep = ev=5 bytes=299257 2086fcee3a1d2ea9ecf007cd
+sample1.png::read_process/remove_all = ev=5 bytes=299257 2086fcee3a1d2ea9ecf007cd
+sample1.png::read_process/set_both_excl_data = ev=5 bytes=299257 2086fcee3a1d2ea9ecf007cd
+sample1.png::read_process/set_jumbf = ev=5 bytes=299257 2086fcee3a1d2ea9ecf007cd
+sample1.png::read_process/set_jumbf_excl_entire = ev=74 bytes=299257 f37b698d566e010c95bd557c
+sample1.png::read_process/set_xmp = ev=5 bytes=299257 2086fcee3a1d2ea9ecf007cd
+sample1.png::write/keep = 299257:0bd72c972c14e5fd27d8473c dest=8b1231872633441dd1aebfba
+sample1.png::write/remove_all = 299257:0bd72c972c14e5fd27d8473c dest=8b1231872633441dd1aebfba
+sample1.png::write/set_both_excl_data = 304417:07f4b2516d8554a1f002cc18 dest=625b0becad9b738c6e9e1fad
+sample1.png::write/set_jumbf = 304269:636da3b02ae4513a41de34aa dest=c094358b7764b9aca4a10daa
+sample1.png::write/set_jumbf_excl_entire = 304269:636da3b02ae4513a41de34aa dest=c094358b7764b9aca4a10daa
+sample1.png::write/set_xmp = 299405:2fbb9231ea46d9177a95d781 dest=f74e2be5e3510806b51e1397
+sample1.png::write_process/keep = 299257:0bd72c972c14e5fd27d8473c ev=130 bytes=299257 fe275a8c9d1bb86725358b4c
+sample1.png::write_process/remove_all = 299257:0bd72c972c14e5fd27d8473c ev=130 bytes=299257 fe275a8c9d1bb86725358b4c
+sample1.png::write_process/set_both_excl_data = 304417:07f4b2516d8554a1f002cc18 ev=138 bytes=299413 804b7f339c714bd4bebf72a5
+sample1.png::write_process/set_jumbf = 304269:636da3b02ae4513a41de34aa ev=135 bytes=304269 d32e6c25170daaa3f9294f0a
+sample1.png::write_process/set_jumbf_excl_entire = 304269:636da3b02ae4513a41de34aa ev=131 bytes=299257 0dcc328345d62f8713696058
+sample1.png::write_process/set_xmp = 299405:2fbb9231ea46d9177a95d781 ev=135 bytes=299405 828dca26185aeff4f7b461c8
+sample1.png::xmp = none
+sample1.wav::jumbf = none
+sample1.wav::parse = 79d30ecf41ccc3dc49ba706c
+sample1.wav::read_process/keep = ev=17 bytes=1073218 171b170b105fcfd32a259bf2
+sample1.wav::read_process/remove_all = ev=17 bytes=1073218 171b170b105fcfd32a259bf2
+sample1.wav::read_process/set_both_excl_data = ev=17 bytes=1073218 171b170b105fcfd32a259bf2
+sample1.wav::read_process/set_jumbf = ev=17 bytes=1073218 171b170b105fcfd32a259bf2
+sample1.wav::read_process/set_jumbf_excl_entire = ev=263 bytes=1073218 a70c8ffd5adfcba41f740d1a
+sample1.wav::read_process/set_xmp = ev=17 bytes=1073218 171b170b105fcfd32a259bf2
+sample1.wav::write/keep = 1073218:359fad906e83ff3aaec01908 dest=79d30ecf41ccc3dc49ba706c
+sample1.wav::write/remove_all = 1073218:359fad906e83ff3aaec01908 dest=79d30ecf41ccc3dc49ba706c
+sample1.wav::write/set_both_excl_data = 1078348:be1378f7a8a37c92f41d8910 dest=87cf3f82a16474ac7f0792e2
+sample1.wav::write/set_jumbf = 1078226:3c2054082f18b9609872ea3a dest=3901fc90c7b1a1f52b03b12d
+sample1.wav::write/set_jumbf_excl_entire = 1078226:3c2054082f18b9609872ea3a dest=3901fc90c7b1a1f52b03b12d
+sample1.wav::write/set_xmp = 1073340:6f087ebbe6b06789bd846def dest=f0d2a7225317f9fa08a71627
+sample1.wav::write_process/keep = 1073218:359fad906e83ff3aaec01908 ev=137 bytes=1073218 4cfec2f29ad011ffceea9ba0
+sample1.wav::write_process/remove_all = 1073218:359fad906e83ff3aaec01908 ev=137 bytes=1073218 4cfec2f29ad011ffceea9ba0
+sample1.wav::write_process/set_both_excl_data = 1078348:be1378f7a8a37c92f41d8910 ev=142 bytes=1073348 9e54f00917451c5502d59b4a
+sample1.wav::write_process/set_jumbf = 1078226:3c2054082f18b9609872ea3a ev=140 bytes=1078226 940c02eedb51a454786d0666
+sample1.wav::write_process/set_jumbf_excl_entire = 1078226:3c2054082f18b9609872ea3a ev=137 bytes=1073218 1f9e809ecea766b65eb15038
+sample1.wav::write_process/set_xmp = 1073340:6f087ebbe6b06789bd846def ev=140 bytes=1073340 80c304402ac3c62584eb61fe
+sample1.wav::xmp = none
+sample1.webp::jumbf = none
+sample1.webp::parse = b092e09c18580955c8ef8d8c
+sample1.webp::read_process/keep = ev=1 bytes=50408 a6247bc5a225ed88c9cf14a8
+sample1.webp::read_process/remove_all = ev=1 bytes=50408 a6247bc5a225ed88c9cf14a8
+sample1.webp::read_process/set_both_excl_data = ev=1 bytes=50408 a6247bc5a225ed88c9cf14a8
+sample1.webp::read_process/set_jumbf = ev=1 bytes=50408 a6247bc5a225ed88c9cf14a8
+sample1.webp::read_process/set_jumbf_excl_entire = ev=13 bytes=50408 38ed547f7391bfca90f94976
+sample1.webp::read_process/set_xmp = ev=1 bytes=50408 a6247bc5a225ed88c9cf14a8
+sample1.webp::write/keep = 50408:006ee0871284b06a311286b9 dest=b092e09c18580955c8ef8d8c
+sample1.webp::write/remove_all = 50408:006ee0871284b06a311286b9 dest=b092e09c18580955c8ef8d8c
+sample1.webp::write/set_both_excl_data = 55538:83ec7f834fb26c6e64594680 dest=02e7c7edac986286d4acf527
+sample1.webp::write/set_jumbf = 55416:f1c9bd7a930f1286aee3d4e6 dest=007f91ad3bd5e0983b9fa1b6
+sample1.webp::write/set_jumbf_excl_entire = 55416:f1c9bd7a930f1286aee3d4e6 dest=007f91ad3bd5e0983b9fa1b6
+sample1.webp::write/set_xmp = 50530:f283c2e3eb9416b95a5ccf14 dest=635cdcd9e53877dfb5f568dd
+sample1.webp::write_process/keep = 50408:006ee0871284b06a311286b9 ev=10 bytes=50408 0cd28bcfbd79f29d2fcfe3f9
+sample1.webp::write_process/remove_all = 50408:006ee0871284b06a311286b9 ev=10 bytes=50408 0cd28bcfbd79f29d2fcfe3f9
+sample1.webp::write_process/set_both_excl_data = 55538:83ec7f834fb26c6e64594680 ev=15 bytes=50538 e2182bd2f77ef1382bcb6a37
+sample1.webp::write_process/set_jumbf = 55416:f1c9bd7a930f1286aee3d4e6 ev=13 bytes=55416 fea06fec6941b790f8f48e8c
+sample1.webp::write_process/set_jumbf_excl_entire = 55416:f1c9bd7a930f1286aee3d4e6 ev=10 bytes=50408 a1dfb8ca8f6eb6cbcb0024ea
+sample1.webp::write_process/set_xmp = 50530:f283c2e3eb9416b95a5ccf14 ev=13 bytes=50530 b956b0c5987c72acdcf0bb46
+sample1.webp::xmp = none

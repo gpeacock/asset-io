@@ -7,7 +7,10 @@
 use super::{ContainerIO, ContainerKind};
 use crate::{
     error::{Error, Result},
-    processing_writer::MdatChunk,
+    sans_io::{
+        io::{PDst, Src},
+        Chunk,
+    },
     segment::{ByteRange, Segment, SegmentKind},
     structure::Structure,
     MediaType, Updates,
@@ -16,7 +19,9 @@ use atree::{Arena, Token};
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use std::{
     collections::HashMap,
+    future::Future,
     io::{Read, Seek, SeekFrom, Write},
+    pin::Pin,
 };
 
 // BMFF constants
@@ -206,15 +211,51 @@ impl BoxHeaderLite {
         }
     }
 
-    pub fn write<W: Write>(&self, writer: &mut W) -> Result<u64> {
+    pub(crate) async fn read_async(src: &mut Src) -> Result<Self> {
+        let box_start = src.stream_position()?;
+
+        let mut buf = [0u8; 8];
+        src.read_exact(&mut buf).await?;
+
+        let size = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]);
+        let fourcc = String::from_utf8_lossy(&buf[4..8]).to_string();
+        let typ = u32::from_be_bytes([buf[4], buf[5], buf[6], buf[7]]);
+
+        if size == 1 {
+            src.read_exact(&mut buf).await?;
+            Ok(BoxHeaderLite {
+                name: BoxType::from(typ),
+                size: u64::from_be_bytes(buf),
+                fourcc,
+                large_size: true,
+            })
+        } else if size == 0 {
+            // size extends to the end of the file
+            Ok(BoxHeaderLite {
+                name: BoxType::from(typ),
+                size: src.len() - box_start,
+                fourcc,
+                large_size: false,
+            })
+        } else {
+            Ok(BoxHeaderLite {
+                name: BoxType::from(typ),
+                size: size as u64,
+                fourcc,
+                large_size: false,
+            })
+        }
+    }
+
+    async fn write_async(&self, w: &mut PDst<'_>) -> Result<u64> {
         if self.size > u32::MAX as u64 {
-            writer.write_u32::<BigEndian>(1)?;
-            writer.write_u32::<BigEndian>(self.name.into())?;
-            writer.write_u64::<BigEndian>(self.size)?;
+            w.write_u32_be(1).await?;
+            w.write_u32_be(self.name.into()).await?;
+            w.write_u64_be(self.size).await?;
             Ok(16)
         } else {
-            writer.write_u32::<BigEndian>(self.size as u32)?;
-            writer.write_u32::<BigEndian>(self.name.into())?;
+            w.write_u32_be(self.size as u32).await?;
+            w.write_u32_be(self.name.into()).await?;
             Ok(8)
         }
     }
@@ -239,27 +280,32 @@ fn read_box_header_ext<R: Read + Seek + ?Sized>(reader: &mut R) -> Result<(u8, u
     Ok((version, flags))
 }
 
-fn write_box_header_ext<W: Write>(w: &mut W, v: u8, f: u32) -> Result<u64> {
-    w.write_u8(v)?;
-    w.write_u24::<BigEndian>(f)?;
+async fn read_box_header_ext_async(src: &mut Src) -> Result<(u8, u32)> {
+    let version = src.read_u8().await?;
+    let mut f = [0u8; 3];
+    src.read_exact(&mut f).await?;
+    Ok((version, u32::from_be_bytes([0, f[0], f[1], f[2]])))
+}
+
+async fn write_box_header_ext(w: &mut PDst<'_>, v: u8, f: u32) -> Result<u64> {
+    w.write_u8(v).await?;
+    w.write_all(&f.to_be_bytes()[1..]).await?;
     Ok(4)
 }
 
-fn write_box_uuid_extension<W: Write>(w: &mut W, uuid: &[u8; 16]) -> Result<u64> {
-    w.write_all(uuid)?;
+async fn write_box_uuid_extension(w: &mut PDst<'_>, uuid: &[u8; 16]) -> Result<u64> {
+    w.write_all(uuid).await?;
     Ok(16)
 }
 
 /// Write a C2PA UUID box with purpose, merkle data, and JUMBF content
-pub(crate) fn write_c2pa_box<W: Write>(
-    w: &mut W,
+pub(crate) async fn write_c2pa_box(
+    w: &mut PDst<'_>,
     data: &[u8],
     purpose: &str,
     merkle_data: &[u8],
     merkle_offset: u64,
 ) -> Result<()> {
-    #[allow(dead_code)]
-    const MANIFEST: &str = "manifest";
     const MERKLE: &str = "merkle";
 
     let purpose_size = purpose.len() + 1;
@@ -272,48 +318,32 @@ pub(crate) fn write_c2pa_box<W: Write>(
     let size = 8 + 16 + 4 + purpose_size + box_size + data.len(); // header + UUID + version/flags + purpose + merkle + data
     let bh = BoxHeaderLite::new(BoxType::UuidBox, size as u64, "uuid");
 
-    // write out header
-    bh.write(w)?;
+    bh.write_async(w).await?;
+    write_box_uuid_extension(w, &C2PA_UUID).await?;
+    write_box_header_ext(w, 0, 0).await?;
 
-    // write out c2pa extension UUID
-    write_box_uuid_extension(w, &C2PA_UUID)?;
-
-    // write out version and flags
-    let version: u8 = 0;
-    let flags: u32 = 0;
-    write_box_header_ext(w, version, flags)?;
-
-    // write with appropriate purpose
-    w.write_all(purpose.as_bytes())?;
-    w.write_u8(0)?; // null terminator
+    w.write_all(purpose.as_bytes()).await?;
+    w.write_u8(0).await?; // null terminator
 
     if purpose == MERKLE {
-        // write merkle cbor
-        w.write_all(merkle_data)?;
+        w.write_all(merkle_data).await?;
     } else {
-        // write merkle offset
-        w.write_u64::<BigEndian>(merkle_offset)?;
+        w.write_u64_be(merkle_offset).await?;
     }
 
-    // write out data
-    w.write_all(data)?;
+    w.write_all(data).await?;
 
     Ok(())
 }
 
 /// Write an XMP UUID box
-fn write_xmp_box<W: Write>(w: &mut W, data: &[u8]) -> Result<()> {
+async fn write_xmp_box(w: &mut PDst<'_>, data: &[u8]) -> Result<()> {
     let size = 8 + 16 + data.len(); // header + UUID + data (no version/flags for XMP)
     let bh = BoxHeaderLite::new(BoxType::UuidBox, size as u64, "uuid");
 
-    // write out header
-    bh.write(w)?;
-
-    // write out XMP extension UUID
-    write_box_uuid_extension(w, &XMP_UUID)?;
-
-    // write out data
-    w.write_all(data)?;
+    bh.write_async(w).await?;
+    write_box_uuid_extension(w, &XMP_UUID).await?;
+    w.write_all(data).await?;
 
     Ok(())
 }
@@ -330,17 +360,39 @@ fn calculate_c2pa_box_size(data: &[u8], purpose: &str) -> u64 {
     (8 + 16 + 4 + purpose_size + box_size + data.len()) as u64
 }
 
-fn box_start<R: Read + Seek + ?Sized>(reader: &mut R, is_large: bool) -> Result<u64> {
-    if is_large {
-        Ok(reader.stream_position()? - HEADER_SIZE_LARGE)
-    } else {
-        Ok(reader.stream_position()? - HEADER_SIZE)
+trait StreamPos {
+    fn pos(&mut self) -> Result<u64>;
+    fn seek_to(&mut self, pos: u64) -> Result<u64>;
+}
+
+impl<R: Read + Seek + ?Sized> StreamPos for R {
+    fn pos(&mut self) -> Result<u64> {
+        Ok(self.stream_position()?)
+    }
+    fn seek_to(&mut self, pos: u64) -> Result<u64> {
+        Ok(self.seek(SeekFrom::Start(pos))?)
     }
 }
 
-fn skip_bytes_to<R: Read + Seek + ?Sized>(reader: &mut R, pos: u64) -> Result<u64> {
-    let pos = reader.seek(SeekFrom::Start(pos))?;
-    Ok(pos)
+impl StreamPos for Src {
+    fn pos(&mut self) -> Result<u64> {
+        self.stream_position()
+    }
+    fn seek_to(&mut self, pos: u64) -> Result<u64> {
+        self.seek(SeekFrom::Start(pos))
+    }
+}
+
+fn box_start<R: StreamPos + ?Sized>(reader: &mut R, is_large: bool) -> Result<u64> {
+    if is_large {
+        Ok(reader.pos()? - HEADER_SIZE_LARGE)
+    } else {
+        Ok(reader.pos()? - HEADER_SIZE)
+    }
+}
+
+fn skip_bytes_to<R: StreamPos + ?Sized>(reader: &mut R, pos: u64) -> Result<u64> {
+    reader.seek_to(pos)
 }
 
 fn add_token_to_cache(bmff_path_map: &mut HashMap<String, Vec<Token>>, path: String, token: Token) {
@@ -535,6 +587,178 @@ pub(crate) fn build_bmff_tree<R: Read + Seek + ?Sized>(
     Ok(())
 }
 
+/// Async variant of [`build_bmff_tree`] over a [`Src`].
+fn build_bmff_tree_async<'a>(
+    reader: &'a mut Src,
+    end: u64,
+    bmff_tree: &'a mut Arena<BoxInfo>,
+    current_node: &'a Token,
+    bmff_path_map: &'a mut HashMap<String, Vec<Token>>,
+) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
+    Box::pin(async move {
+        let start = reader.stream_position()?;
+
+        let mut current = start;
+        while current < end {
+            // Get box header.
+            let header = BoxHeaderLite::read_async(reader)
+                .await
+                .map_err(|err| Error::InvalidFormat(format!("Bad BMFF: {}", err)))?;
+
+            // Break if size zero BoxHeader
+            let s = header.size;
+            if s == 0 {
+                break;
+            }
+
+            // Reject boxes whose size would overflow u64 or extend past the parent boundary.
+            // `current` equals `box_start(...)` since BoxHeaderLite::read() consumes exactly
+            // HEADER_SIZE / HEADER_SIZE_LARGE bytes and box_start subtracts that back out.
+            let box_end = match current.checked_add(s) {
+                Some(e) => e,
+                None => break, // malformed: size overflows u64
+            };
+            if box_end > end {
+                break; // box claims to extend past our boundary
+            }
+
+            // Match and parse the supported atom boxes.
+            match header.name {
+                BoxType::UuidBox => {
+                    let start = box_start(reader, header.large_size)?;
+
+                    let mut extended_type = [0u8; 16]; // 16 bytes of UUID
+                    reader.read_exact(&mut extended_type).await?;
+
+                    let (version, flags) = read_box_header_ext_async(reader).await?;
+
+                    let b = BoxInfo {
+                        path: header.fourcc.clone(),
+                        offset: start,
+                        size: s,
+                        box_type: BoxType::UuidBox,
+                        parent: Some(*current_node),
+                        user_type: Some(extended_type.to_vec()),
+                        version: Some(version),
+                        flags: Some(flags),
+                    };
+
+                    let new_token = current_node.append(bmff_tree, b);
+
+                    let path = path_from_token(bmff_tree, &new_token)?;
+                    add_token_to_cache(bmff_path_map, path, new_token);
+
+                    // position seek pointer
+                    skip_bytes_to(reader, start + s)?;
+                }
+                // container box types
+                BoxType::MoovBox
+                | BoxType::TrakBox
+                | BoxType::MdiaBox
+                | BoxType::MinfBox
+                | BoxType::StblBox
+                | BoxType::MoofBox
+                | BoxType::TrafBox
+                | BoxType::EdtsBox
+                | BoxType::UdtaBox
+                | BoxType::DinfBox
+                | BoxType::TrefBox
+                | BoxType::TregBox
+                | BoxType::MvexBox
+                | BoxType::MfraBox
+                | BoxType::MetaBox
+                | BoxType::SchiBox => {
+                    let start = box_start(reader, header.large_size)?;
+
+                    let b = if FULL_BOX_TYPES.contains(&header.fourcc.as_str()) {
+                        let (version, flags) = read_box_header_ext_async(reader).await?; // box extensions
+                        BoxInfo {
+                            path: header.fourcc.clone(),
+                            offset: start,
+                            size: s,
+                            box_type: header.name,
+                            parent: Some(*current_node),
+                            user_type: None,
+                            version: Some(version),
+                            flags: Some(flags),
+                        }
+                    } else {
+                        BoxInfo {
+                            path: header.fourcc.clone(),
+                            offset: start,
+                            size: s,
+                            box_type: header.name,
+                            parent: Some(*current_node),
+                            user_type: None,
+                            version: None,
+                            flags: None,
+                        }
+                    };
+
+                    let new_token = bmff_tree.new_node(b);
+                    current_node
+                        .append_node(bmff_tree, new_token)
+                        .map_err(|_err| Error::InvalidFormat("Bad BMFF Graph".to_string()))?;
+
+                    let path = path_from_token(bmff_tree, &new_token)?;
+                    add_token_to_cache(bmff_path_map, path, new_token);
+
+                    // consume all sub-boxes
+                    let mut current = reader.stream_position()?;
+                    let end = start + s;
+                    while current < end {
+                        build_bmff_tree_async(reader, end, bmff_tree, &new_token, bmff_path_map)
+                            .await?;
+                        current = reader.stream_position()?;
+                    }
+
+                    // position seek pointer
+                    skip_bytes_to(reader, start + s)?;
+                }
+                _ => {
+                    let start = box_start(reader, header.large_size)?;
+
+                    let b = if FULL_BOX_TYPES.contains(&header.fourcc.as_str()) {
+                        let (version, flags) = read_box_header_ext_async(reader).await?; // box extensions
+                        BoxInfo {
+                            path: header.fourcc.clone(),
+                            offset: start,
+                            size: s,
+                            box_type: header.name,
+                            parent: Some(*current_node),
+                            user_type: None,
+                            version: Some(version),
+                            flags: Some(flags),
+                        }
+                    } else {
+                        BoxInfo {
+                            path: header.fourcc.clone(),
+                            offset: start,
+                            size: s,
+                            box_type: header.name,
+                            parent: Some(*current_node),
+                            user_type: None,
+                            version: None,
+                            flags: None,
+                        }
+                    };
+
+                    let new_token = current_node.append(bmff_tree, b);
+
+                    let path = path_from_token(bmff_tree, &new_token)?;
+                    add_token_to_cache(bmff_path_map, path, new_token);
+
+                    // position seek pointer
+                    skip_bytes_to(reader, start + s)?;
+                }
+            }
+            current = reader.stream_position()?;
+        }
+
+        Ok(())
+    })
+}
+
 /// Adjust chunk offsets (stco/co64) in a BMFF file after modifying the UUID region.
 ///
 /// When adding, removing, or replacing XMP or C2PA boxes after ftyp, moov/mdat shift;
@@ -646,6 +870,68 @@ fn adjust_chunk_offsets<W: Read + Write + Seek>(
         }
     }
 
+    Ok(())
+}
+
+/// Patch `stco`/`co64` entries inside an in-memory copy of a box.
+///
+/// `buf` holds the bytes of the box starting at source offset `buf_start`; `tables` lists the
+/// absolute source offsets of every chunk offset table. Same saturating arithmetic as
+/// [`adjust_chunk_offsets`]. Boxes holding such tables must fit in `MAX_BOX_ALLOCATION`
+/// (larger ones are rejected by the writer).
+fn patch_chunk_offsets(
+    buf: &mut [u8],
+    buf_start: u64,
+    tables: &[(u64, bool)],
+    delta: i64,
+) -> Result<()> {
+    let bad = || Error::InvalidFormat("Bad BMFF chunk offset table".to_string());
+    for &(offset, is64) in tables {
+        if offset < buf_start || offset >= buf_start + buf.len() as u64 {
+            continue;
+        }
+        let rel = (offset - buf_start) as usize;
+        let hdr = buf.get(rel..rel + 4).ok_or_else(bad)?;
+        let header_len = if u32::from_be_bytes([hdr[0], hdr[1], hdr[2], hdr[3]]) == 1 {
+            16
+        } else {
+            8
+        };
+        let count_pos = rel + header_len + 4; // skip version/flags
+        let cb = buf.get(count_pos..count_pos + 4).ok_or_else(bad)?;
+        let count = u32::from_be_bytes([cb[0], cb[1], cb[2], cb[3]]) as usize;
+        let width = if is64 { 8 } else { 4 };
+        let mut pos = count_pos + 4;
+        let end = count
+            .checked_mul(width)
+            .and_then(|n| n.checked_add(pos))
+            .filter(|&e| e <= buf.len())
+            .ok_or_else(bad)?;
+        while pos < end {
+            if is64 {
+                let mut b = [0u8; 8];
+                b.copy_from_slice(&buf[pos..pos + 8]);
+                let v = u64::from_be_bytes(b);
+                let n = if delta > 0 {
+                    v.saturating_add(delta as u64)
+                } else {
+                    v.saturating_sub(delta.unsigned_abs())
+                };
+                buf[pos..pos + 8].copy_from_slice(&n.to_be_bytes());
+            } else {
+                let mut b = [0u8; 4];
+                b.copy_from_slice(&buf[pos..pos + 4]);
+                let v = u32::from_be_bytes(b);
+                let n = if delta > 0 {
+                    v.saturating_add(delta as u32)
+                } else {
+                    v.saturating_sub(delta.unsigned_abs() as u32)
+                };
+                buf[pos..pos + 4].copy_from_slice(&n.to_be_bytes());
+            }
+            pos += width;
+        }
+    }
     Ok(())
 }
 
@@ -941,7 +1227,7 @@ impl BmffIO {
         Ok(Vec::new())
     }
 
-    fn parse_impl<R: Read + Seek>(&self, source: &mut R) -> Result<Structure> {
+    pub(crate) async fn parse_async(&self, source: &mut Src) -> Result<Structure> {
         source.seek(SeekFrom::Start(0))?;
 
         // Get file size
@@ -950,7 +1236,7 @@ impl BmffIO {
 
         // Read ftyp box to determine media type
         let mut buf = [0u8; 8];
-        source.read_exact(&mut buf)?;
+        source.read_exact(&mut buf).await?;
 
         if &buf[4..8] != b"ftyp" {
             return Err(Error::InvalidFormat(
@@ -965,7 +1251,7 @@ impl BmffIO {
 
         // Read major brand
         let mut major_brand = [0u8; 4];
-        source.read_exact(&mut major_brand)?;
+        source.read_exact(&mut major_brand).await?;
 
         let media_type = detect_media_type_from_ftyp(&major_brand);
 
@@ -988,13 +1274,14 @@ impl BmffIO {
         let mut bmff_map: HashMap<String, Vec<Token>> = HashMap::new();
 
         // Build layout of the BMFF structure
-        build_bmff_tree(
+        build_bmff_tree_async(
             source,
             file_size,
             &mut bmff_tree,
             &root_token,
             &mut bmff_map,
-        )?;
+        )
+        .await?;
 
         // Create structure
         let mut structure = Structure::new(ContainerKind::Bmff, media_type);
@@ -1037,7 +1324,7 @@ impl BmffIO {
                     let mut purpose_bytes = Vec::new();
                     loop {
                         let mut byte = [0u8; 1];
-                        if source.read_exact(&mut byte).is_err() {
+                        if source.read_exact(&mut byte).await.is_err() {
                             break;
                         }
                         if byte[0] == 0 {
@@ -1104,12 +1391,13 @@ impl BmffIO {
         // Find EXIF items in HEIF structure (if exif feature enabled)
         #[cfg(feature = "exif")]
         {
-            if let Ok(Some((meta_offset, meta_size))) = find_meta_box(source, file_size) {
+            if let Ok(Some((meta_offset, meta_size))) = find_meta_box(source, file_size).await {
                 // Parse iinf to find Exif items
-                if let Ok(exif_item_ids) = parse_iinf_for_exif(source, meta_offset, meta_size) {
+                if let Ok(exif_item_ids) = parse_iinf_for_exif(source, meta_offset, meta_size).await
+                {
                     if !exif_item_ids.is_empty() {
                         // Parse iloc to get locations
-                        if let Ok(locations) = parse_iloc(source, meta_offset, meta_size) {
+                        if let Ok(locations) = parse_iloc(source, meta_offset, meta_size).await {
                             for exif_id in exif_item_ids {
                                 if let Some((offset, size)) = locations.get(&exif_id) {
                                     // HEIF EXIF has a 4-byte header before TIFF data
@@ -1129,54 +1417,21 @@ impl BmffIO {
 
         Ok(structure)
     }
-}
 
-impl Default for BmffIO {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl ContainerIO for BmffIO {
-    fn container_type() -> ContainerKind {
-        ContainerKind::Bmff
-    }
-
-    fn supported_media_types() -> &'static [MediaType] {
-        Self::supported_media_types()
-    }
-
-    fn extensions() -> &'static [&'static str] {
-        Self::extensions()
-    }
-
-    fn mime_types() -> &'static [&'static str] {
-        Self::mime_types()
-    }
-
-    fn detect(header: &[u8]) -> Option<ContainerKind> {
-        Self::detect(header)
-    }
-
-    fn parse<R: Read + Seek>(&self, source: &mut R) -> Result<Structure> {
-        self.parse_impl(source)
-    }
-
-    fn read_xmp<R: Read + Seek>(
+    pub(crate) async fn read_xmp_async(
         &self,
-        _structure: &Structure,
-        source: &mut R,
+        structure: &Structure,
+        source: &mut Src,
     ) -> Result<Option<Vec<u8>>> {
-        let Some(index) = _structure.xmp_index() else {
+        let Some(index) = structure.xmp_index() else {
             return Ok(None);
         };
 
-        let segment = &_structure.segments()[index];
+        let segment = &structure.segments()[index];
         if !segment.is_xmp() {
             return Ok(None);
         }
 
-        // Read XMP data from ranges
         if segment.ranges.len() == 1 {
             let range = segment.ranges[0];
             if range.size > MAX_BOX_ALLOCATION {
@@ -1187,24 +1442,18 @@ impl ContainerIO for BmffIO {
             }
             source.seek(SeekFrom::Start(range.offset))?;
             let mut xmp_data = vec![0u8; range.size as usize];
-            source.read_exact(&mut xmp_data)?;
+            source.read_exact(&mut xmp_data).await?;
             return Ok(Some(xmp_data));
         }
 
         Ok(None)
     }
 
-    fn read_jumbf<R: Read + Seek>(
+    pub(crate) async fn read_jumbf_async(
         &self,
         structure: &Structure,
-        source: &mut R,
+        source: &mut Src,
     ) -> Result<Option<Vec<u8>>> {
-        if structure.jumbf_indices().is_empty() {
-            return Ok(None);
-        }
-
-        // For BMFF, we need to parse the C2PA UUID box structure
-        // The JUMBF data is inside the C2PA UUID box
         for &index in structure.jumbf_indices() {
             let segment = &structure.segments()[index];
             if !segment.is_jumbf() {
@@ -1212,12 +1461,11 @@ impl ContainerIO for BmffIO {
             }
 
             if !segment.ranges.is_empty() {
-                // ranges[0] is the JUMBF data range (data_offset, data_size)
-                // For BMFF parse we have 2 ranges: [data, full_box]; for calculate_updated_structure same
+                // ranges[0] is the JUMBF data range (ranges[1] is the full UUID box)
                 let range = segment.ranges[0];
                 source.seek(SeekFrom::Start(range.offset))?;
                 let mut jumbf_data = vec![0u8; range.size as usize];
-                source.read_exact(&mut jumbf_data)?;
+                source.read_exact(&mut jumbf_data).await?;
                 return Ok(Some(jumbf_data));
             }
         }
@@ -1225,19 +1473,75 @@ impl ContainerIO for BmffIO {
         Ok(None)
     }
 
-    fn write<R: Read + Seek, W: Read + Write + Seek>(
+    #[cfg(feature = "exif")]
+    pub(crate) async fn read_embedded_thumbnail_info_async(
         &self,
         _structure: &Structure,
-        source: &mut R,
-        writer: &mut W,
+        source: &mut Src,
+    ) -> Result<Option<crate::thumbnail::EmbeddedThumbnailInfo>> {
+        extract_heif_thumbnail_info(source).await
+    }
+
+    #[cfg(feature = "exif")]
+    pub(crate) async fn read_exif_info_async(
+        &self,
+        structure: &Structure,
+        source: &mut Src,
+    ) -> Result<Option<crate::tiff::ExifInfo>> {
+        let exif_segment = structure
+            .segments()
+            .iter()
+            .find(|s| s.is_type(SegmentKind::Exif));
+
+        let segment = match exif_segment {
+            Some(s) => s,
+            None => return Ok(None),
+        };
+
+        let location = segment.location();
+        if location.size > MAX_BOX_ALLOCATION {
+            return Err(Error::InvalidFormat(format!(
+                "EXIF data size too large: {} bytes (max: {} bytes)",
+                location.size, MAX_BOX_ALLOCATION
+            )));
+        }
+        source.seek(SeekFrom::Start(location.offset))?;
+        let mut data = vec![0u8; location.size as usize];
+        source.read_exact(&mut data).await?;
+
+        // HEIF: Exif item has 4-byte tiff_header_offset prefix, then "Exif\0\0", then TIFF
+        let exif_data = if data.len() > 10 && &data[4..10] == b"Exif\0\0" {
+            &data[10..]
+        } else if data.len() > 4 {
+            if data[4..].starts_with(b"II") || data[4..].starts_with(b"MM") {
+                &data[4..]
+            } else {
+                &data
+            }
+        } else {
+            return Ok(None);
+        };
+
+        crate::tiff::parse_exif_info(exif_data)
+    }
+
+    /// Sequential write: copies the source, inserting/replacing/removing the XMP and
+    /// C2PA UUID boxes. Output is strictly append-only; `stco`/`co64` chunk offsets are
+    /// patched in memory (see [`patch_chunk_offsets`]) before the containing box is emitted.
+    pub(crate) async fn write_async(
+        &self,
+        _structure: &Structure,
+        source: &mut Src,
+        pw: &mut PDst<'_>,
         updates: &Updates,
     ) -> Result<()> {
         use crate::MetadataUpdate;
 
-        source.seek(SeekFrom::Start(0))?;
+        let exclude_segments = &updates.processing.exclude_segments;
+        let _exclusion_mode = updates.processing.exclusion_mode;
+        let should_exclude_jumbf = exclude_segments.contains(&SegmentKind::Jumbf);
 
-        // Get file size
-        let file_size = source.seek(SeekFrom::End(0))?;
+        let file_size = source.len();
         source.seek(SeekFrom::Start(0))?;
 
         // Parse BMFF structure to find insertion points
@@ -1254,13 +1558,14 @@ impl ContainerIO for BmffIO {
 
         let (mut bmff_tree, root_token) = Arena::with_data(root_box);
         let mut bmff_map: HashMap<String, Vec<Token>> = HashMap::new();
-        build_bmff_tree(
+        build_bmff_tree_async(
             source,
             file_size,
             &mut bmff_tree,
             &root_token,
             &mut bmff_map,
-        )?;
+        )
+        .await?;
 
         // Find ftyp box (required to be first)
         let ftyp_token = bmff_map
@@ -1297,122 +1602,8 @@ impl ContainerIO for BmffIO {
                 .unwrap_or(false)
         });
 
-        // Simple strategy: Copy up to ftyp end, insert/skip UUIDs, copy rest
-        source.seek(SeekFrom::Start(0))?;
-
-        // Copy ftyp box
-        if ftyp_end > MAX_BOX_ALLOCATION {
-            return Err(Error::InvalidFormat(format!(
-                "ftyp box size too large: {} bytes (max: {} bytes)",
-                ftyp_end, MAX_BOX_ALLOCATION
-            )));
-        }
-        let mut buffer = vec![0u8; ftyp_end as usize];
-        source.read_exact(&mut buffer)?;
-        writer.write_all(&buffer)?;
-
-        // ===== C2PA Spec Compliance: Box Ordering =====
-        // Per C2PA spec A.5.1: XMP UUID boxes SHALL be placed immediately after ftyp
-        // and BEFORE any C2PA UUID boxes. This ensures proper manifest discovery.
-        // Order: ftyp → XMP (optional) → C2PA (optional) → other boxes
-
-        // Write new XMP UUID if needed
-        if write_xmp {
-            if let MetadataUpdate::Set(ref xmp_data) = updates.xmp {
-                write_xmp_box(writer, xmp_data)?;
-            }
-        } else if !remove_xmp {
-            // Keep existing XMP
-            if let Some(token) = existing_xmp_token {
-                let box_info = &bmff_tree[token].data;
-                if box_info.size > MAX_BOX_ALLOCATION {
-                    return Err(Error::InvalidFormat(format!(
-                        "XMP box size too large: {} bytes (max: {} bytes)",
-                        box_info.size, MAX_BOX_ALLOCATION
-                    )));
-                }
-                source.seek(SeekFrom::Start(box_info.offset))?;
-                let mut box_data = vec![0u8; box_info.size as usize];
-                source.read_exact(&mut box_data)?;
-                writer.write_all(&box_data)?;
-            }
-        }
-
-        // Write new C2PA UUID if needed
-        if write_jumbf {
-            if let MetadataUpdate::Set(ref jumbf_data) = updates.jumbf {
-                write_c2pa_box(writer, jumbf_data, "manifest", &[], 0)?;
-            }
-        } else if !remove_jumbf {
-            // Keep existing C2PA
-            if let Some(token) = existing_c2pa_token {
-                let box_info = &bmff_tree[token].data;
-                if box_info.size > MAX_BOX_ALLOCATION {
-                    return Err(Error::InvalidFormat(format!(
-                        "C2PA box size too large: {} bytes (max: {} bytes)",
-                        box_info.size, MAX_BOX_ALLOCATION
-                    )));
-                }
-                source.seek(SeekFrom::Start(box_info.offset))?;
-                let mut box_data = vec![0u8; box_info.size as usize];
-                source.read_exact(&mut box_data)?;
-                writer.write_all(&box_data)?;
-            }
-        }
-
-        // Copy remaining boxes (skip existing UUID boxes)
-        source.seek(SeekFrom::Start(ftyp_end))?;
-        let mut current_pos = ftyp_end;
-
-        while current_pos < file_size {
-            // Read box header to determine if we should skip it
-            let box_start = current_pos;
-            let header = BoxHeaderLite::read(source)?;
-
-            // Check if this is a UUID box we already wrote
-            let should_skip = if header.name == BoxType::UuidBox {
-                let mut uuid_bytes = [0u8; 16];
-                source.read_exact(&mut uuid_bytes)?;
-                source.seek(SeekFrom::Start(box_start))?; // Reset for potential copy
-
-                (uuid_bytes == XMP_UUID && (write_xmp || remove_xmp))
-                    || (uuid_bytes == C2PA_UUID && (write_jumbf || remove_jumbf))
-            } else {
-                false
-            };
-
-            if should_skip {
-                // Skip this box
-                source.seek(SeekFrom::Start(box_start + header.size))?;
-            } else {
-                // Copy this box - use streaming for large boxes (mdat, moov, etc.)
-                source.seek(SeekFrom::Start(box_start))?;
-
-                if header.size > MAX_BOX_ALLOCATION {
-                    // Stream large boxes (e.g., mdat) without loading into memory
-                    // This is crucial for large video files where mdat can be gigabytes
-                    let mut remaining = header.size;
-                    let mut buffer = vec![0u8; 8 * 1024 * 1024]; // 8MB buffer
-
-                    while remaining > 0 {
-                        let to_read = remaining.min(buffer.len() as u64) as usize;
-                        source.read_exact(&mut buffer[..to_read])?;
-                        writer.write_all(&buffer[..to_read])?;
-                        remaining -= to_read as u64;
-                    }
-                } else {
-                    // Small boxes can be loaded for efficiency
-                    let mut box_data = vec![0u8; header.size as usize];
-                    source.read_exact(&mut box_data)?;
-                    writer.write_all(&box_data)?;
-                }
-            }
-
-            current_pos = box_start + header.size;
-            source.seek(SeekFrom::Start(current_pos))?;
-        }
-
-        // Compute chunk offset delta: new UUID region size - original UUID region size
+        // Chunk offset delta (new UUID region size - original). Known up front so the
+        // stco/co64 tables can be patched in memory while the box is copied.
         let original_size: u64 = {
             let xmp = if write_xmp || remove_xmp {
                 existing_xmp_token
@@ -1448,97 +1639,31 @@ impl ContainerIO for BmffIO {
             xmp + c2pa
         };
         let delta = new_size as i64 - original_size as i64;
+
+        // stco/co64 tables (absolute source offset, is 64-bit) needing delta adjustment.
+        let mut chunk_tables: Vec<(u64, bool)> = Vec::new();
         if delta != 0 {
-            writer.flush()?;
-            adjust_chunk_offsets(writer, &bmff_tree, &bmff_map, delta)?;
+            for (path, tokens) in &bmff_map {
+                let is64 = if path.ends_with("/stco") {
+                    false
+                } else if path.ends_with("/co64") {
+                    true
+                } else {
+                    continue;
+                };
+                for token in tokens {
+                    let info = &bmff_tree[*token].data;
+                    let want = if is64 {
+                        BoxType::Co64Box
+                    } else {
+                        BoxType::StcoBox
+                    };
+                    if info.box_type == want {
+                        chunk_tables.push((info.offset, is64));
+                    }
+                }
+            }
         }
-
-        Ok(())
-    }
-
-    fn write_with_processor<R: Read + Seek, W: Read + Write + Seek, F>(
-        &self,
-        _structure: &Structure,
-        source: &mut R,
-        writer: &mut W,
-        updates: &Updates,
-        processor: &mut F,
-    ) -> Result<()>
-    where
-        F: crate::ProcessChunkFn,
-    {
-        use crate::processing_writer::ProcessingWriter;
-        use crate::MetadataUpdate;
-
-        let exclude_segments = &updates.processing.exclude_segments;
-        let _exclusion_mode = updates.processing.exclusion_mode;
-        let should_exclude_jumbf = exclude_segments.contains(&SegmentKind::Jumbf);
-
-        source.seek(SeekFrom::Start(0))?;
-
-        // Get file size
-        let file_size = source.seek(SeekFrom::End(0))?;
-        source.seek(SeekFrom::Start(0))?;
-
-        // Parse BMFF structure to find insertion points
-        let root_box = BoxInfo {
-            path: "".to_string(),
-            offset: 0,
-            size: file_size,
-            box_type: BoxType::Empty,
-            parent: None,
-            user_type: None,
-            version: None,
-            flags: None,
-        };
-
-        let (mut bmff_tree, root_token) = Arena::with_data(root_box);
-        let mut bmff_map: HashMap<String, Vec<Token>> = HashMap::new();
-        build_bmff_tree(
-            source,
-            file_size,
-            &mut bmff_tree,
-            &root_token,
-            &mut bmff_map,
-        )?;
-
-        // Find ftyp box (required to be first)
-        let ftyp_token = bmff_map
-            .get("/ftyp")
-            .and_then(|v| v.first())
-            .ok_or_else(|| Error::InvalidFormat("Missing ftyp box".to_string()))?;
-        let ftyp_info = &bmff_tree[*ftyp_token].data;
-        let ftyp_end = ftyp_info.offset + ftyp_info.size;
-
-        // Determine what to do with XMP and JUMBF
-        let write_xmp = matches!(updates.xmp, MetadataUpdate::Set(_));
-        let write_jumbf = matches!(updates.jumbf, MetadataUpdate::Set(_));
-        let remove_xmp = matches!(updates.xmp, MetadataUpdate::Remove);
-        let remove_jumbf = matches!(updates.jumbf, MetadataUpdate::Remove);
-
-        // Find existing UUID boxes (at /uuid or /meta/uuid in HEIC)
-        let existing_xmp_token = uuid_tokens_from_map(&bmff_map).find(|&token| {
-            let box_info = &bmff_tree[token];
-            box_info
-                .data
-                .user_type
-                .as_ref()
-                .map(|uuid| uuid.as_slice() == XMP_UUID)
-                .unwrap_or(false)
-        });
-
-        let existing_c2pa_token = uuid_tokens_from_map(&bmff_map).find(|&token| {
-            let box_info = &bmff_tree[token];
-            box_info
-                .data
-                .user_type
-                .as_ref()
-                .map(|uuid| uuid.as_slice() == C2PA_UUID)
-                .unwrap_or(false)
-        });
-
-        // Wrap writer in ProcessingWriter
-        let mut pw = ProcessingWriter::new(writer, processor);
 
         // BMFF V3 hashing: For each non-excluded top-level box the hash covers:
         //   8-byte big-endian output offset  ||  box content minus any subset exclusions
@@ -1584,9 +1709,9 @@ impl ContainerIO for BmffIO {
 
         // ftyp is fully excluded from the hash (not in top_level_offsets).
         let mut buffer = vec![0u8; ftyp_end as usize];
-        source.read_exact(&mut buffer)?;
+        source.read_exact(&mut buffer).await?;
         pw.set_exclude_mode(true);
-        pw.write_all(&buffer)?;
+        pw.write_all(&buffer).await?;
         pw.set_exclude_mode(false);
 
         let xmp_box_start = ftyp_end;
@@ -1602,10 +1727,10 @@ impl ContainerIO for BmffIO {
                 // V3: hash = output_offset || box_content. Emit the offset then let
                 // the box content flow through the processor naturally (no exclude_mode).
                 if use_bmff_v2 {
-                    let out_offset = pw.stream_position()?;
-                    pw.process_offset(out_offset)?;
+                    let out_offset = pw.position();
+                    pw.process_offset(out_offset).await?;
                 }
-                write_xmp_box(&mut pw, xmp_data)?;
+                write_xmp_box(pw, xmp_data).await?;
             }
         } else if !remove_xmp {
             // Keep existing XMP
@@ -1619,14 +1744,14 @@ impl ContainerIO for BmffIO {
                 }
                 source.seek(SeekFrom::Start(box_info.offset))?;
                 let mut box_data = vec![0u8; box_info.size as usize];
-                source.read_exact(&mut box_data)?;
+                source.read_exact(&mut box_data).await?;
 
                 // V3: emit offset then let box content through (no exclude_mode).
                 if use_bmff_v2 {
-                    let out_offset = pw.stream_position()?;
-                    pw.process_offset(out_offset)?;
+                    let out_offset = pw.position();
+                    pw.process_offset(out_offset).await?;
                 }
-                pw.write_all(&box_data)?;
+                pw.write_all(&box_data).await?;
             }
         }
 
@@ -1650,7 +1775,7 @@ impl ContainerIO for BmffIO {
                 // For C2PA: Always exclude from hash (required by BmffHash spec)
                 // For V2: We still exclude it entirely, don't hash offset
                 pw.set_exclude_mode(true);
-                write_c2pa_box(&mut pw, jumbf_data, "manifest", &[], 0)?;
+                write_c2pa_box(pw, jumbf_data, "manifest", &[], 0).await?;
                 pw.set_exclude_mode(false);
             }
         } else if !remove_jumbf {
@@ -1665,11 +1790,11 @@ impl ContainerIO for BmffIO {
                 }
                 source.seek(SeekFrom::Start(box_info.offset))?;
                 let mut box_data = vec![0u8; box_info.size as usize];
-                source.read_exact(&mut box_data)?;
+                source.read_exact(&mut box_data).await?;
 
                 // Exclude C2PA UUID box (always excluded, even in V2)
                 pw.set_exclude_mode(true);
-                pw.write_all(&box_data)?;
+                pw.write_all(&box_data).await?;
                 pw.set_exclude_mode(false);
             }
         }
@@ -1681,12 +1806,12 @@ impl ContainerIO for BmffIO {
         while current_pos < file_size {
             // Read box header to determine if we should skip it
             let box_start = current_pos;
-            let header = BoxHeaderLite::read(source)?;
+            let header = BoxHeaderLite::read_async(source).await?;
 
             // Check if this is a UUID box we already wrote
             let should_skip = if header.name == BoxType::UuidBox {
                 let mut uuid_bytes = [0u8; 16];
-                source.read_exact(&mut uuid_bytes)?;
+                source.read_exact(&mut uuid_bytes).await?;
                 source.seek(SeekFrom::Start(box_start))?; // Reset for potential copy
 
                 (uuid_bytes == XMP_UUID && (write_xmp || remove_xmp))
@@ -1712,6 +1837,15 @@ impl ContainerIO for BmffIO {
                 );
 
                 if header.size > MAX_BOX_ALLOCATION {
+                    if chunk_tables
+                        .iter()
+                        .any(|(off, _)| *off >= box_start && *off < box_start + header.size)
+                    {
+                        return Err(Error::InvalidFormat(format!(
+                            "box with chunk offset tables too large to patch: {} bytes (max: {} bytes)",
+                            header.size, MAX_BOX_ALLOCATION
+                        )));
+                    }
                     // Stream large boxes (e.g., mdat) without loading into memory
                     let mut remaining = header.size;
                     let mut buffer = vec![0u8; 8 * 1024 * 1024]; // 8MB buffer
@@ -1729,8 +1863,8 @@ impl ContainerIO for BmffIO {
                     // The box content (or the first 16 bytes for mdat) then flows through
                     // the processor without exclude_mode for the main hash.
                     if is_top_level && !is_excluded_box {
-                        let out_offset = pw.stream_position()?;
-                        pw.process_offset(out_offset)?;
+                        let out_offset = pw.position();
+                        pw.process_offset(out_offset).await?;
                     }
 
                     // For mdat: bytes 0-15 go into the main hash; bytes 16+ go to the
@@ -1746,44 +1880,46 @@ impl ContainerIO for BmffIO {
 
                     while remaining > 0 {
                         let to_read = remaining.min(buffer.len() as u64) as usize;
-                        source.read_exact(&mut buffer[..to_read])?;
+                        source.read_exact_direct(&mut buffer[..to_read]).await?;
 
                         if is_excluded_box {
                             pw.set_exclude_mode(true);
-                            pw.write_all(&buffer[..to_read])?;
+                            pw.write_all(&buffer[..to_read]).await?;
                             pw.set_exclude_mode(false);
                         } else if is_mdat && is_top_level {
                             // Split the buffer at the 16-byte boundary.
                             if main_hash_remaining > 0 {
                                 let to_main = main_hash_remaining.min(to_read);
-                                pw.write_all(&buffer[..to_main])?; // → main hash
+                                pw.write_all(&buffer[..to_main]).await?; // → main hash
                                 main_hash_remaining -= to_main;
 
                                 if to_main < to_read {
                                     let rest = &buffer[to_main..to_read];
                                     pw.set_exclude_mode(true);
-                                    pw.process_chunk(MdatChunk {
+                                    pw.process_chunk(Chunk::Mdat {
                                         id: mdat_id,
                                         data: rest,
                                         large_size: mdat_large_size,
-                                    })?;
-                                    pw.write_all(rest)?;
+                                    })
+                                    .await?;
+                                    pw.write_all(rest).await?;
                                     pw.set_exclude_mode(false);
                                 }
                             } else {
                                 // Entirely past the 16-byte main-hash region → Merkle only.
                                 pw.set_exclude_mode(true);
-                                pw.process_chunk(MdatChunk {
+                                pw.process_chunk(Chunk::Mdat {
                                     id: mdat_id,
                                     data: &buffer[..to_read],
                                     large_size: mdat_large_size,
-                                })?;
-                                pw.write_all(&buffer[..to_read])?;
+                                })
+                                .await?;
+                                pw.write_all(&buffer[..to_read]).await?;
                                 pw.set_exclude_mode(false);
                             }
                         } else {
                             // Non-mdat box: write all content through the processor.
-                            pw.write_all(&buffer[..to_read])?;
+                            pw.write_all(&buffer[..to_read]).await?;
                         }
 
                         remaining -= to_read as u64;
@@ -1791,7 +1927,10 @@ impl ContainerIO for BmffIO {
                 } else {
                     // Small boxes can be loaded for efficiency
                     let mut box_data = vec![0u8; header.size as usize];
-                    source.read_exact(&mut box_data)?;
+                    source.read_exact(&mut box_data).await?;
+                    if delta != 0 {
+                        patch_chunk_offsets(&mut box_data, box_start, &chunk_tables, delta)?;
+                    }
 
                     // V3 small-box path.
                     //
@@ -1809,29 +1948,31 @@ impl ContainerIO for BmffIO {
                         let merkle_data = &box_data[merkle_start..];
 
                         if is_top_level && !is_excluded_box {
-                            let out_offset = pw.stream_position()?;
-                            pw.process_offset(out_offset)?;
+                            let out_offset = pw.position();
+                            pw.process_offset(out_offset).await?;
                             // First 16 bytes → main hash.
-                            pw.write_all(&box_data[..merkle_start])?;
+                            pw.write_all(&box_data[..merkle_start]).await?;
                             // Bytes 16+ → Merkle tree, excluded from main hash.
                             if !merkle_data.is_empty() {
                                 pw.set_exclude_mode(true);
-                                pw.process_chunk(MdatChunk {
+                                pw.process_chunk(Chunk::Mdat {
                                     id: mdat_id,
                                     data: merkle_data,
                                     large_size: header.large_size,
-                                })?;
-                                pw.write_all(merkle_data)?;
+                                })
+                                .await?;
+                                pw.write_all(merkle_data).await?;
                                 pw.set_exclude_mode(false);
                             }
                             true
                         } else {
                             if !merkle_data.is_empty() {
-                                pw.process_chunk(MdatChunk {
+                                pw.process_chunk(Chunk::Mdat {
                                     id: mdat_id,
                                     data: merkle_data,
                                     large_size: header.large_size,
-                                })?;
+                                })
+                                .await?;
                             }
                             false
                         }
@@ -1842,17 +1983,17 @@ impl ContainerIO for BmffIO {
                     if !mdat_v2_top_done {
                         if is_top_level && !is_excluded_box {
                             // V3: emit offset then let all content flow through the processor.
-                            let out_offset = pw.stream_position()?;
-                            pw.process_offset(out_offset)?;
-                            pw.write_all(&box_data)?;
+                            let out_offset = pw.position();
+                            pw.process_offset(out_offset).await?;
+                            pw.write_all(&box_data).await?;
                         } else if is_excluded_box {
                             // Fully-excluded boxes (mfra, free, skip) are not hashed.
                             pw.set_exclude_mode(true);
-                            pw.write_all(&box_data)?;
+                            pw.write_all(&box_data).await?;
                             pw.set_exclude_mode(false);
                         } else {
                             // Normal copy (V1 style, or non-top-level boxes)
-                            pw.write_all(&box_data)?;
+                            pw.write_all(&box_data).await?;
                         }
                     }
                 }
@@ -1862,48 +2003,35 @@ impl ContainerIO for BmffIO {
             source.seek(SeekFrom::Start(current_pos))?;
         }
 
-        // Compute chunk offset delta and patch stco/co64 when UUID region changed
-        let original_size: u64 = {
-            let xmp = if write_xmp || remove_xmp {
-                existing_xmp_token
-                    .map(|t| bmff_tree[t].data.size)
-                    .unwrap_or(0)
-            } else {
-                0
-            };
-            let c2pa = if write_jumbf || remove_jumbf {
-                existing_c2pa_token
-                    .map(|t| bmff_tree[t].data.size)
-                    .unwrap_or(0)
-            } else {
-                0
-            };
-            xmp + c2pa
-        };
-        let new_size: u64 = {
-            let xmp = match &updates.xmp {
-                MetadataUpdate::Set(data) => calculate_xmp_box_size(data),
-                MetadataUpdate::Remove => 0,
-                MetadataUpdate::Keep => existing_xmp_token
-                    .map(|t| bmff_tree[t].data.size)
-                    .unwrap_or(0),
-            };
-            let c2pa = match &updates.jumbf {
-                MetadataUpdate::Set(data) => calculate_c2pa_box_size(data, "manifest"),
-                MetadataUpdate::Remove => 0,
-                MetadataUpdate::Keep => existing_c2pa_token
-                    .map(|t| bmff_tree[t].data.size)
-                    .unwrap_or(0),
-            };
-            xmp + c2pa
-        };
-        let delta = new_size as i64 - original_size as i64;
-        if delta != 0 {
-            pw.flush()?;
-            bmff_adjust_chunk_offsets(pw.get_mut(), delta)?;
-        }
-
         Ok(())
+    }
+}
+
+impl Default for BmffIO {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ContainerIO for BmffIO {
+    fn container_type() -> ContainerKind {
+        ContainerKind::Bmff
+    }
+
+    fn supported_media_types() -> &'static [MediaType] {
+        Self::supported_media_types()
+    }
+
+    fn extensions() -> &'static [&'static str] {
+        Self::extensions()
+    }
+
+    fn mime_types() -> &'static [&'static str] {
+        Self::mime_types()
+    }
+
+    fn detect(header: &[u8]) -> Option<ContainerKind> {
+        Self::detect(header)
     }
 
     fn calculate_updated_structure(
@@ -2036,66 +2164,6 @@ impl ContainerIO for BmffIO {
         Ok(new_structure)
     }
 
-    #[cfg(feature = "exif")]
-    fn read_embedded_thumbnail_info<R: Read + Seek>(
-        &self,
-        _structure: &Structure,
-        source: &mut R,
-    ) -> Result<Option<crate::thumbnail::EmbeddedThumbnailInfo>> {
-        // HEIF/HEIC thumbnail extraction
-        // Thumbnails are stored as separate items with 'thmb' reference to the primary item
-        extract_heif_thumbnail_info(source)
-    }
-
-    #[cfg(feature = "exif")]
-    fn read_exif_info<R: Read + Seek>(
-        &self,
-        structure: &Structure,
-        source: &mut R,
-    ) -> Result<Option<crate::tiff::ExifInfo>> {
-        use std::io::SeekFrom;
-
-        // Find EXIF segment
-        let exif_segment = structure
-            .segments()
-            .iter()
-            .find(|s| s.is_type(SegmentKind::Exif));
-
-        let segment = match exif_segment {
-            Some(s) => s,
-            None => return Ok(None),
-        };
-
-        // Read the EXIF data
-        let location = segment.location();
-        if location.size > MAX_BOX_ALLOCATION {
-            return Err(Error::InvalidFormat(format!(
-                "EXIF data size too large: {} bytes (max: {} bytes)",
-                location.size, MAX_BOX_ALLOCATION
-            )));
-        }
-        source.seek(SeekFrom::Start(location.offset))?;
-        let mut data = vec![0u8; location.size as usize];
-        source.read_exact(&mut data)?;
-
-        // HEIF: Exif item has 4-byte tiff_header_offset prefix, then "Exif\0\0", then TIFF
-        // The 4 bytes are typically 0x00000006 (offset to TIFF data from start of Exif block)
-        let exif_data = if data.len() > 10 && &data[4..10] == b"Exif\0\0" {
-            &data[10..]
-        } else if data.len() > 4 {
-            // Some files may have different structure, try to find TIFF header
-            if data[4..].starts_with(b"II") || data[4..].starts_with(b"MM") {
-                &data[4..]
-            } else {
-                &data
-            }
-        } else {
-            return Ok(None);
-        };
-
-        crate::tiff::parse_exif_info(exif_data)
-    }
-
     fn exclusion_range_for_segment(structure: &Structure, kind: SegmentKind) -> Option<(u64, u64)> {
         let segment = match kind {
             SegmentKind::Jumbf => structure
@@ -2124,8 +2192,8 @@ impl ContainerIO for BmffIO {
 
 /// Extract thumbnail info from a HEIF/HEIC file
 #[cfg(feature = "exif")]
-fn extract_heif_thumbnail_info<R: Read + Seek>(
-    source: &mut R,
+async fn extract_heif_thumbnail_info(
+    source: &mut Src,
 ) -> Result<Option<crate::thumbnail::EmbeddedThumbnailInfo>> {
     use crate::thumbnail::{EmbeddedThumbnailInfo, ThumbnailKind};
 
@@ -2134,25 +2202,26 @@ fn extract_heif_thumbnail_info<R: Read + Seek>(
     source.seek(SeekFrom::Start(0))?;
 
     // Find and parse the meta box
-    let meta_info = find_meta_box(source, file_size)?;
+    let meta_info = find_meta_box(source, file_size).await?;
     let Some((meta_offset, meta_size)) = meta_info else {
         return Ok(None);
     };
 
     // Parse pitm (primary item ID)
-    let primary_item_id = parse_pitm(source, meta_offset, meta_size)?;
+    let primary_item_id = parse_pitm(source, meta_offset, meta_size).await?;
     let Some(primary_id) = primary_item_id else {
         return Ok(None);
     };
 
     // Parse iref to find thumbnail items
-    let thumbnail_item_ids = parse_iref_for_thumbnails(source, meta_offset, meta_size, primary_id)?;
+    let thumbnail_item_ids =
+        parse_iref_for_thumbnails(source, meta_offset, meta_size, primary_id).await?;
     if thumbnail_item_ids.is_empty() {
         return Ok(None);
     }
 
     // Parse iloc to get thumbnail location
-    let iloc_entries = parse_iloc(source, meta_offset, meta_size)?;
+    let iloc_entries = parse_iloc(source, meta_offset, meta_size).await?;
 
     // Find the first thumbnail's location
     for thumb_id in thumbnail_item_ids {
@@ -2160,7 +2229,7 @@ fn extract_heif_thumbnail_info<R: Read + Seek>(
             // Try to detect format from first bytes
             source.seek(SeekFrom::Start(*offset))?;
             let mut magic = [0u8; 4];
-            if source.read_exact(&mut magic).is_ok() {
+            if source.read_exact(&mut magic).await.is_ok() {
                 let format = if magic[0..2] == [0xFF, 0xD8] {
                     ThumbnailKind::Jpeg
                 } else {
@@ -2183,7 +2252,7 @@ fn extract_heif_thumbnail_info<R: Read + Seek>(
 
 /// Find the meta box offset and size
 #[cfg(feature = "exif")]
-fn find_meta_box<R: Read + Seek>(source: &mut R, file_size: u64) -> Result<Option<(u64, u64)>> {
+async fn find_meta_box(source: &mut Src, file_size: u64) -> Result<Option<(u64, u64)>> {
     source.seek(SeekFrom::Start(0))?;
 
     let mut pos = 0u64;
@@ -2191,7 +2260,7 @@ fn find_meta_box<R: Read + Seek>(source: &mut R, file_size: u64) -> Result<Optio
         source.seek(SeekFrom::Start(pos))?;
 
         let mut buf = [0u8; 8];
-        if source.read_exact(&mut buf).is_err() {
+        if source.read_exact(&mut buf).await.is_err() {
             break;
         }
 
@@ -2201,7 +2270,7 @@ fn find_meta_box<R: Read + Seek>(source: &mut R, file_size: u64) -> Result<Optio
         let actual_size = if size == 1 {
             // Extended size
             let mut ext = [0u8; 8];
-            source.read_exact(&mut ext)?;
+            source.read_exact(&mut ext).await?;
             u64::from_be_bytes(ext)
         } else if size == 0 {
             file_size - pos
@@ -2227,11 +2296,7 @@ fn find_meta_box<R: Read + Seek>(source: &mut R, file_size: u64) -> Result<Optio
 
 /// Parse pitm box to get primary item ID
 #[cfg(feature = "exif")]
-fn parse_pitm<R: Read + Seek>(
-    source: &mut R,
-    meta_offset: u64,
-    meta_size: u64,
-) -> Result<Option<u32>> {
+async fn parse_pitm(source: &mut Src, meta_offset: u64, meta_size: u64) -> Result<Option<u32>> {
     let meta_end = meta_offset + meta_size;
 
     // Skip meta box header (8 bytes) + version/flags (4 bytes)
@@ -2241,7 +2306,7 @@ fn parse_pitm<R: Read + Seek>(
         let box_start = source.stream_position()?;
 
         let mut buf = [0u8; 8];
-        if source.read_exact(&mut buf).is_err() {
+        if source.read_exact(&mut buf).await.is_err() {
             break;
         }
 
@@ -2254,13 +2319,13 @@ fn parse_pitm<R: Read + Seek>(
 
         if box_type == b"pitm" {
             // pitm: version (1) + flags (3) + item_id (2 or 4 depending on version)
-            let version = source.read_u8()?;
-            source.read_u24::<BigEndian>()?; // flags
+            let version = source.read_u8().await?;
+            read_u24_be(source).await?; // flags
 
             let item_id = if version == 0 {
-                source.read_u16::<BigEndian>()? as u32
+                source.read_u16_be().await? as u32
             } else {
-                source.read_u32::<BigEndian>()?
+                source.read_u32_be().await?
             };
 
             return Ok(Some(item_id));
@@ -2274,8 +2339,8 @@ fn parse_pitm<R: Read + Seek>(
 
 /// Parse iref box to find items with 'thmb' reference to the primary item
 #[cfg(feature = "exif")]
-fn parse_iref_for_thumbnails<R: Read + Seek>(
-    source: &mut R,
+async fn parse_iref_for_thumbnails(
+    source: &mut Src,
     meta_offset: u64,
     meta_size: u64,
     primary_id: u32,
@@ -2290,7 +2355,7 @@ fn parse_iref_for_thumbnails<R: Read + Seek>(
         let box_start = source.stream_position()?;
 
         let mut buf = [0u8; 8];
-        if source.read_exact(&mut buf).is_err() {
+        if source.read_exact(&mut buf).await.is_err() {
             break;
         }
 
@@ -2305,15 +2370,15 @@ fn parse_iref_for_thumbnails<R: Read + Seek>(
             let iref_end = box_start + size;
 
             // version (1) + flags (3)
-            let version = source.read_u8()?;
-            source.read_u24::<BigEndian>()?; // flags
+            let version = source.read_u8().await?;
+            read_u24_be(source).await?; // flags
 
             // Parse reference entries
             while source.stream_position()? < iref_end {
                 let entry_start = source.stream_position()?;
 
                 let mut entry_buf = [0u8; 8];
-                if source.read_exact(&mut entry_buf).is_err() {
+                if source.read_exact(&mut entry_buf).await.is_err() {
                     break;
                 }
 
@@ -2330,18 +2395,18 @@ fn parse_iref_for_thumbnails<R: Read + Seek>(
                     // This is a thumbnail reference
                     // from_item_ID (2 or 4 bytes) + reference_count (2) + to_item_IDs
                     let from_item_id = if version == 0 {
-                        source.read_u16::<BigEndian>()? as u32
+                        source.read_u16_be().await? as u32
                     } else {
-                        source.read_u32::<BigEndian>()?
+                        source.read_u32_be().await?
                     };
 
-                    let ref_count = source.read_u16::<BigEndian>()?;
+                    let ref_count = source.read_u16_be().await?;
 
                     for _ in 0..ref_count {
                         let to_item_id = if version == 0 {
-                            source.read_u16::<BigEndian>()? as u32
+                            source.read_u16_be().await? as u32
                         } else {
-                            source.read_u32::<BigEndian>()?
+                            source.read_u32_be().await?
                         };
 
                         // If this thumbnail points to the primary item, record the thumbnail ID
@@ -2365,8 +2430,8 @@ fn parse_iref_for_thumbnails<R: Read + Seek>(
 
 /// Parse iinf box to find items with type "Exif"
 #[cfg(feature = "exif")]
-fn parse_iinf_for_exif<R: Read + Seek>(
-    source: &mut R,
+async fn parse_iinf_for_exif(
+    source: &mut Src,
     meta_offset: u64,
     meta_size: u64,
 ) -> Result<Vec<u32>> {
@@ -2380,7 +2445,7 @@ fn parse_iinf_for_exif<R: Read + Seek>(
         let box_start = source.stream_position()?;
 
         let mut buf = [0u8; 8];
-        if source.read_exact(&mut buf).is_err() {
+        if source.read_exact(&mut buf).await.is_err() {
             break;
         }
 
@@ -2395,14 +2460,14 @@ fn parse_iinf_for_exif<R: Read + Seek>(
             let iinf_end = box_start + size;
 
             // version (1) + flags (3)
-            let version = source.read_u8()?;
-            source.read_u24::<BigEndian>()?; // flags
+            let version = source.read_u8().await?;
+            read_u24_be(source).await?; // flags
 
             // entry_count
             let entry_count = if version == 0 {
-                source.read_u16::<BigEndian>()? as u32
+                source.read_u16_be().await? as u32
             } else {
-                source.read_u32::<BigEndian>()?
+                source.read_u32_be().await?
             };
 
             // Parse infe entries
@@ -2414,7 +2479,7 @@ fn parse_iinf_for_exif<R: Read + Seek>(
                 let infe_start = source.stream_position()?;
 
                 let mut infe_buf = [0u8; 8];
-                if source.read_exact(&mut infe_buf).is_err() {
+                if source.read_exact(&mut infe_buf).await.is_err() {
                     break;
                 }
 
@@ -2428,23 +2493,23 @@ fn parse_iinf_for_exif<R: Read + Seek>(
                 }
 
                 // infe: version (1) + flags (3)
-                let infe_version = source.read_u8()?;
-                source.read_u24::<BigEndian>()?; // flags
+                let infe_version = source.read_u8().await?;
+                read_u24_be(source).await?; // flags
 
                 if infe_version >= 2 {
                     // item_ID
                     let item_id = if infe_version == 2 {
-                        source.read_u16::<BigEndian>()? as u32
+                        source.read_u16_be().await? as u32
                     } else {
-                        source.read_u32::<BigEndian>()?
+                        source.read_u32_be().await?
                     };
 
                     // item_protection_index (2 bytes)
-                    source.read_u16::<BigEndian>()?;
+                    source.read_u16_be().await?;
 
                     // item_type (4 bytes) - this is what we're looking for!
                     let mut item_type = [0u8; 4];
-                    source.read_exact(&mut item_type)?;
+                    source.read_exact(&mut item_type).await?;
 
                     if &item_type == b"Exif" {
                         exif_item_ids.push(item_id);
@@ -2466,8 +2531,8 @@ fn parse_iinf_for_exif<R: Read + Seek>(
 /// Parse iloc box to get item locations
 /// Returns a map of item_id -> (offset, size)
 #[cfg(feature = "exif")]
-fn parse_iloc<R: Read + Seek>(
-    source: &mut R,
+async fn parse_iloc(
+    source: &mut Src,
     meta_offset: u64,
     meta_size: u64,
 ) -> Result<std::collections::HashMap<u32, (u64, u64)>> {
@@ -2481,7 +2546,7 @@ fn parse_iloc<R: Read + Seek>(
         let box_start = source.stream_position()?;
 
         let mut buf = [0u8; 8];
-        if source.read_exact(&mut buf).is_err() {
+        if source.read_exact(&mut buf).await.is_err() {
             break;
         }
 
@@ -2494,12 +2559,12 @@ fn parse_iloc<R: Read + Seek>(
 
         if box_type == b"iloc" {
             // version (1) + flags (3)
-            let version = source.read_u8()?;
-            source.read_u24::<BigEndian>()?; // flags
+            let version = source.read_u8().await?;
+            read_u24_be(source).await?; // flags
 
             // offset_size (4 bits) + length_size (4 bits) + base_offset_size (4 bits) + index_size/reserved (4 bits)
-            let sizes1 = source.read_u8()?;
-            let sizes2 = source.read_u8()?;
+            let sizes1 = source.read_u8().await?;
+            let sizes2 = source.read_u8().await?;
 
             let offset_size = (sizes1 >> 4) & 0x0F;
             let length_size = sizes1 & 0x0F;
@@ -2508,32 +2573,32 @@ fn parse_iloc<R: Read + Seek>(
 
             // item_count
             let item_count = if version < 2 {
-                source.read_u16::<BigEndian>()? as u32
+                source.read_u16_be().await? as u32
             } else {
-                source.read_u32::<BigEndian>()?
+                source.read_u32_be().await?
             };
 
             for _ in 0..item_count {
                 // item_ID
                 let item_id = if version < 2 {
-                    source.read_u16::<BigEndian>()? as u32
+                    source.read_u16_be().await? as u32
                 } else {
-                    source.read_u32::<BigEndian>()?
+                    source.read_u32_be().await?
                 };
 
                 // construction_method (version >= 1)
                 if version >= 1 {
-                    source.read_u16::<BigEndian>()?; // construction_method + reserved
+                    source.read_u16_be().await?; // construction_method + reserved
                 }
 
                 // data_reference_index
-                source.read_u16::<BigEndian>()?;
+                source.read_u16_be().await?;
 
                 // base_offset
-                let base_offset = read_variable_int(source, base_offset_size)?;
+                let base_offset = read_variable_int(source, base_offset_size).await?;
 
                 // extent_count
-                let extent_count = source.read_u16::<BigEndian>()?;
+                let extent_count = source.read_u16_be().await?;
 
                 let mut total_size = 0u64;
                 let mut first_offset = 0u64;
@@ -2541,14 +2606,14 @@ fn parse_iloc<R: Read + Seek>(
                 for i in 0..extent_count {
                     // extent_index (version >= 1 and index_size > 0) - skip for simplicity
                     if version >= 1 && _index_size > 0 {
-                        read_variable_int(source, _index_size)?;
+                        read_variable_int(source, _index_size).await?;
                     }
 
                     // extent_offset
-                    let extent_offset = read_variable_int(source, offset_size)?;
+                    let extent_offset = read_variable_int(source, offset_size).await?;
 
                     // extent_length
-                    let extent_length = read_variable_int(source, length_size)?;
+                    let extent_length = read_variable_int(source, length_size).await?;
 
                     if i == 0 {
                         first_offset = base_offset + extent_offset;
@@ -2570,15 +2635,22 @@ fn parse_iloc<R: Read + Seek>(
     Ok(locations)
 }
 
+#[cfg(feature = "exif")]
+async fn read_u24_be(source: &mut Src) -> Result<u32> {
+    let mut b = [0u8; 3];
+    source.read_exact(&mut b).await?;
+    Ok(u32::from_be_bytes([0, b[0], b[1], b[2]]))
+}
+
 /// Read a variable-length integer based on size specifier
 #[cfg(feature = "exif")]
-fn read_variable_int<R: Read>(source: &mut R, size: u8) -> Result<u64> {
+async fn read_variable_int(source: &mut Src, size: u8) -> Result<u64> {
     match size {
         0 => Ok(0),
-        1 => Ok(source.read_u8()? as u64),
-        2 => Ok(source.read_u16::<BigEndian>()? as u64),
-        4 => Ok(source.read_u32::<BigEndian>()? as u64),
-        8 => Ok(source.read_u64::<BigEndian>()?),
+        1 => Ok(source.read_u8().await? as u64),
+        2 => Ok(source.read_u16_be().await? as u64),
+        4 => Ok(source.read_u32_be().await? as u64),
+        8 => Ok(source.read_u64_be().await?),
         _ => Err(Error::InvalidFormat(format!(
             "Invalid iloc size specifier: {}",
             size
@@ -2603,5 +2675,56 @@ mod tests {
         ];
 
         assert_eq!(BmffIO::detect(&data), Some(ContainerKind::Bmff));
+    }
+
+    fn first_stco_entry(data: &[u8]) -> u32 {
+        let pos = data.windows(4).position(|w| w == b"stco").expect("stco");
+        let at = pos + 4 + 4 + 4;
+        u32::from_be_bytes([data[at], data[at + 1], data[at + 2], data[at + 3]])
+    }
+
+    #[test]
+    fn test_m4a_set_xmp_patches_stco_sequentially() {
+        use sha2::{Digest, Sha256};
+        use std::io::Cursor;
+
+        let original = std::fs::read("tests/fixtures/sample1.m4a").unwrap();
+        let io = BmffIO::new();
+        let mut src = Cursor::new(original.clone());
+        let structure = io.parse(&mut src).unwrap();
+        let updates = Updates::new().set_xmp(b"<x:xmpmeta>new xmp payload</x:xmpmeta>".to_vec());
+
+        let mut out = Cursor::new(Vec::new());
+        let mut processed = Vec::new();
+        let mut proc = |c: &dyn crate::ProcessChunk| -> Result<()> {
+            processed.extend_from_slice(c.data());
+            Ok(())
+        };
+        io.write_with_processor(&structure, &mut src, &mut out, &updates, &mut proc)
+            .unwrap();
+        let out = out.into_inner();
+
+        let delta = out.len() as i64 - original.len() as i64;
+        assert_ne!(delta, 0);
+        assert_eq!(
+            first_stco_entry(&out) as i64,
+            first_stco_entry(&original) as i64 + delta
+        );
+        io.parse(&mut Cursor::new(out.clone())).unwrap();
+
+        // The processor saw the final (patched) moov bytes.
+        let moov_at = out.windows(4).position(|w| w == b"moov").unwrap() - 4;
+        let moov_len = u32::from_be_bytes(out[moov_at..moov_at + 4].try_into().unwrap()) as usize;
+        let moov = &out[moov_at..moov_at + moov_len];
+        let seen = processed
+            .windows(moov_len)
+            .any(|w| Sha256::digest(w) == Sha256::digest(moov));
+        assert!(seen, "processor did not see the patched moov bytes");
+
+        // Plain write matches too.
+        let mut plain = Cursor::new(Vec::new());
+        io.write(&structure, &mut Cursor::new(original), &mut plain, &updates)
+            .unwrap();
+        assert_eq!(plain.into_inner(), out);
     }
 }

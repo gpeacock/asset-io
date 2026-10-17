@@ -1,7 +1,10 @@
 //! Incremental metadata revisions; original file bytes are never rewritten.
 
 use super::*;
+use crate::sans_io::io::{PDst, Src};
 use crate::updates::MetadataUpdate;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 #[derive(Clone, Debug)]
@@ -40,15 +43,15 @@ fn unsupported(reason: &'static str) -> Error {
     Error::UnsupportedFeature(reason)
 }
 
-pub(super) fn context<R: Read + Seek>(
-    parser: &mut Parser<R>,
+pub(super) async fn context(
+    parser: &mut Parser<'_>,
     root: Reference,
     previous: u64,
     catalog: Dictionary,
     associated: Vec<Value>,
     active: Option<BTreeSet<Reference>>,
 ) -> Result<State> {
-    match prepare(parser, root, previous, catalog, associated, active) {
+    match prepare(parser, root, previous, catalog, associated, active).await {
         Ok(context) => Ok(State::Ready(Arc::new(context))),
         Err(Error::UnsupportedFeature(reason)) => Ok(State::Blocked(reason)),
         Err(Error::InvalidFormat(message)) => {
@@ -59,15 +62,15 @@ pub(super) fn context<R: Read + Seek>(
     }
 }
 
-fn dictionary<R: Read + Seek>(parser: &mut Parser<R>, value: Option<Value>) -> Result<Dictionary> {
+async fn dictionary(parser: &mut Parser<'_>, value: Option<Value>) -> Result<Dictionary> {
     match value {
         None | Some(Value::Null) => Ok(Dictionary::new()),
-        Some(value) => parser.resolve(value)?.dictionary(),
+        Some(value) => parser.resolve(value).await?.dictionary(),
     }
 }
 
-fn check_form<R: Read + Seek>(parser: &mut Parser<R>, value: Value) -> Result<()> {
-    let form = parser.resolve(value)?;
+async fn check_form(parser: &mut Parser<'_>, value: Value) -> Result<()> {
+    let form = parser.resolve(value).await?;
     if matches!(form, Value::Null) {
         return Ok(());
     }
@@ -82,65 +85,67 @@ fn check_form<R: Read + Seek>(parser: &mut Parser<R>, value: Value) -> Result<()
     }
     let fields = required(&mut form, b"Fields")?;
     let mut remaining = MAX_OBJECTS;
-    check_fields(parser, fields, None, None, 0, &mut remaining)
+    check_fields(parser, fields, None, None, 0, &mut remaining).await
 }
 
-fn check_fields<R: Read + Seek>(
-    parser: &mut Parser<R>,
+fn check_fields<'b>(
+    parser: &'b mut Parser<'_>,
     fields: Value,
-    inherited_type: Option<&Value>,
-    inherited_value: Option<&Value>,
+    inherited_type: Option<&'b Value>,
+    inherited_value: Option<&'b Value>,
     depth: usize,
-    remaining: &mut usize,
-) -> Result<()> {
-    if depth >= MAX_DEPTH {
-        return Err(invalid("AcroForm field depth limit exceeded"));
-    }
-    let Value::Array(fields) = parser.resolve(fields)? else {
-        return Err(invalid("AcroForm Fields/Kids must be an array"));
-    };
-    for field in fields {
-        *remaining = remaining
-            .checked_sub(1)
-            .ok_or_else(|| invalid("AcroForm field count limit exceeded"))?;
-        let mut field = parser.resolve(field)?.dictionary()?;
-        // Roots cannot inherit from an unvisited parent outside the field tree.
-        if depth == 0
-            && field
-                .get(b"Parent".as_slice())
-                .is_some_and(|value| !matches!(value, Value::Null))
-        {
-            return Err(invalid("AcroForm root field has a Parent"));
+    remaining: &'b mut usize,
+) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'b>> {
+    Box::pin(async move {
+        if depth >= MAX_DEPTH {
+            return Err(invalid("AcroForm field depth limit exceeded"));
         }
-        let own_type = match field.remove(b"FT".as_slice()) {
-            Some(value) => Some(parser.resolve(value)?),
-            None => None,
+        let Value::Array(fields) = parser.resolve(fields).await? else {
+            return Err(invalid("AcroForm Fields/Kids must be an array"));
         };
-        let field_type = own_type.as_ref().or(inherited_type);
-        if field_type.is_some_and(|value| !matches!(value, Value::Name(_))) {
-            return Err(invalid("AcroForm FT must be a name"));
+        for field in fields {
+            *remaining = remaining
+                .checked_sub(1)
+                .ok_or_else(|| invalid("AcroForm field count limit exceeded"))?;
+            let mut field = parser.resolve(field).await?.dictionary()?;
+            // Roots cannot inherit from an unvisited parent outside the field tree.
+            if depth == 0
+                && field
+                    .get(b"Parent".as_slice())
+                    .is_some_and(|value| !matches!(value, Value::Null))
+            {
+                return Err(invalid("AcroForm root field has a Parent"));
+            }
+            let own_type = match field.remove(b"FT".as_slice()) {
+                Some(value) => Some(parser.resolve(value).await?),
+                None => None,
+            };
+            let field_type = own_type.as_ref().or(inherited_type);
+            if field_type.is_some_and(|value| !matches!(value, Value::Name(_))) {
+                return Err(invalid("AcroForm FT must be a name"));
+            }
+            let own_value = match field.remove(b"V".as_slice()) {
+                Some(value) => Some(parser.resolve(value).await?),
+                None => None,
+            };
+            let value = own_value.as_ref().or(inherited_value);
+            if field_type.is_some_and(|value| value.is_name(b"Sig"))
+                && value.is_some_and(|value| !matches!(value, Value::Null))
+            {
+                return Err(unsupported(
+                    "PDF metadata writing does not support populated signature fields",
+                ));
+            }
+            if let Some(kids) = field.remove(b"Kids".as_slice()) {
+                check_fields(parser, kids, field_type, value, depth + 1, remaining).await?;
+            }
         }
-        let own_value = match field.remove(b"V".as_slice()) {
-            Some(value) => Some(parser.resolve(value)?),
-            None => None,
-        };
-        let value = own_value.as_ref().or(inherited_value);
-        if field_type.is_some_and(|value| value.is_name(b"Sig"))
-            && value.is_some_and(|value| !matches!(value, Value::Null))
-        {
-            return Err(unsupported(
-                "PDF metadata writing does not support populated signature fields",
-            ));
-        }
-        if let Some(kids) = field.remove(b"Kids".as_slice()) {
-            check_fields(parser, kids, field_type, value, depth + 1, remaining)?;
-        }
-    }
-    Ok(())
+        Ok(())
+    })
 }
 
-fn prepare<R: Read + Seek>(
-    parser: &mut Parser<R>,
+async fn prepare(
+    parser: &mut Parser<'_>,
     root: Reference,
     previous: u64,
     catalog: Dictionary,
@@ -156,12 +161,12 @@ fn prepare<R: Read + Seek>(
         ));
     }
     if let Some(form) = catalog.get(b"AcroForm".as_slice()) {
-        check_form(parser, form.clone())?;
+        check_form(parser, form.clone()).await?;
     }
     let active = active
         .ok_or_else(|| unsupported("writing PDF C2PA requires indirect file specifications"))?;
-    let mut names = dictionary(parser, catalog.get(b"Names".as_slice()).cloned())?;
-    let mut tree = dictionary(parser, names.remove(b"EmbeddedFiles".as_slice()))?;
+    let mut names = dictionary(parser, catalog.get(b"Names".as_slice()).cloned()).await?;
+    let mut tree = dictionary(parser, names.remove(b"EmbeddedFiles".as_slice())).await?;
     if tree.contains_key(b"Kids".as_slice()) {
         return Err(unsupported(
             "writing PDF EmbeddedFiles name trees with Kids is not supported",
@@ -169,7 +174,7 @@ fn prepare<R: Read + Seek>(
     }
     let values = match tree.remove(b"Names".as_slice()) {
         None => Vec::new(),
-        Some(value) => match parser.resolve(value)? {
+        Some(value) => match parser.resolve(value).await? {
             Value::Array(values) => values,
             _ => return Err(invalid("EmbeddedFiles Names must be an array")),
         },
@@ -181,7 +186,7 @@ fn prepare<R: Read + Seek>(
     let mut values = values.into_iter();
     let mut previous_name = None;
     while let Some(key) = values.next() {
-        let Value::Bytes(key) = parser.resolve(key)? else {
+        let Value::Bytes(key) = parser.resolve(key).await? else {
             return Err(unsupported("PDF attachment names must be strings"));
         };
         if previous_name
@@ -659,58 +664,71 @@ fn payload(updates: &Updates, kind: SegmentKind) -> Result<&[u8]> {
     }
 }
 
-pub(super) fn write<R: Read + Seek, W: Write + Seek, F: crate::ProcessChunkFn>(
-    source_structure: &Structure,
-    source: &mut R,
-    writer: &mut W,
+async fn emit(
+    pw: &mut PDst<'_>,
+    planned: &Structure,
     updates: &Updates,
-    processor: &mut F,
+    offset: &mut u64,
+    index: &mut usize,
+    began: &mut bool,
+    mut bytes: &[u8],
+) -> Result<()> {
+    while !bytes.is_empty() {
+        let segment = planned
+            .segments
+            .get(*index)
+            .ok_or_else(|| invalid("write exceeds planned PDF segments"))?;
+        if !*began {
+            pw.begin_segment(segment).await?;
+            *began = true;
+        }
+        let range = segment.location();
+        if *offset == range.end_offset() {
+            *index += 1;
+            *began = false;
+            continue;
+        }
+        let count = bytes
+            .len()
+            .min(usize::try_from(range.end_offset() - *offset).unwrap_or(usize::MAX));
+        pw.set_exclude_mode(updates.processing.exclude_segments.contains(&segment.kind));
+        pw.write_all(&bytes[..count]).await?;
+        *offset += count as u64;
+        bytes = &bytes[count..];
+    }
+    Ok(())
+}
+
+pub(super) async fn write_async(
+    source_structure: &Structure,
+    src: &mut Src,
+    pw: &mut PDst<'_>,
+    updates: &Updates,
 ) -> Result<()> {
     let plan = plan(source_structure, updates)?;
-    if source.seek(SeekFrom::End(0))? != source_structure.total_size {
+    if src.len() != source_structure.total_size {
         return Err(invalid("source size changed since parsing"));
     }
-    writer.seek(SeekFrom::Start(0))?;
-    let mut writer = crate::processing_writer::ProcessingWriter::new(writer, processor);
     let mut offset = 0u64;
-    let mut index = 0;
+    let mut index = 0usize;
     let mut began = false;
-    let mut emit = |bytes: &[u8]| -> Result<()> {
-        let mut remaining = bytes;
-        while !remaining.is_empty() {
-            let segment = plan
-                .structure
-                .segments
-                .get(index)
-                .ok_or_else(|| invalid("write exceeds planned PDF segments"))?;
-            if !began {
-                writer.begin_segment(segment)?;
-                began = true;
-            }
-            let range = segment.location();
-            if offset == range.end_offset() {
-                index += 1;
-                began = false;
-                continue;
-            }
-            let count = remaining
-                .len()
-                .min(usize::try_from(range.end_offset() - offset).unwrap_or(usize::MAX));
-            writer.set_exclude_mode(updates.processing.exclude_segments.contains(&segment.kind));
-            writer.write_all(&remaining[..count])?;
-            offset += count as u64;
-            remaining = &remaining[count..];
-        }
-        Ok(())
-    };
-    source.seek(SeekFrom::Start(0))?;
+    src.seek(SeekFrom::Start(0))?;
     let mut buffer = [0u8; crate::segment::DEFAULT_CHUNK_SIZE];
     let chunk_size = updates.processing.effective_chunk_size().min(buffer.len());
     let mut remaining = source_structure.total_size;
     while remaining != 0 {
         let count = remaining.min(chunk_size as u64) as usize;
-        source.read_exact(&mut buffer[..count])?;
-        emit(&buffer[..count])?;
+        src.read_exact_direct(&mut buffer[..count]).await?;
+        emit(
+            pw,
+            &plan.structure,
+            updates,
+            &mut offset,
+            &mut index,
+            &mut began,
+            &buffer[..count],
+        )
+        .await?;
         remaining -= count as u64;
     }
     for piece in plan.pieces {
@@ -719,7 +737,16 @@ pub(super) fn write<R: Read + Seek, W: Write + Seek, F: crate::ProcessChunkFn>(
             Piece::Payload(kind) => payload(updates, *kind)?,
         };
         for chunk in bytes.chunks(chunk_size) {
-            emit(chunk)?;
+            emit(
+                pw,
+                &plan.structure,
+                updates,
+                &mut offset,
+                &mut index,
+                &mut began,
+                chunk,
+            )
+            .await?;
         }
     }
     if offset != plan.position {
@@ -728,12 +755,12 @@ pub(super) fn write<R: Read + Seek, W: Write + Seek, F: crate::ProcessChunkFn>(
     Ok(())
 }
 
-pub(crate) fn patch<W: Write + Seek>(
+/// Plan an exact-length in-place payload replacement: returns `(offset, bytes)` to overwrite.
+pub(crate) fn patch_plan(
     structure: &Structure,
-    writer: &mut W,
     kind: SegmentKind,
-    data: &[u8],
-) -> Result<usize> {
+    data: Vec<u8>,
+) -> Result<(u64, Vec<u8>)> {
     let state = structure
         .metadata
         .as_ref()
@@ -765,10 +792,7 @@ pub(crate) fn patch<W: Write + Seek>(
             "PDF in-place updates require exact-length payloads",
         ));
     }
-    writer.seek(SeekFrom::Start(range.offset))?;
-    writer.write_all(data)?;
-    writer.flush()?;
-    Ok(data.len())
+    Ok((range.offset, data))
 }
 
 // Replacing the path only after a successful write also permits source == destination,
@@ -858,9 +882,8 @@ mod tests {
     #[test]
     fn serializer_preserves_all_value_types_and_decodes_pdf_strings() {
         let bytes = b"<< /A [(a\\n\\r\\t\\b\\f\\(\\)\\\\\\053\\777\\\r\nb\r\nc) <a> <00FF> /a#2Fb +10 -.125 .5 true false null 1 2 R] >>";
-        let original = Parser::new(Cursor::new(bytes), bytes.len() as u64)
-            .value(0)
-            .unwrap();
+        let mut parser = Parser::memory(bytes);
+        let original = super::super::test_block_on(parser.value(0)).unwrap();
         let Value::Dictionary(dictionary) = &original else {
             panic!()
         };
@@ -874,9 +897,8 @@ mod tests {
         assert_eq!(array[1], Value::Bytes(vec![0xa0]));
         let mut encoded = Vec::new();
         serialize(&original, &mut encoded).unwrap();
-        let reparsed = Parser::new(Cursor::new(&encoded), encoded.len() as u64)
-            .value(0)
-            .unwrap();
+        let mut parser = Parser::memory(&encoded);
+        let reparsed = super::super::test_block_on(parser.value(0)).unwrap();
         assert_eq!(original, reparsed);
     }
 
