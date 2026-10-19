@@ -1,33 +1,4 @@
-//! Updates and processing options for asset modifications
-
-use crate::segment::{ExclusionMode, SegmentKind, DEFAULT_CHUNK_SIZE};
-
-/// Options controlling how data is processed during read or write operations
-///
-/// These options configure streaming behavior, segment exclusions, and other
-/// processing parameters. Used by both `read_with_processing()` and
-/// `write_with_processing()` for symmetric read/write operations.
-///
-/// Use the builder methods on `Updates` to configure these options.
-#[derive(Debug, Clone, Default)]
-pub(crate) struct ProcessingOptions {
-    /// Chunk size for streaming operations (default: DEFAULT_CHUNK_SIZE = 64KB)
-    pub(crate) chunk_size: Option<usize>,
-
-    /// Segments to exclude from processing (e.g., for hashing)
-    pub(crate) exclude_segments: Vec<SegmentKind>,
-
-    /// How to handle exclusions (default: EntireSegment)
-    pub(crate) exclusion_mode: ExclusionMode,
-    // Future: include_segments for explicit inclusion
-}
-
-impl ProcessingOptions {
-    /// Get the effective chunk size (uses DEFAULT_CHUNK_SIZE if not set)
-    pub(crate) fn effective_chunk_size(&self) -> usize {
-        self.chunk_size.unwrap_or(DEFAULT_CHUNK_SIZE)
-    }
-}
+//! Metadata updates to apply when writing an asset.
 
 /// Metadata update strategy (internal)
 ///
@@ -44,6 +15,19 @@ pub(crate) enum MetadataUpdate {
     Set(Vec<u8>),
 }
 
+/// What to do with merkle boxes (internal)
+#[derive(Debug, Clone, Default)]
+#[allow(dead_code)] // `Set` is only built when the `bmff` feature is on
+pub(crate) enum MerkleUpdate {
+    /// Keep existing boxes (default)
+    #[default]
+    Keep,
+    /// Remove existing boxes
+    Remove,
+    /// Replace existing boxes with these payloads, one box each
+    Set(Vec<Vec<u8>>),
+}
+
 /// Updates to apply when writing a file
 ///
 /// This struct uses a builder pattern where the default is to keep all existing
@@ -51,27 +35,19 @@ pub(crate) enum MetadataUpdate {
 ///
 /// # Example
 ///
-/// ```no_run
-/// use asset_io::{Asset, Updates};
-///
-/// # fn main() -> asset_io::Result<()> {
-/// let mut asset = Asset::open("image.jpg")?;
+/// ```
+/// use asset_io::Updates;
 ///
 /// // Default: keep everything
-/// let updates = Updates::new();
-/// asset.write_to("output1.jpg", &updates)?;
+/// let keep = Updates::new();
 ///
 /// // Remove XMP, keep everything else
-/// let updates = Updates::new().remove_xmp();
-/// asset.write_to("output2.jpg", &updates)?;
+/// let no_xmp = Updates::new().remove_xmp();
 ///
 /// // Set new JUMBF, remove XMP, keep everything else
 /// let updates = Updates::new()
 ///     .set_jumbf(b"new jumbf data".to_vec())
 ///     .remove_xmp();
-/// asset.write_to("output3.jpg", &updates)?;
-/// # Ok(())
-/// # }
 /// ```
 #[derive(Debug, Default)]
 pub struct Updates {
@@ -81,9 +57,16 @@ pub struct Updates {
     /// JUMBF data update strategy (use builder methods to modify)
     pub(crate) jumbf: MetadataUpdate,
 
-    /// Processing options (chunk size, exclusions, etc.)
-    /// Used by both read_with_processing() and write_with_processing()
-    pub(crate) processing: ProcessingOptions,
+    /// The JUMBF being set adds to the existing store
+    /// (see [`Updates::as_update`]).
+    pub(crate) jumbf_is_update: bool,
+
+    /// The JUMBF type the JUMBF update applies to; `None` means any JUMBF
+    /// (see [`Updates::set_jumbf`]).
+    pub(crate) jumbf_scope: Option<[u8; 16]>,
+
+    /// Merkle box update strategy (see [`Updates::set_merkle`])
+    pub(crate) merkle: MerkleUpdate,
 }
 
 impl Updates {
@@ -137,7 +120,16 @@ impl Updates {
         self
     }
 
-    /// Set JUMBF metadata to a new value
+    /// Set JUMBF metadata to a new value.
+    ///
+    /// The JUMBF replaces the existing JUMBF of the same type: the type in the
+    /// description box of `jumbf`, which this crate compares but does not interpret.
+    /// JUMBF of other types is left as it is, and if there is none of the same type
+    /// the new JUMBF is added. If `jumbf` has no readable type, it replaces all JUMBF.
+    ///
+    /// This applies to containers that carry JUMBF of any type, such as JPEG.
+    /// Containers with an element reserved for one store (the PNG `caBX` chunk, the
+    /// ISO BMFF C2PA box) replace that element.
     ///
     /// # Example
     ///
@@ -148,11 +140,42 @@ impl Updates {
     ///     .set_jumbf(b"jumbf data".to_vec());
     /// ```
     pub fn set_jumbf(mut self, jumbf: Vec<u8>) -> Self {
+        self.jumbf_scope = crate::containers::jumbf::superbox_type(&jumbf);
         self.jumbf = MetadataUpdate::Set(jumbf);
+        self.jumbf_is_update = false;
         self
     }
 
-    /// Remove JUMBF metadata
+    /// Whether the JUMBF update applies to existing JUMBF of type `ty`, as a
+    /// container that carries JUMBF of any type reports it. A type that is not
+    /// known is never touched by an update limited to one type.
+    #[allow(dead_code)] // only containers that carry JUMBF of any type call it
+    pub(crate) fn jumbf_targets(&self, ty: Option<[u8; 16]>) -> bool {
+        match self.jumbf_scope {
+            None => true,
+            Some(scope) => ty == Some(scope),
+        }
+    }
+
+    /// Mark the JUMBF given to [`set_jumbf`](Self::set_jumbf) as an update
+    /// manifest added to the existing store: `set_jumbf(store).as_update()`. Call it
+    /// after `set_jumbf`; a later `set_jumbf`, `remove_jumbf` or `keep_jumbf`
+    /// clears it.
+    ///
+    /// Most containers ignore this. A container that keeps the original store apart
+    /// from later additions (ISO BMFF) uses it: if the new store begins with the
+    /// existing store's manifests, byte for byte, it leaves them in place and
+    /// stores only the rest as an update. Otherwise (nothing to update, or the
+    /// existing manifests changed) it writes the new store as a whole. The hint is
+    /// needed because a standard manifest added to a signed file extends the store
+    /// in the same way, and must not be treated as an update.
+    pub fn as_update(mut self) -> Self {
+        self.jumbf_is_update = true;
+        self
+    }
+
+    /// Remove all JUMBF metadata, of every type. To remove one type and keep the
+    /// rest, use [`remove_jumbf_of`](Self::remove_jumbf_of).
     ///
     /// # Example
     ///
@@ -163,6 +186,18 @@ impl Updates {
     /// ```
     pub fn remove_jumbf(mut self) -> Self {
         self.jumbf = MetadataUpdate::Remove;
+        self.jumbf_scope = None;
+        self.jumbf_is_update = false;
+        self
+    }
+
+    /// Remove the JUMBF of one type (see [`Entity::jumbf_type`](crate::Entity::jumbf_type))
+    /// and keep any other. Containers with an element reserved for one store
+    /// remove that element.
+    pub fn remove_jumbf_of(mut self, jumbf_type: [u8; 16]) -> Self {
+        self.jumbf = MetadataUpdate::Remove;
+        self.jumbf_scope = Some(jumbf_type);
+        self.jumbf_is_update = false;
         self
     }
 
@@ -177,6 +212,42 @@ impl Updates {
     /// ```
     pub fn keep_jumbf(mut self) -> Self {
         self.jumbf = MetadataUpdate::Keep;
+        self.jumbf_scope = None;
+        self.jumbf_is_update = false;
+        self
+    }
+
+    /// Replace the file's merkle boxes with one box per payload.
+    ///
+    /// Merkle boxes carry proofs for hashed media blocks. Only ISO BMFF has them;
+    /// other containers ignore this. The boxes are written immediately after the
+    /// last `mdat`, and any existing merkle boxes are dropped. All payloads are
+    /// usually the same length (the C2PA specification pads them to one length).
+    ///
+    /// The content usually depends on hashes of the media, which exist only after
+    /// the write. Write zeroed payloads of the final length, hash the media through
+    /// the [`Sink`](crate::Sink) during the write, then fill each box in place with
+    /// [`Structure::patch_exact`](crate::Structure::patch_exact). The boxes are the
+    /// entities labelled [`bmff::MERKLE`](crate::containers::bmff::MERKLE) of kind
+    /// [`SegmentKind::Other`](crate::SegmentKind::Other).
+    ///
+    /// A file that has merkle boxes cannot take a new manifest unless the boxes are
+    /// also set or removed, and an update manifest cannot change them.
+    #[cfg(feature = "bmff")]
+    pub fn set_merkle(mut self, payloads: Vec<Vec<u8>>) -> Self {
+        self.merkle = MerkleUpdate::Set(payloads);
+        self
+    }
+
+    /// Remove the file's merkle boxes. See [`set_merkle`](Self::set_merkle).
+    pub fn remove_merkle(mut self) -> Self {
+        self.merkle = MerkleUpdate::Remove;
+        self
+    }
+
+    /// Keep the file's merkle boxes (explicit, same as default).
+    pub fn keep_merkle(mut self) -> Self {
+        self.merkle = MerkleUpdate::Keep;
         self
     }
 
@@ -197,7 +268,7 @@ impl Updates {
     /// let updates = Updates::remove_all();
     /// ```
     pub fn remove_all() -> Self {
-        Self::new().remove_xmp().remove_jumbf()
+        Self::new().remove_xmp().remove_jumbf().remove_merkle()
     }
 
     /// Create updates that set new XMP (legacy constructor)
@@ -214,44 +285,5 @@ impl Updates {
     /// the builder pattern.
     pub fn with_jumbf(jumbf: Vec<u8>) -> Self {
         Self::new().set_jumbf(jumbf)
-    }
-
-    // ========================================================================
-    // Processing Options Builder Methods
-    // ========================================================================
-
-    /// Set segments to exclude from processing (e.g., for C2PA hashing)
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// use asset_io::{Updates, SegmentKind, ExclusionMode};
-    ///
-    /// let updates = Updates::new()
-    ///     .set_jumbf(vec![0u8; 1000])
-    ///     .exclude_from_processing(vec![SegmentKind::Jumbf], ExclusionMode::DataOnly);
-    /// ```
-    pub fn exclude_from_processing(
-        mut self,
-        segments: Vec<SegmentKind>,
-        mode: ExclusionMode,
-    ) -> Self {
-        self.processing.exclude_segments = segments;
-        self.processing.exclusion_mode = mode;
-        self
-    }
-
-    /// Set the chunk size for streaming operations
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// use asset_io::Updates;
-    ///
-    /// let updates = Updates::new().with_chunk_size(65536);
-    /// ```
-    pub fn with_chunk_size(mut self, size: usize) -> Self {
-        self.processing.chunk_size = Some(size);
-        self
     }
 }

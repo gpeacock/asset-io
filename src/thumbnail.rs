@@ -7,23 +7,13 @@
 //! - HEIF/HEIC: 'thmb' item reference
 //! - PNG: EXIF thumbnail (if eXIf chunk present)
 //!
-//! Use `Asset::read_embedded_thumbnail()` to extract these thumbnails.
-//!
-//! # Example
-//!
-//! ```no_run
-//! use asset_io::Asset;
-//!
-//! # fn main() -> asset_io::Result<()> {
-//! let mut asset = Asset::open("photo.jpg")?;
-//!
-//! if let Some(thumb) = asset.read_embedded_thumbnail()? {
-//!     println!("Found {:?} thumbnail, {} bytes", thumb.format, thumb.data.len());
-//!     std::fs::write("thumbnail.jpg", &thumb.data)?;
-//! }
-//! # Ok(())
-//! # }
-//! ```
+//! These types describe such a thumbnail; locating and extracting it is the job
+//! of the container handler that knows where the format keeps it.
+
+use crate::error::Result;
+use crate::segment::SegmentKind;
+use crate::structure::Structure;
+use std::io::{Read, Seek};
 
 /// Format of an embedded thumbnail
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,7 +31,6 @@ pub enum ThumbnailKind {
 /// An embedded thumbnail with its data
 ///
 /// This struct contains the actual thumbnail bytes extracted from an image file.
-/// Use `Asset::read_embedded_thumbnail()` to obtain one.
 #[derive(Debug, Clone)]
 pub struct Thumbnail {
     /// The raw thumbnail image data (typically JPEG)
@@ -79,10 +68,38 @@ impl Thumbnail {
     }
 }
 
+impl Structure {
+    /// The asset's embedded thumbnail, if it has one.
+    ///
+    /// A thumbnail the container stores as its own element
+    /// ([`SegmentKind::Thumbnail`], a HEIF `thmb` item) is preferred. Its format is
+    /// [`ThumbnailKind::Jpeg`] for a `jpeg` item; otherwise (`hvc1`, `av01`, ...)
+    /// [`ThumbnailKind::Other`], and `data` is the coded item, which needs the
+    /// codec configuration stored elsewhere in the file to decode. Failing that,
+    /// with the `exif` feature, the JPEG thumbnail in the EXIF data (IFD1) is
+    /// returned.
+    pub fn embedded_thumbnail<R: Read + Seek>(&self, src: &mut R) -> Result<Option<Thumbnail>> {
+        if let Some(e) = self.entities(SegmentKind::Thumbnail).next() {
+            let format = match e.label() {
+                Some("jpeg") => ThumbnailKind::Jpeg,
+                _ => ThumbnailKind::Other,
+            };
+            return Ok(Some(Thumbnail::new(self.read_entity(src, e)?, format)));
+        }
+        #[cfg(feature = "exif")]
+        {
+            self.exif_thumbnail(src)
+        }
+        #[cfg(not(feature = "exif"))]
+        {
+            Ok(None)
+        }
+    }
+}
+
 /// Location info for an embedded thumbnail
 ///
 /// This is used internally to track where thumbnail data is located.
-/// Use `Asset::read_embedded_thumbnail()` to get the actual bytes.
 #[derive(Debug, Clone)]
 #[allow(dead_code)] // Only constructed when exif/bmff features are enabled
 pub struct EmbeddedThumbnailInfo {

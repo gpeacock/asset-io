@@ -4,87 +4,48 @@ version = "0.1.0"
 edition = "2021"
 authors = ["Gavin Peacock <gpeacock@adobe.com>"]
 license = "MIT OR Apache-2.0"
-description = "High-performance, media type-agnostic streaming I/O for media asset metadata (JUMBF, XMP, C2PA, thumbnails)"
+description = "Streaming, container-agnostic access to media file structure and metadata (JUMBF, XMP)"
 repository = "https://github.com/contentauth/asset-io"
 keywords = ["asset", "c2pa", "xmp", "jumbf", "metadata"]
 categories = ["multimedia", "parsing"]
 
 [dependencies]
-# Core I/O
 thiserror = "1.0"
-byteorder = "1.5"
-log = "0.4"
 
-# Optional dependencies - tied to specific features
 md5 = { version = "0.7", optional = true }
+memchr = { version = "2", optional = true }
 quick-xml = { version = "0.38", optional = true, default-features = false }
 memmap2 = { version = "0.9", optional = true }
-fs2 = { version = "0.4", optional = true }
-atree = { version = "0.5", optional = true }
-rayon = { version = "1.10", optional = true }
-sha2 = { version = "0.10", optional = true }
-c2pa = { version = "0.83.0", optional = true }
 
 [dev-dependencies]
-sha2 = "0.10"  # For examples only
-serde_bytes = "0.11"  # For BMFF hash example
-serde_cbor = "0.11"  # For DataHash padding
-criterion = { version = "0.5", features = ["html_reports"] }
-env_logger = "0.11"
+sha2 = "0.11"
 tempfile = "3"
+criterion = "0.5"
 
 [features]
-default = ["jpeg"]
-jpeg = ["md5"]
+default = ["jpeg", "png", "bmff", "riff"]
+jpeg = ["md5", "memchr"]
 png = []
-bmff = ["atree"]
+bmff = []
 riff = []
 exif = []
 xmp = ["quick-xml", "md5"]
-memory-mapped = ["memmap2", "fs2"]
-parallel = ["rayon", "sha2"]
+memory-mapped = ["memmap2"]
 all-formats = ["jpeg", "png", "bmff", "riff"]
-
-# Note: At least one format feature (jpeg, png) must be enabled for the library to compile.
-
-# Testing features
-# embed-fixtures: Compile test fixtures into the binary (faster CI, no file I/O)
-# test-utils: Make test utilities available (for examples and integration tests)
-embed-fixtures = []
-test-utils = []
-
-[[example]]
-name = "c2pa_embeddable"
-required-features = ["c2pa","all-formats"]
 
 [[example]]
 name = "inspect"
 required-features = ["all-formats", "xmp", "exif"]
 
-[[example]]
-name = "parallel_hash"
-required-features = ["all-formats", "parallel"]
-
-[[example]]
-name = "progress_cancel"
-required-features = ["all-formats"]
-
-[[test]]
-name = "integration_test"
-required-features = ["test-utils"]
-
-[[test]]
-name = "safety_test"
-
 [[bench]]
 name = "io"
 harness = false
-required-features = ["all-formats", "xmp"]
+required-features = ["all-formats"]
+
+[profile.bench]
+inherits = "release"
 
 [profile.release]
 opt-level = 3
 lto = "thin"
 codegen-units = 4
-
-[profile.bench]
-inherits = "release"

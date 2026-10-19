@@ -1,207 +1,382 @@
-//! Basic benchmarks for reading and signing various file formats.
+//! Throughput benchmarks for parse, read and write.
 //!
-//! Run with: cargo bench --features all-formats,xmp
+//! Run: `cargo bench --features all-formats` (add `memory-mapped` for the mmap group)
+//!
+//! Inputs are fixtures from `tests/fixtures` plus synthetic 32 MB JPEG and MP4
+//! files. Set `BENCH_HUGE=1` to add `huge_test.png` (about 236 MB). Everything
+//! except the mmap group works on in-memory bytes, so the numbers show CPU and
+//! copy cost, not disk speed. `sha256` and `copy` are baselines: a read or write
+//! cannot go faster than the work it feeds.
 
-use asset_io::{Asset, ExclusionMode, ProcessChunk, SegmentKind, Updates};
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use std::io::Seek;
+use asset_io::{Chunk, HandlerRegistry, NullSink, Result, Role, SegmentKind, Structure, Updates};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use sha2::{Digest, Sha256};
+use std::hint::black_box;
+use std::io::Cursor;
 use std::path::PathBuf;
 
-fn fixture_path(name: &str) -> PathBuf {
-    let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    path.push("tests/fixtures");
-    path.push(name);
-    path
+const BIG: usize = 32 << 20;
+
+struct Case {
+    name: String,
+    format: &'static str,
+    bytes: Vec<u8>,
 }
 
-fn bench_read(c: &mut Criterion, name: &str, fixture: &str) {
-    let path = fixture_path(fixture);
-    if !path.exists() {
-        return;
-    }
-    let path = path.to_string_lossy().to_string();
+fn fixture(name: &str) -> Option<Vec<u8>> {
+    let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    p.push("tests/fixtures");
+    p.push(name);
+    std::fs::read(p).ok()
+}
 
-    c.bench_function(&format!("read_{}", name), |b| {
-        b.iter(|| {
-            let mut asset = Asset::open(&path).unwrap();
-            black_box(asset.structure());
-            let _ = black_box(asset.xmp());
-            let _ = black_box(asset.jumbf());
+fn bx(ty: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+    let mut v = Vec::with_capacity(8 + payload.len());
+    v.extend_from_slice(&((8 + payload.len()) as u32).to_be_bytes());
+    v.extend_from_slice(ty);
+    v.extend_from_slice(payload);
+    v
+}
+
+/// Deterministic filler with no 0xFF bytes, so it is valid JPEG entropy data.
+fn filler(n: usize) -> Vec<u8> {
+    let mut x = 0x9E37_79B9_7F4A_7C15u64;
+    (0..n)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            (x % 255) as u8
         })
-    });
+        .collect()
 }
 
-fn bench_sign(c: &mut Criterion, name: &str, fixture: &str) {
-    #[cfg(not(feature = "xmp"))]
-    return;
+fn synthetic_jpeg(scan: usize) -> Vec<u8> {
+    let xmp = b"<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"></x:xmpmeta>";
+    let sig = b"http://ns.adobe.com/xap/1.0/\0";
+    let mut v = vec![0xFF, 0xD8, 0xFF, 0xE1];
+    v.extend_from_slice(&((2 + sig.len() + xmp.len()) as u16).to_be_bytes());
+    v.extend_from_slice(sig);
+    v.extend_from_slice(xmp);
+    v.extend_from_slice(&[
+        0xFF, 0xDA, 0x00, 0x0C, 0x03, 0x01, 0x00, 0x02, 0x11, 0x03, 0x11, 0x00, 0x3F, 0x00,
+    ]);
+    v.extend_from_slice(&filler(scan));
+    v.extend_from_slice(&[0xFF, 0xD9]);
+    v
+}
 
-    let path = fixture_path(fixture);
-    if !path.exists() {
-        return;
+/// ftyp, moov (with one stco entry that must follow the mdat when moov grows), mdat.
+fn synthetic_mp4(mdat: usize) -> Vec<u8> {
+    let ftyp = bx(b"ftyp", b"isom\0\0\0\0isomiso2");
+    let stco = |off: u32| {
+        let mut p = vec![0, 0, 0, 0, 0, 0, 0, 1];
+        p.extend_from_slice(&off.to_be_bytes());
+        bx(b"stco", &p)
+    };
+    let moov = |off: u32| {
+        bx(
+            b"moov",
+            &bx(
+                b"trak",
+                &bx(b"mdia", &bx(b"minf", &bx(b"stbl", &stco(off)))),
+            ),
+        )
+    };
+    let moov_len = moov(0).len();
+    let first_sample = (ftyp.len() + moov_len + 8) as u32;
+    let mut v = ftyp;
+    v.extend_from_slice(&moov(first_sample));
+    v.extend_from_slice(&bx(b"mdat", &filler(mdat)));
+    v
+}
+
+fn fake_jumbf() -> Vec<u8> {
+    let mut jumd = vec![0u8; 16];
+    jumd.push(3);
+    jumd.extend_from_slice(b"c2pa\0");
+    let mut payload = bx(b"jumd", &jumd);
+    payload.extend_from_slice(&filler(4096));
+    bx(b"jumb", &payload)
+}
+
+fn cases() -> Vec<Case> {
+    let mut v = Vec::new();
+    let mut add = |name: &str, format: &'static str, bytes: Option<Vec<u8>>| {
+        if let Some(bytes) = bytes {
+            v.push(Case {
+                name: name.into(),
+                format,
+                bytes,
+            });
+        }
+    };
+    add("jpeg_165K", "jpg", fixture("FireflyTrain.jpg"));
+    add("png_2.4M", "png", fixture("GreenCat.png"));
+    add("heic_293K", "heic", fixture("sample1.heic"));
+    add("jpeg_32M", "jpg", Some(synthetic_jpeg(BIG)));
+    add("mp4_32M", "mp4", Some(synthetic_mp4(BIG)));
+    if std::env::var_os("BENCH_HUGE").is_some() {
+        add("png_236M", "png", fixture("huge_test.png"));
     }
-    let input_path = path.to_string_lossy().to_string();
+    v
+}
 
-    c.bench_function(&format!("sign_{}", name), |b| {
-        b.iter(|| {
-            use c2pa::{
-                assertions::{c2pa_action, Action, BmffHash, DataHash},
-                Builder, ClaimGeneratorInfo, HashRange, Settings,
-            };
-            use sha2::{Digest, Sha256};
-            use std::io::Write;
+fn parse(c: &Case) -> Structure {
+    HandlerRegistry::builtin()
+        .parse(c.format, &mut Cursor::new(&c.bytes))
+        .unwrap_or_else(|e| panic!("{}: {e}", c.name))
+}
 
-            let settings_str = std::fs::read_to_string(fixture_path("test_settings.json")).unwrap();
-            let settings = Settings::from_string(&settings_str, "json").unwrap();
+fn group<'a>(
+    c: &'a mut Criterion,
+    name: &str,
+) -> criterion::BenchmarkGroup<'a, criterion::measurement::WallTime> {
+    let mut g = c.benchmark_group(name);
+    g.sample_size(10)
+        .warm_up_time(std::time::Duration::from_millis(500))
+        .measurement_time(std::time::Duration::from_secs(2));
+    g
+}
 
-            let context = c2pa::Context::new()
-                .with_settings(settings)
-                .unwrap()
-                .into_shared();
-            let mut builder = Builder::from_shared_context(&context);
+fn bench_parse(c: &mut Criterion) {
+    let mut g = group(c, "parse");
+    for case in cases() {
+        g.throughput(Throughput::Bytes(case.bytes.len() as u64));
+        g.bench_function(BenchmarkId::from_parameter(&case.name), |b| {
+            b.iter(|| black_box(parse(&case)))
+        });
+    }
+    g.finish();
+}
 
-            let mut claim_generator = ClaimGeneratorInfo::new("asset-io-bench".to_string());
-            claim_generator.set_version("0.1.0");
-            builder.set_claim_generator_info(claim_generator);
-            builder
-                .add_action(
-                    Action::new(c2pa_action::CREATED)
-                        .set_parameter("identifier", &input_path)
-                        .unwrap(),
-                )
-                .unwrap();
+fn bench_read(c: &mut Criterion) {
+    // Hashing is the cost that matters at scale; small files only repeat it.
+    let mut g = group(c, "read_sha256");
+    for case in cases().into_iter().filter(|c| c.bytes.len() >= BIG) {
+        let s = parse(&case);
+        g.throughput(Throughput::Bytes(case.bytes.len() as u64));
 
-            let mut asset = Asset::open(&input_path).unwrap();
-            let native_format = asset.media_type().to_mime();
-            let is_bmff = matches!(asset.structure().container, asset_io::ContainerKind::Bmff);
-
-            let signer = Settings::signer().unwrap();
-
-            if builder.needs_placeholder(&native_format) {
-                let (structure, mut output_file, signed_jumbf) = if is_bmff {
-                    let mut placeholder_bmff = BmffHash::new("jumbf manifest", "sha256", None);
-                    placeholder_bmff.set_default_exclusions();
-                    placeholder_bmff.add_place_holder_hash().unwrap();
-                    builder
-                        .add_assertion(&format!("{}.v3", BmffHash::LABEL), &placeholder_bmff)
-                        .unwrap();
-
-                    let mut placeholder_jumbf = builder.placeholder("application/c2pa").unwrap();
-                    placeholder_jumbf.extend(std::iter::repeat(0u8).take(256 * 1024));
-
-                    let updates = Updates::new()
-                        .set_jumbf(placeholder_jumbf.clone())
-                        .exclude_from_processing(vec![SegmentKind::Jumbf], ExclusionMode::DataOnly);
-
-                    let output_file = tempfile::NamedTempFile::new().unwrap();
-                    let output_path = output_file.path().to_path_buf();
-                    let mut output_file = std::fs::OpenOptions::new()
-                        .read(true)
-                        .write(true)
-                        .create(true)
-                        .truncate(true)
-                        .open(&output_path)
-                        .unwrap();
-
-                    let mut processor = |chunk: &dyn ProcessChunk| {
-                        if let Some(id) = chunk.id() {
-                            builder
-                                .hash_bmff_mdat_bytes(
-                                    id,
-                                    chunk.data(),
-                                    chunk.large_size().unwrap_or(false),
-                                )
-                                .map_err(|e| asset_io::Error::InvalidFormat(e.to_string()))?;
-                        }
+        g.bench_function(BenchmarkId::new("baseline", &case.name), |b| {
+            b.iter(|| black_box(Sha256::digest(&case.bytes)))
+        });
+        g.bench_function(BenchmarkId::new("stream", &case.name), |b| {
+            b.iter(|| {
+                let mut h = Sha256::new();
+                {
+                    let mut sink = |c: Chunk<'_>| -> Result<()> {
+                        h.update(c.data);
                         Ok(())
                     };
-                    let structure = asset
-                        .write_with_processing(&mut output_file, &updates, &mut processor)
-                        .unwrap();
-                    output_file.flush().unwrap();
-                    output_file.seek(std::io::SeekFrom::Start(0)).unwrap();
-                    builder
-                        .update_hash_from_stream(&native_format, &mut output_file)
-                        .unwrap();
-                    let signed_jumbf = builder.sign_embeddable("application/c2pa").unwrap();
-                    (structure, output_file, signed_jumbf)
-                } else {
-                    let placeholder_jumbf = builder.placeholder("application/c2pa").unwrap();
-
-                    let updates = Updates::new()
-                        .set_jumbf(placeholder_jumbf.clone())
-                        .exclude_from_processing(vec![SegmentKind::Jumbf], ExclusionMode::DataOnly);
-
-                    let output_file = tempfile::NamedTempFile::new().unwrap();
-                    let output_path = output_file.path().to_path_buf();
-                    let mut output_file = std::fs::OpenOptions::new()
-                        .read(true)
-                        .write(true)
-                        .create(true)
-                        .truncate(true)
-                        .open(&output_path)
-                        .unwrap();
-
-                    let mut hasher = Sha256::new();
-                    let mut processor = |chunk: &dyn ProcessChunk| {
-                        hasher.update(chunk.data());
+                    s.read(&mut Cursor::new(&case.bytes), &mut sink).unwrap();
+                }
+                black_box(h.finalize())
+            })
+        });
+        g.bench_function(BenchmarkId::new("slice", &case.name), |b| {
+            b.iter(|| {
+                let mut h = Sha256::new();
+                {
+                    let mut sink = |c: Chunk<'_>| -> Result<()> {
+                        h.update(c.data);
                         Ok(())
                     };
-                    let structure = asset
-                        .write_with_processing(&mut output_file, &updates, &mut processor)
-                        .unwrap();
-                    output_file.flush().unwrap();
+                    s.read_slice(&case.bytes, &mut sink).unwrap();
+                }
+                black_box(h.finalize())
+            })
+        });
+    }
+    g.finish();
 
-                    let (exclusion_offset, exclusion_size) = structure
-                        .exclusion_range_for_segment(SegmentKind::Jumbf)
-                        .unwrap();
+    // Delivery cost without hashing, and the saving from skipping runs.
+    let mut g = group(c, "read_count");
+    for case in cases() {
+        let s = parse(&case);
+        g.throughput(Throughput::Bytes(case.bytes.len() as u64));
+        g.bench_function(BenchmarkId::new("stream", &case.name), |b| {
+            b.iter(|| {
+                let mut n = 0u64;
+                {
+                    let mut sink = |c: Chunk<'_>| -> Result<()> {
+                        n += c.data.len() as u64;
+                        Ok(())
+                    };
+                    s.read(&mut Cursor::new(&case.bytes), &mut sink).unwrap();
+                }
+                black_box(n)
+            })
+        });
+        g.bench_function(BenchmarkId::new("slice", &case.name), |b| {
+            b.iter(|| {
+                let mut n = 0u64;
+                {
+                    let mut sink = |c: Chunk<'_>| -> Result<()> {
+                        n += c.data.len() as u64;
+                        Ok(())
+                    };
+                    s.read_slice(&case.bytes, &mut sink).unwrap();
+                }
+                black_box(n)
+            })
+        });
+        // Only metadata and framing: image data is never fetched.
+        struct NoImage(u64);
+        impl asset_io::Sink for NoImage {
+            fn wants(&self, seg: &asset_io::Segment, _: Role) -> bool {
+                seg.kind() != SegmentKind::ImageData && seg.extent().len() < (1 << 20)
+            }
+            fn chunk(&mut self, c: Chunk<'_>) -> Result<()> {
+                self.0 += c.data.len() as u64;
+                Ok(())
+            }
+        }
+        g.bench_function(BenchmarkId::new("stream_skip_large", &case.name), |b| {
+            b.iter(|| {
+                let mut k = NoImage(0);
+                s.read(&mut Cursor::new(&case.bytes), &mut k).unwrap();
+                black_box(k.0)
+            })
+        });
+    }
+    g.finish();
+}
 
-                    let mut data_hash = DataHash::new("jumbf_manifest", "sha256");
-                    data_hash.add_exclusion(HashRange::new(exclusion_offset, exclusion_size));
-                    data_hash.set_hash(hasher.finalize().to_vec());
+fn bench_write(c: &mut Criterion) {
+    let jumbf = fake_jumbf();
+    let keep = Updates::new();
+    let set = Updates::new().set_jumbf(jumbf);
+    let mut g = group(c, "write");
+    for case in cases() {
+        let s = parse(&case);
+        g.throughput(Throughput::Bytes(case.bytes.len() as u64));
+        let mut out = Cursor::new(Vec::with_capacity(case.bytes.len() + (64 << 10)));
 
-                    let signed_jumbf = builder
-                        .sign_data_hashed_embeddable(
-                            signer.as_ref(),
-                            &data_hash,
-                            "application/c2pa",
+        g.bench_function(BenchmarkId::new("baseline_copy", &case.name), |b| {
+            b.iter(|| {
+                out.get_mut().clear();
+                out.get_mut().extend_from_slice(&case.bytes);
+                black_box(out.get_ref().len())
+            })
+        });
+        for (label, updates) in [("keep", &keep), ("set_jumbf", &set)] {
+            g.bench_function(BenchmarkId::new(label, &case.name), |b| {
+                b.iter(|| {
+                    out.get_mut().clear();
+                    out.set_position(0);
+                    let r = s
+                        .write(
+                            &mut Cursor::new(&case.bytes),
+                            &mut out,
+                            updates,
+                            &mut NullSink,
                         )
                         .unwrap();
-                    (structure, output_file, signed_jumbf)
-                };
+                    black_box(r.total_size())
+                })
+            });
+        }
+        // Writing while hashing the output, as a signer would.
+        if case.bytes.len() < BIG {
+            continue;
+        }
+        g.bench_function(BenchmarkId::new("set_jumbf_sha256", &case.name), |b| {
+            b.iter(|| {
+                out.get_mut().clear();
+                out.set_position(0);
+                let mut h = Sha256::new();
+                {
+                    let mut sink = |c: Chunk<'_>| -> Result<()> {
+                        h.update(c.data);
+                        Ok(())
+                    };
+                    s.write(&mut Cursor::new(&case.bytes), &mut out, &set, &mut sink)
+                        .unwrap();
+                }
+                black_box(h.finalize())
+            })
+        });
+    }
+    g.finish();
+}
 
-                structure
-                    .update_segment(&mut output_file, SegmentKind::Jumbf, signed_jumbf)
-                    .unwrap();
-                output_file.flush().unwrap();
-            }
-        })
+fn bench_entities(c: &mut Criterion) {
+    let Some(bytes) = fixture("FireflyTrain.jpg") else {
+        return;
+    };
+    let s = HandlerRegistry::builtin()
+        .parse("jpg", &mut Cursor::new(&bytes))
+        .unwrap();
+    let Some(e) = s.entities(SegmentKind::Xmp).next() else {
+        return;
+    };
+    let mut g = group(c, "entity");
+    g.bench_function("read_entity", |b| {
+        b.iter(|| black_box(s.read_entity(&mut Cursor::new(&bytes), e).unwrap()))
     });
+    g.bench_function("slice_entity", |b| {
+        b.iter(|| black_box(s.slice_entity(&bytes, e).unwrap()))
+    });
+    g.finish();
 }
 
-fn io_benches(c: &mut Criterion) {
-    #[cfg(feature = "jpeg")]
-    {
-        bench_read(c, "jpeg", "FireflyTrain.jpg");
-        bench_sign(c, "jpeg", "FireflyTrain.jpg");
-    }
+#[cfg(feature = "memory-mapped")]
+fn bench_mmap(c: &mut Criterion) {
+    use std::io::Write;
+    let mut g = group(c, "mmap_sha256");
+    for case in cases().into_iter().filter(|c| c.bytes.len() >= BIG) {
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(&case.bytes).unwrap();
+        f.flush().unwrap();
+        g.throughput(Throughput::Bytes(case.bytes.len() as u64));
 
-    #[cfg(feature = "png")]
-    {
-        bench_read(c, "png", "sample1.png");
-        bench_sign(c, "png", "sample1.png");
+        g.bench_function(BenchmarkId::new("file_stream", &case.name), |b| {
+            b.iter(|| {
+                let mut file = std::fs::File::open(f.path()).unwrap();
+                let s = HandlerRegistry::builtin()
+                    .parse(case.format, &mut file)
+                    .unwrap();
+                let mut h = Sha256::new();
+                {
+                    let mut sink = |c: Chunk<'_>| -> Result<()> {
+                        h.update(c.data);
+                        Ok(())
+                    };
+                    s.read(&mut file, &mut sink).unwrap();
+                }
+                black_box(h.finalize())
+            })
+        });
+        g.bench_function(BenchmarkId::new("mmap_slice", &case.name), |b| {
+            b.iter(|| {
+                let file = std::fs::File::open(f.path()).unwrap();
+                // SAFETY: the temp file is not touched while mapped.
+                let map = unsafe { asset_io::MappedFile::map(&file).unwrap() };
+                let s = map.parse(&HandlerRegistry::builtin(), case.format).unwrap();
+                let mut h = Sha256::new();
+                {
+                    let mut sink = |c: Chunk<'_>| -> Result<()> {
+                        h.update(c.data);
+                        Ok(())
+                    };
+                    s.read_slice(&map, &mut sink).unwrap();
+                }
+                black_box(h.finalize())
+            })
+        });
     }
-
-    #[cfg(feature = "bmff")]
-    {
-        bench_read(c, "heic", "sample1.heic");
-        bench_sign(c, "heic", "sample1.heic");
-    }
-
-    #[cfg(feature = "riff")]
-    {
-        bench_read(c, "webp", "sample1.webp");
-    }
+    g.finish();
 }
 
-criterion_group!(benches, io_benches);
+#[cfg(not(feature = "memory-mapped"))]
+fn bench_mmap(_: &mut Criterion) {}
+
+criterion_group!(
+    benches,
+    bench_parse,
+    bench_read,
+    bench_write,
+    bench_entities,
+    bench_mmap
+);
 criterion_main!(benches);
