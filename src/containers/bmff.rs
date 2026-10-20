@@ -469,7 +469,7 @@ fn classify(src: &mut dyn ReadSeek, at: u64, h: &BoxHeader) -> Result<Classified
         .ok_or_else(|| bad(at, "C2PA box purpose is unterminated or too long"))?;
     let label = purpose_label(&buf[..nul]).ok_or_else(|| bad(at, "unknown C2PA box purpose"))?;
 
-    let mut header_len = (purpose_at - at) as u64 + nul as u64 + 1;
+    let mut header_len = (purpose_at - at) + nul as u64 + 1;
     let kind = if label == MERKLE {
         SegmentKind::Other
     } else {
