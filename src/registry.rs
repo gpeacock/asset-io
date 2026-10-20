@@ -6,7 +6,7 @@
 //! [`HandlerRegistry::builtin`]) only for formats they do not claim.
 
 use crate::error::{Error, Result};
-use crate::handler::{ContainerHandler, ReadSeek, DETECT_LEN};
+use crate::handler::{ContainerHandler, FormatSpec, ReadSeek, DETECT_LEN};
 use crate::structure::Structure;
 use std::collections::HashMap;
 use std::io::SeekFrom;
@@ -82,8 +82,10 @@ impl HandlerRegistry {
 
     /// Register an already shared handler.
     pub fn add_arc(&mut self, handler: Arc<dyn ContainerHandler>) {
-        for f in handler.formats() {
-            self.by_format.insert(normalize(f), handler.clone());
+        for spec in handler.formats() {
+            for f in spec.format_strings() {
+                self.by_format.insert(normalize(f), handler.clone());
+            }
         }
         self.ordered.push(handler);
     }
@@ -96,30 +98,37 @@ impl HandlerRegistry {
             .or_else(|| self.fallback.as_deref().and_then(|f| f.handler(format)))
     }
 
-    /// The canonical id of the container for a format string: the first format of
-    /// its handler. Two format strings are the same family iff their ids are equal.
+    /// The [id](ContainerHandler::id) of the container for a format string. Two
+    /// format strings are the same container iff their ids are equal.
     pub fn container_for(&self, format: &str) -> Option<&'static str> {
-        self.handler(format)?.formats().first().copied()
+        Some(self.handler(format)?.id())
     }
 
-    /// The media type for a format string (extension or media type), from the
-    /// handler that serves it: `"heic"` gives `"image/heic"`, `"image/jpeg"` gives
-    /// itself. `None` if no handler claims the format, or the handler maps no media
-    /// type for it (an alias such as `"image/x-webp"`). The fallback is consulted
-    /// only when this registry does not claim the format.
-    pub fn media_type_for(&self, format: &str) -> Option<&'static str> {
+    /// The format a format string names, from the handler that serves it. The
+    /// fallback is consulted only when this registry does not claim the format.
+    pub fn format_for(&self, format: &str) -> Option<&FormatSpec> {
         let key = normalize(format);
         match self.by_format.get(&key) {
             Some(h) => h
-                .media_types()
-                .into_iter()
-                .find(|(ext, mime)| *ext == key || *mime == key)
-                .map(|(_, mime)| mime),
-            None => self
-                .fallback
-                .as_deref()
-                .and_then(|f| f.media_type_for(format)),
+                .formats()
+                .iter()
+                .find(|spec| spec.format_strings().any(|f| normalize(f) == key)),
+            None => self.fallback.as_deref().and_then(|f| f.format_for(format)),
         }
+    }
+
+    /// The media type for a format string (extension or media type): `"heic"`
+    /// gives `"image/heic"`, and an alias such as `"image/x-webp"` gives
+    /// `"image/webp"`. `None` if no handler claims the format.
+    pub fn media_type_for(&self, format: &str) -> Option<&'static str> {
+        self.format_for(format).map(|spec| spec.media_type)
+    }
+
+    /// The preferred file extension for a format string (extension or media
+    /// type): `"image/jpeg"` and `"jpeg"` both give `"jpg"`. `None` if no handler
+    /// claims the format.
+    pub fn extension_for(&self, format: &str) -> Option<&'static str> {
+        self.format_for(format).map(|spec| spec.extension)
     }
 
     /// The container's own encoding of one metadata item for a format string; see
@@ -196,8 +205,12 @@ mod tests {
     struct Toy;
 
     impl ContainerHandler for Toy {
-        fn formats(&self) -> &[&'static str] {
-            &["toy", "application/x-toy"]
+        fn id(&self) -> &'static str {
+            "toy"
+        }
+        fn formats(&self) -> &[FormatSpec] {
+            const F: &[FormatSpec] = &[FormatSpec::new("application/x-toy", "toy")];
+            F
         }
         fn detect(&self, header: &[u8]) -> bool {
             header.starts_with(b"TOY!")
@@ -297,8 +310,12 @@ mod tests {
         #[derive(Debug)]
         struct Toy2;
         impl ContainerHandler for Toy2 {
-            fn formats(&self) -> &[&'static str] {
-                &["toy"]
+            fn id(&self) -> &'static str {
+                "toy2"
+            }
+            fn formats(&self) -> &[FormatSpec] {
+                const F: &[FormatSpec] = &[FormatSpec::new("application/x-toy2", "toy")];
+                F
             }
             fn parse(self: Arc<Self>, _: &mut dyn ReadSeek) -> Result<Structure> {
                 Err(Error::InvalidFormat("toy2".into()))

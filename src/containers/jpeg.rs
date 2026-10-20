@@ -33,7 +33,7 @@
 //! Not yet ported: EXIF thumbnail location.
 
 use crate::error::{Error, Result};
-use crate::handler::{ContainerHandler, ReadSeek, ReadWriteSeek};
+use crate::handler::{ContainerHandler, FormatSpec, ReadSeek, ReadWriteSeek};
 use crate::segment::{Name, Role, Segment};
 use crate::segment::{SegmentKind, DEFAULT_CHUNK_SIZE};
 use crate::sink::{Emitter, Sink};
@@ -112,9 +112,19 @@ pub fn handler() -> Arc<dyn ContainerHandler> {
     H.get_or_init(|| Arc::new(JpegHandler)).clone()
 }
 
+/// The JPEG container's [`ContainerHandler::id`].
+pub const ID: &str = "jpeg";
+
 impl ContainerHandler for JpegHandler {
-    fn formats(&self) -> &[&'static str] {
-        &["jpg", "jpeg", "mpo", "image/jpeg"]
+    fn id(&self) -> &'static str {
+        ID
+    }
+
+    fn formats(&self) -> &[FormatSpec] {
+        // A Multi-Picture Format file is a JPEG and has no media type of its own.
+        const F: &[FormatSpec] =
+            &[FormatSpec::new("image/jpeg", "jpg").extension_aliases(&["jpeg", "mpo"])];
+        F
     }
 
     fn detect(&self, header: &[u8]) -> bool {

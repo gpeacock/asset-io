@@ -56,7 +56,7 @@
 
 use super::items;
 use crate::error::{Error, Result};
-use crate::handler::{ContainerHandler, ReadSeek, ReadWriteSeek};
+use crate::handler::{ContainerHandler, FormatSpec, ReadSeek, ReadWriteSeek};
 use crate::range::ByteRange;
 use crate::segment::{Name, Role, Segment};
 use crate::segment::{SegmentKind, DEFAULT_CHUNK_SIZE};
@@ -121,25 +121,25 @@ pub fn handler() -> Arc<dyn ContainerHandler> {
     H.get_or_init(|| Arc::new(BmffHandler)).clone()
 }
 
+/// The ISO BMFF container's [`ContainerHandler::id`].
+pub const ID: &str = "bmff";
+
 impl ContainerHandler for BmffHandler {
-    fn formats(&self) -> &[&'static str] {
-        &[
-            "mp4",
-            "m4a",
-            "m4v",
-            "mov",
-            "heic",
-            "heif",
-            "avif",
-            "video/mp4",
-            "audio/mp4",
-            "application/mp4",
-            "video/x-m4v",
-            "video/quicktime",
-            "image/heic",
-            "image/heif",
-            "image/avif",
-        ]
+    fn id(&self) -> &'static str {
+        ID
+    }
+
+    fn formats(&self) -> &[FormatSpec] {
+        const F: &[FormatSpec] = &[
+            FormatSpec::new("video/mp4", "mp4").media_type_aliases(&["application/mp4"]),
+            FormatSpec::new("audio/mp4", "m4a"),
+            FormatSpec::new("video/x-m4v", "m4v"),
+            FormatSpec::new("video/quicktime", "mov"),
+            FormatSpec::new("image/heic", "heic"),
+            FormatSpec::new("image/heif", "heif"),
+            FormatSpec::new("image/avif", "avif"),
+        ];
+        F
     }
 
     fn detect(&self, header: &[u8]) -> bool {
@@ -185,18 +185,6 @@ impl ContainerHandler for BmffHandler {
         let mut out = header;
         out.extend_from_slice(&payload);
         Ok(out)
-    }
-
-    fn media_types(&self) -> Vec<(&'static str, &'static str)> {
-        vec![
-            ("avif", "image/avif"),
-            ("heif", "image/heif"),
-            ("heic", "image/heic"),
-            ("mp4", "video/mp4"),
-            ("m4a", "audio/mp4"),
-            ("mov", "video/quicktime"),
-            ("m4v", "video/x-m4v"),
-        ]
     }
 
     fn walk(

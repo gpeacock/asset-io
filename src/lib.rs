@@ -68,7 +68,7 @@ mod xmp;
 
 pub use crc::Crc32;
 pub use error::{Error, Result};
-pub use handler::{ContainerHandler, ReadSeek, ReadWriteSeek, DETECT_LEN};
+pub use handler::{ContainerHandler, FormatSpec, ReadSeek, ReadWriteSeek, DETECT_LEN};
 #[cfg(feature = "memory-mapped")]
 pub use mapped::MappedFile;
 pub use range::ByteRange;
@@ -86,4 +86,6 @@ pub use walk::Node;
 #[cfg(feature = "xmp")]
 pub use xmp::MiniXmp;
 
-pub(crate) use updates::{MerkleUpdate, MetadataUpdate};
+#[cfg(feature = "bmff")]
+pub(crate) use updates::MerkleUpdate;
+pub(crate) use updates::MetadataUpdate;

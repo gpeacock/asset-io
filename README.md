@@ -51,7 +51,7 @@ structure.write(&mut src, &mut out, &updates, &mut NullSink)?;
 
 `HandlerRegistry::compose(format, kind, data)` returns the container's own encoding of an item (JPEG APP11 segments, a PNG `caBX` chunk, a BMFF C2PA box), for callers that insert it into an asset themselves. Callers that use `write` don't need it.
 
-`HandlerRegistry::media_type_for("heic")` gives `image/heic`, from the handler that serves the format.
+Each handler has an `id()` (`"jpeg"`, `"png"`, `"bmff"`, `"riff"`) and declares the formats it serves as `FormatSpec`s: a media type, a preferred extension, and any other accepted media types and extensions. `HandlerRegistry::media_type_for("heic")` gives `image/heic` and `extension_for("image/jpeg")` gives `jpg`; aliases resolve to the preferred values (`image/x-webp` gives `image/webp`).
 
 ## Multi-part assets
 

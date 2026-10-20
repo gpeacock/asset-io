@@ -205,9 +205,9 @@ impl Structure {
         &self.handler
     }
 
-    /// Canonical id of the container (the first format its handler declares).
+    /// The container's [id](ContainerHandler::id), for example `"jpeg"`.
     pub fn container_id(&self) -> &str {
-        self.handler.formats().first().copied().unwrap_or("")
+        self.handler.id()
     }
 
     /// Media type, for example `image/jpeg`.
@@ -315,6 +315,7 @@ impl Structure {
     }
 
     /// Every entity with its kind, in declaration order.
+    #[cfg(any(feature = "jpeg", feature = "bmff"))]
     pub(crate) fn entity_list(&self) -> impl Iterator<Item = (SegmentKind, &Entity)> + '_ {
         self.entities.iter().map(|e| (e.kind, e))
     }
@@ -980,8 +981,12 @@ mod tests {
     struct TestHandler;
 
     impl ContainerHandler for TestHandler {
-        fn formats(&self) -> &[&'static str] {
-            &["test"]
+        fn id(&self) -> &'static str {
+            "test"
+        }
+        fn formats(&self) -> &[crate::FormatSpec] {
+            const F: &[crate::FormatSpec] = &[crate::FormatSpec::new("application/x-test", "test")];
+            F
         }
         fn parse(self: Arc<Self>, _: &mut dyn ReadSeek) -> Result<Structure> {
             Err(Error::UnsupportedFormat)

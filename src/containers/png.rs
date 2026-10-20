@@ -5,7 +5,7 @@
 
 use crate::crc::Crc32;
 use crate::error::{Error, Result};
-use crate::handler::{ContainerHandler, ReadSeek, ReadWriteSeek};
+use crate::handler::{ContainerHandler, FormatSpec, ReadSeek, ReadWriteSeek};
 use crate::segment::{Name, Role, Segment};
 use crate::segment::{SegmentKind, DEFAULT_CHUNK_SIZE};
 use crate::sink::{Emitter, Sink};
@@ -60,9 +60,17 @@ pub fn handler() -> Arc<dyn ContainerHandler> {
     H.get_or_init(|| Arc::new(PngHandler)).clone()
 }
 
+/// The PNG container's [`ContainerHandler::id`].
+pub const ID: &str = "png";
+
 impl ContainerHandler for PngHandler {
-    fn formats(&self) -> &[&'static str] {
-        &["png", "image/png"]
+    fn id(&self) -> &'static str {
+        ID
+    }
+
+    fn formats(&self) -> &[FormatSpec] {
+        const F: &[FormatSpec] = &[FormatSpec::new("image/png", "png")];
+        F
     }
 
     fn detect(&self, header: &[u8]) -> bool {

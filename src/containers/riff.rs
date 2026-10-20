@@ -28,7 +28,7 @@
 //! is created from the `VP8` or `VP8L` image size if the file has none.
 
 use crate::error::{Error, Result};
-use crate::handler::{ContainerHandler, ReadSeek, ReadWriteSeek};
+use crate::handler::{ContainerHandler, FormatSpec, ReadSeek, ReadWriteSeek};
 use crate::segment::{Name, Role, Segment};
 use crate::segment::{SegmentKind, DEFAULT_CHUNK_SIZE};
 use crate::sink::{Emitter, Sink};
@@ -81,23 +81,29 @@ pub fn handler() -> Arc<dyn ContainerHandler> {
     H.get_or_init(|| Arc::new(RiffHandler)).clone()
 }
 
+/// The RIFF container's [`ContainerHandler::id`].
+pub const ID: &str = "riff";
+
 impl ContainerHandler for RiffHandler {
-    fn formats(&self) -> &[&'static str] {
-        &[
-            "webp",
-            "wav",
-            "avi",
-            "image/webp",
-            "image/x-webp",
-            "audio/wav",
-            "audio/wave",
-            "audio/x-wav",
-            "audio/vnd.wave",
-            "application/x-troff-msvideo",
-            "video/avi",
-            "video/msvideo",
-            "video/x-msvideo",
-        ]
+    fn id(&self) -> &'static str {
+        ID
+    }
+
+    fn formats(&self) -> &[FormatSpec] {
+        const F: &[FormatSpec] = &[
+            FormatSpec::new("image/webp", "webp").media_type_aliases(&["image/x-webp"]),
+            FormatSpec::new("audio/wav", "wav").media_type_aliases(&[
+                "audio/wave",
+                "audio/x-wav",
+                "audio/vnd.wave",
+            ]),
+            FormatSpec::new("video/avi", "avi").media_type_aliases(&[
+                "application/x-troff-msvideo",
+                "video/msvideo",
+                "video/x-msvideo",
+            ]),
+        ];
+        F
     }
 
     fn detect(&self, header: &[u8]) -> bool {
@@ -126,14 +132,6 @@ impl ContainerHandler for RiffHandler {
         updates: &Updates,
     ) -> Result<Structure> {
         plan(src_structure, &mut src, updates).map(|(_, dest)| dest)
-    }
-
-    fn media_types(&self) -> Vec<(&'static str, &'static str)> {
-        vec![
-            ("webp", "image/webp"),
-            ("wav", "audio/wav"),
-            ("avi", "video/avi"),
-        ]
     }
 }
 

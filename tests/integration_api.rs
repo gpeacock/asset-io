@@ -225,7 +225,7 @@ fn compose_is_what_write_inserts() {
             continue;
         };
         for (kind, data) in [(SegmentKind::Jumbf, &jumbf), (SegmentKind::Xmp, &xmp)] {
-            let composed = match reg.compose(s.container_id(), kind, data) {
+            let composed = match reg.compose(s.media_type(), kind, data) {
                 Ok(c) => c,
                 Err(asset_io::Error::UnsupportedFormat) => continue,
                 Err(e) => panic!("{name}: {e}"),
@@ -311,10 +311,33 @@ fn media_types_by_format_string() {
         ("webp", "image/webp"),
         ("wav", "audio/wav"),
         ("avi", "video/avi"),
+        ("image/x-webp", "image/webp"),
+        ("audio/x-wav", "audio/wav"),
+        ("application/mp4", "video/mp4"),
     ] {
         assert_eq!(reg.media_type_for(format), Some(mime), "{format}");
     }
     assert_eq!(reg.media_type_for("xyz"), None);
+    for (format, ext) in [
+        ("image/jpeg", "jpg"),
+        ("jpeg", "jpg"),
+        ("mpo", "jpg"),
+        ("image/png", "png"),
+        ("image/heic", "heic"),
+        ("audio/mp4", "m4a"),
+        ("audio/wave", "wav"),
+    ] {
+        assert_eq!(reg.extension_for(format), Some(ext), "{format}");
+    }
+    assert_eq!(reg.extension_for("xyz"), None);
+    assert_eq!(
+        reg.container_for("image/jpeg"),
+        Some(asset_io::containers::jpeg::ID)
+    );
+    assert_eq!(
+        reg.container_for("mov"),
+        Some(asset_io::containers::bmff::ID)
+    );
     // Same container family, different media types.
     assert_eq!(reg.container_for("heic"), reg.container_for("mp4"));
     assert_eq!(reg.container_for("wav"), reg.container_for("webp"));

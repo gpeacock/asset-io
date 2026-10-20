@@ -28,15 +28,74 @@ impl<T: Read + Write + Seek + ?Sized> ReadWriteSeek for T {}
 /// How many leading bytes [`ContainerHandler::detect`] is given.
 pub const DETECT_LEN: usize = 64;
 
+/// One format a container handler serves: a media type and its file extensions.
+///
+/// A container that carries several media types (ISO BMFF: HEIC, MP4, M4A...)
+/// declares one `FormatSpec` per media type. Format strings are matched ignoring
+/// case, surrounding whitespace and a leading dot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FormatSpec {
+    /// The media type, for example `image/jpeg`.
+    pub media_type: &'static str,
+    /// The preferred file extension, without a dot, for example `jpg`.
+    pub extension: &'static str,
+    /// Other media types accepted for this format, for example `image/x-webp`.
+    pub media_type_aliases: &'static [&'static str],
+    /// Other file extensions accepted for this format, for example `jpeg`.
+    pub extension_aliases: &'static [&'static str],
+}
+
+impl FormatSpec {
+    /// A format with one media type and one extension.
+    pub const fn new(media_type: &'static str, extension: &'static str) -> Self {
+        Self {
+            media_type,
+            extension,
+            media_type_aliases: &[],
+            extension_aliases: &[],
+        }
+    }
+
+    /// Adds media types accepted for this format.
+    pub const fn media_type_aliases(mut self, aliases: &'static [&'static str]) -> Self {
+        self.media_type_aliases = aliases;
+        self
+    }
+
+    /// Adds file extensions accepted for this format.
+    pub const fn extension_aliases(mut self, aliases: &'static [&'static str]) -> Self {
+        self.extension_aliases = aliases;
+        self
+    }
+
+    /// Every file extension this format accepts, the preferred one first.
+    pub fn extensions(&self) -> impl Iterator<Item = &'static str> {
+        std::iter::once(self.extension).chain(self.extension_aliases.iter().copied())
+    }
+
+    /// Every media type this format accepts, the preferred one first.
+    pub fn media_types(&self) -> impl Iterator<Item = &'static str> {
+        std::iter::once(self.media_type).chain(self.media_type_aliases.iter().copied())
+    }
+
+    /// Every format string (extension or media type) this format accepts.
+    pub fn format_strings(&self) -> impl Iterator<Item = &'static str> {
+        self.extensions().chain(self.media_types())
+    }
+}
+
 /// Knowledge of one container format.
 ///
 /// Implementations must be cheap to share (`Send + Sync`) and stateless in
 /// practice: one instance serves every asset of its formats.
 pub trait ContainerHandler: std::fmt::Debug + Send + Sync {
-    /// Format strings this handler serves: file extensions and MIME types, for
-    /// example `["jpg", "jpeg", "image/jpeg"]`. Matching ignores case and
-    /// surrounding whitespace. The first entry is the handler's canonical id.
-    fn formats(&self) -> &[&'static str];
+    /// The container's identity, for example `"jpeg"` or `"bmff"`. Stable and
+    /// independent of the format strings the handler serves; two format strings
+    /// belong to the same container iff their handlers have the same id.
+    fn id(&self) -> &'static str;
+
+    /// The formats this handler serves, each a media type with its extensions.
+    fn formats(&self) -> &[FormatSpec];
 
     /// Whether `header` (the first [`DETECT_LEN`] bytes, or fewer for a short
     /// stream) looks like this container. The default never matches, so the handler
@@ -103,25 +162,6 @@ pub trait ContainerHandler: std::fmt::Debug + Send + Sync {
     /// which the item is stored as it is returns `data` unchanged.
     fn compose(&self, _kind: SegmentKind, _data: &[u8]) -> Result<Vec<u8>> {
         Err(Error::UnsupportedFormat)
-    }
-
-    /// Pairs of (file extension, media type) for the formats this handler serves.
-    ///
-    /// The default pairs every extension-shaped entry of [`formats`](Self::formats)
-    /// (no `/`) with the first media-type-shaped entry, which is right when all
-    /// entries are one format (`["jpg", "jpeg", "image/jpeg"]`). Override it when
-    /// one container serves several media types (BMFF: `heic`, `mp4`, `m4a`...).
-    /// Used through [`HandlerRegistry::media_type_for`](crate::HandlerRegistry::media_type_for).
-    fn media_types(&self) -> Vec<(&'static str, &'static str)> {
-        let formats = self.formats();
-        let Some(mime) = formats.iter().find(|f| f.contains('/')) else {
-            return Vec::new();
-        };
-        formats
-            .iter()
-            .filter(|f| !f.contains('/'))
-            .map(|ext| (*ext, *mime))
-            .collect()
     }
 
     /// Split a segment flagged [`Segment::subdivides`] into its finer elements, in
