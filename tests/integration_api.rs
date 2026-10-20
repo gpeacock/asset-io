@@ -300,6 +300,7 @@ fn media_types_by_format_string() {
     for (format, mime) in [
         ("jpg", "image/jpeg"),
         ("JPEG", "image/jpeg"),
+        ("mpo", "image/jpeg"),
         ("image/jpeg", "image/jpeg"),
         (" .png ", "image/png"),
         ("heic", "image/heic"),

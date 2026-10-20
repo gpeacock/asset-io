@@ -53,6 +53,12 @@ structure.write(&mut src, &mut out, &updates, &mut NullSink)?;
 
 `HandlerRegistry::media_type_for("heic")` gives `image/heic`, from the handler that serves the format.
 
+## Multi-part assets
+
+`Structure::subassets()` lists the parts of an asset: contiguous, in file order, covering every byte, each with its absolute `range()`, media type, segments, and a `relative(offset)` helper for part-relative hash ranges. A file that embeds nothing else has one part. A JPEG that holds several images (Multi-Picture Format, Ultra HDR) has one per image, plus one for any data after the last image; their markers are listed in order, so a box hash can cover them as one asset, or each part can be hashed on its own for a C2PA multi-asset hash. asset-io reports the geometry; the caller decides how to hash it.
+
+Edits to a multi-picture JPEG add metadata to the first image and shift the sizes and offsets recorded in its MPF index to match. If the index disagrees with the images, the edit fails instead of writing a stale index.
+
 ## Zero-copy
 
 With the bytes in memory, `Structure::slice`, `slice_entity` and `read_slice` borrow instead of copying. The `memory-mapped` feature adds `MappedFile` for that. Mapping is `unsafe`: the file must not change while mapped, so don't map files untrusted parties can write.

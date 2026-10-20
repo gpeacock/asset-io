@@ -112,6 +112,52 @@ impl Entity {
     }
 }
 
+/// One independently valid piece of a multi-part asset, such as one image of a
+/// Multi-Picture Format file.
+///
+/// Sub-assets are contiguous, in file order, and together cover every byte of the
+/// asset, so they can be listed as the parts of a C2PA multi-asset hash. A
+/// [`Structure`] always has at least one: the primary asset, which is the whole
+/// file when nothing else is embedded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubAsset {
+    range: ByteRange,
+    segments: std::ops::Range<usize>,
+    media_type: Option<Cow<'static, str>>,
+    primary: bool,
+}
+
+impl SubAsset {
+    /// Where the part lies in the asset: absolute offset and length.
+    pub fn range(&self) -> ByteRange {
+        self.range
+    }
+
+    /// Indices (see [`SegmentId::index`]) of the segments the part is made of.
+    pub fn segments(&self) -> std::ops::Range<usize> {
+        self.segments.clone()
+    }
+
+    /// Media type of the part, or `None` when the container cannot tell (trailing
+    /// data after the last image).
+    pub fn media_type(&self) -> Option<&str> {
+        self.media_type.as_deref()
+    }
+
+    /// Whether this is the primary asset, the first part.
+    pub fn is_primary(&self) -> bool {
+        self.primary
+    }
+
+    /// `offset` relative to the start of the part, or `None` if it is outside it.
+    /// Hash exclusion ranges of a part are relative to the part.
+    pub fn relative(&self, offset: u64) -> Option<u64> {
+        (self.range.offset()..self.range.end())
+            .contains(&offset)
+            .then(|| offset - self.range.offset())
+    }
+}
+
 /// A region of the file with a role, in file order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Region {
@@ -139,9 +185,21 @@ pub struct Structure {
     total_size: u64,
     segments: Vec<Segment>,
     entities: Vec<Entity>,
+    subassets: Vec<SubAsset>,
 }
 
 impl Structure {
+    /// The parts of the asset, in file order: contiguous, non-overlapping, and
+    /// covering every byte. A file that embeds nothing else has one, the whole
+    /// file. A Multi-Picture Format JPEG has one per image, plus one for any data
+    /// after the last image.
+    ///
+    /// This is geometry only. Whether to hash the parts separately (a C2PA
+    /// multi-asset hash) or as one asset is the caller's decision.
+    pub fn subassets(&self) -> &[SubAsset] {
+        &self.subassets
+    }
+
     /// The handler that parsed this asset.
     pub fn handler(&self) -> &Arc<dyn ContainerHandler> {
         &self.handler
@@ -670,6 +728,8 @@ pub struct StructureBuilder {
     cursor: u64,
     segments: Vec<Segment>,
     entities: Vec<Entity>,
+    /// Segment index and media type where each sub-asset after the primary starts.
+    sub_starts: Vec<(usize, Option<Cow<'static, str>>)>,
 }
 
 impl StructureBuilder {
@@ -686,7 +746,21 @@ impl StructureBuilder {
             cursor: 0,
             segments: Vec::new(),
             entities: Vec::new(),
+            sub_starts: Vec::new(),
         }
+    }
+
+    /// Declare that the next segment pushed starts a new [`SubAsset`]. The first
+    /// sub-asset, the primary, starts at the first segment without a call.
+    /// `media_type` is `None` for data the container cannot identify.
+    pub fn begin_subasset(&mut self, media_type: Option<Cow<'static, str>>) -> Result<()> {
+        let at = self.segments.len();
+        let last = self.sub_starts.last().map_or(0, |s| s.0);
+        if at == 0 || at == last {
+            return Err(Error::InvalidFormat("empty sub-asset".into()));
+        }
+        self.sub_starts.push((at, media_type));
+        Ok(())
     }
 
     /// Offset where the next segment must start.
@@ -851,12 +925,48 @@ impl StructureBuilder {
                 ),
             });
         }
+        if self
+            .sub_starts
+            .last()
+            .is_some_and(|s| s.0 >= self.segments.len())
+        {
+            return Err(Error::InvalidFormat("empty sub-asset".into()));
+        }
+        let mut subassets = Vec::with_capacity(self.sub_starts.len() + 1);
+        let mut start = 0usize;
+        let mut media = Some(self.media_type.clone());
+        for (i, next) in self
+            .sub_starts
+            .iter()
+            .map(|(s, m)| (*s, m.clone()))
+            .chain(std::iter::once((self.segments.len(), None)))
+            .enumerate()
+        {
+            let (end, next_media) = next;
+            let from = self
+                .segments
+                .get(start)
+                .map_or(self.total_size, |s| s.extent().offset());
+            let to = self
+                .segments
+                .get(end)
+                .map_or(self.total_size, |s| s.extent().offset());
+            subassets.push(SubAsset {
+                range: ByteRange::new(from, to - from)?,
+                segments: start..end,
+                media_type: media,
+                primary: i == 0,
+            });
+            start = end;
+            media = next_media;
+        }
         Ok(Structure {
             handler: self.handler,
             media_type: self.media_type,
             total_size: self.total_size,
             segments: self.segments,
             entities: self.entities,
+            subassets,
         })
     }
 }
@@ -890,6 +1000,38 @@ mod tests {
 
     fn builder(total: u64) -> StructureBuilder {
         StructureBuilder::new(Arc::new(TestHandler), "application/x-test", total)
+    }
+
+    #[test]
+    fn subassets_tile_and_default_to_one() {
+        let mut b = builder(30);
+        b.push_span(SegmentKind::Header, Name::None, 30, 0, 0)
+            .unwrap();
+        let s = b.finish().unwrap();
+        assert_eq!(s.subassets().len(), 1);
+        assert!(s.subassets()[0].is_primary());
+        assert_eq!(s.subassets()[0].range(), ByteRange::new(0, 30).unwrap());
+
+        let mut b = builder(30);
+        assert!(b.begin_subasset(None).is_err(), "nothing pushed yet");
+        b.push_span(SegmentKind::Header, Name::None, 10, 0, 0)
+            .unwrap();
+        b.begin_subasset(Some("a/b".into())).unwrap();
+        assert!(b.begin_subasset(None).is_err(), "empty sub-asset");
+        b.push_span(SegmentKind::Other, Name::None, 20, 0, 0)
+            .unwrap();
+        let s = b.finish().unwrap();
+        let subs = s.subassets();
+        assert_eq!(subs[0].range(), ByteRange::new(0, 10).unwrap());
+        assert_eq!(subs[1].range(), ByteRange::new(10, 20).unwrap());
+        assert_eq!(subs[1].segments(), 1..2);
+        assert_eq!(subs[1].media_type(), Some("a/b"));
+
+        let mut b = builder(30);
+        b.push_span(SegmentKind::Header, Name::None, 10, 0, 0)
+            .unwrap();
+        b.begin_subasset(None).unwrap();
+        assert!(b.finish().is_err(), "trailing empty sub-asset");
     }
 
     #[test]

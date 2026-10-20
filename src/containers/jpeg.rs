@@ -14,6 +14,22 @@
 //! parts are the per-segment payloads, so the repeated XT headers are never part
 //! of the data and are always visible as headers.
 //!
+//! # Multi-Picture Format
+//!
+//! When another image (`FF D8 FF`) follows an `EOI` directly, the file holds
+//! several images, as in a Multi-Picture Format (MPF) file such as Ultra HDR. Each
+//! image's markers are listed in order (`SOI`, ..., `EOI`, `SOI`, ..., `EOI`), and
+//! [`Structure::subassets`] reports one part per image, plus one for any data after
+//! the last image. Only the first image's XMP, EXIF and JUMBF are interpreted as the
+//! asset's; later images are left as plain segments. New metadata is inserted into
+//! the first image.
+//!
+//! The MPF APP2 segment records each image's size and offset. When an edit changes
+//! the size of the first image or moves the block, the recorded values are shifted
+//! to match, so the output stays a valid MPF file. If the index does not match the
+//! images in the file, the edit is refused rather than writing a stale index;
+//! parsing and copying unchanged are not affected.
+//!
 //! Not yet ported: EXIF thumbnail location.
 
 use crate::error::{Error, Result};
@@ -31,7 +47,11 @@ const SOI: u8 = 0xD8;
 const EOI: u8 = 0xD9;
 const SOS: u8 = 0xDA;
 const APP1: u8 = 0xE1;
+const APP2: u8 = 0xE2;
 const APP11: u8 = 0xEB;
+
+/// Start of the Multi-Picture Format APP2 payload.
+const MPF_SIGNATURE: &[u8] = b"MPF\0";
 
 const XMP_SIGNATURE: &[u8] = b"http://ns.adobe.com/xap/1.0/\0";
 const XMP_EXT_SIGNATURE: &[u8] = b"http://ns.adobe.com/xmp/extension/\0";
@@ -94,7 +114,7 @@ pub fn handler() -> Arc<dyn ContainerHandler> {
 
 impl ContainerHandler for JpegHandler {
     fn formats(&self) -> &[&'static str] {
-        &["jpg", "jpeg", "image/jpeg"]
+        &["jpg", "jpeg", "mpo", "image/jpeg"]
     }
 
     fn detect(&self, header: &[u8]) -> bool {
@@ -119,10 +139,10 @@ impl ContainerHandler for JpegHandler {
     fn plan(
         &self,
         src_structure: &Structure,
-        _src: &mut dyn ReadSeek,
+        mut src: &mut dyn ReadSeek,
         updates: &Updates,
     ) -> Result<Structure> {
-        plan(src_structure, updates).map(|(_, dest)| dest)
+        plan(src_structure, &mut src, updates).map(|(_, dest)| dest)
     }
 
     fn compose(&self, kind: SegmentKind, data: &[u8]) -> Result<Vec<u8>> {
@@ -176,6 +196,9 @@ fn parse_with<R: Read + Seek>(
     // End offset of the last segment added to `jumbf_open`. C2PA A.3.1 requires the
     // APP11 segments of one manifest to be sequential and contiguous.
     let mut jumbf_end: u64 = 0;
+    // Only the first image carries the asset's metadata; later images of a
+    // multi-picture file are listed as segments and left uninterpreted.
+    let mut primary = true;
 
     loop {
         if total - offset < 2 {
@@ -218,6 +241,12 @@ fn parse_with<R: Read + Seek>(
             EOI => {
                 b.push_span(SegmentKind::Other, Name::Marker(EOI), 2, 0, 0)?;
                 offset = mstart + 2;
+                // Another image directly after this one: a multi-picture file.
+                if total - offset >= 4 && next_is_image(src, offset)? {
+                    b.begin_subasset(Some("image/jpeg".into()))?;
+                    primary = false;
+                    continue;
+                }
                 break;
             }
             0x01 | 0xD0..=0xD7 | SOI => {
@@ -280,13 +309,17 @@ fn parse_with<R: Read + Seek>(
         let mut class = Class::Plain;
         let mut jtype: Option<[u8; 16]> = None;
 
-        if marker == APP1 || marker == APP11 {
+        if primary && matches!(marker, APP1 | APP2 | APP11) {
             let n = data_len.min(PEEK as u64) as usize;
             let mut buf = [0u8; PEEK];
             src.read_exact(&mut buf[..n])?;
             let peek = &buf[..n];
 
-            if marker == APP1 {
+            if marker == APP2 {
+                if peek.starts_with(MPF_SIGNATURE) {
+                    hdr_extra = MPF_SIGNATURE.len() as u64;
+                }
+            } else if marker == APP1 {
                 if peek.starts_with(XMP_SIGNATURE) {
                     kind = SegmentKind::Xmp;
                     hdr_extra = XMP_SIG_LEN as u64;
@@ -387,6 +420,9 @@ fn parse_with<R: Read + Seek>(
     }
 
     if offset < total {
+        if !primary {
+            b.begin_subasset(None)?;
+        }
         b.push_span(SegmentKind::Other, Name::None, 0, total - offset, 0)?;
     }
     if let Some(ids) = xmp_open.take() {
@@ -396,6 +432,174 @@ fn parse_with<R: Read + Seek>(
         b.entity_of_segments_typed(SegmentKind::Jumbf, o.ty, &o.ids)?;
     }
     b.finish()
+}
+
+/// Whether another JPEG image starts at `offset` (`FF D8 FF`).
+fn next_is_image<R: Read + Seek>(src: &mut R, offset: u64) -> Result<bool> {
+    let mut m = [0u8; 3];
+    src.seek(SeekFrom::Start(offset))?;
+    src.read_exact(&mut m)?;
+    Ok(m == [0xFF, SOI, 0xFF])
+}
+
+/// The Multi-Picture Format index: where each entry's size and offset fields are
+/// in an MPF block (the bytes after `MPF\0`), and the byte order of the block.
+/// Offsets in the entries are relative to the start of the block.
+struct MpIndex {
+    little: bool,
+    /// Position of each entry's size field; its offset field follows.
+    entries: Vec<usize>,
+}
+
+impl MpIndex {
+    fn parse(p: &[u8]) -> Option<Self> {
+        let little = match p.get(..2)? {
+            b"II" => true,
+            b"MM" => false,
+            _ => return None,
+        };
+        let me = Self {
+            little,
+            entries: Vec::new(),
+        };
+        if me.u16(p, 2)? != 0x2A {
+            return None;
+        }
+        let ifd = me.u32(p, 4)? as usize;
+        let count = me.u16(p, ifd)? as usize;
+        let mut found = None;
+        for i in 0..count {
+            let e = ifd.checked_add(2 + i * 12)?;
+            if me.u16(p, e)? == 0xB002 {
+                // Entry fields: tag, type, count (bytes), value (offset of the array).
+                found = Some((
+                    me.u32(p, e.checked_add(8)?)? as usize,
+                    me.u32(p, e + 4)? as usize,
+                ));
+            }
+        }
+        let (at, len) = found?;
+        if len % 16 != 0 || at.checked_add(len)? > p.len() {
+            return None;
+        }
+        let entries = (0..len / 16).map(|k| at + 16 * k + 4).collect();
+        Some(Self { entries, ..me })
+    }
+
+    fn u16(&self, p: &[u8], at: usize) -> Option<u16> {
+        let b: [u8; 2] = p.get(at..at.checked_add(2)?)?.try_into().ok()?;
+        Some(if self.little {
+            u16::from_le_bytes(b)
+        } else {
+            u16::from_be_bytes(b)
+        })
+    }
+
+    fn u32(&self, p: &[u8], at: usize) -> Option<u32> {
+        let b: [u8; 4] = p.get(at..at.checked_add(4)?)?.try_into().ok()?;
+        Some(if self.little {
+            u32::from_le_bytes(b)
+        } else {
+            u32::from_be_bytes(b)
+        })
+    }
+
+    fn put(&self, p: &mut [u8], at: usize, v: u32) {
+        let b = if self.little {
+            v.to_le_bytes()
+        } else {
+            v.to_be_bytes()
+        };
+        p[at..at + 4].copy_from_slice(&b);
+    }
+}
+
+/// The MPF block of the source, as the segment holding it.
+fn find_mpf<R: Read + Seek>(
+    src: &Structure,
+    rd: &mut R,
+    primary_end: usize,
+) -> Result<Option<SegmentId>> {
+    for (i, seg) in src.segments()[..primary_end].iter().enumerate() {
+        if seg.name() == Name::Marker(APP2) && seg.header().len() == 4 + MPF_SIGNATURE.len() as u64
+        {
+            let h = seg.header();
+            let tail = src.read_range(rd, h.sub(4, MPF_SIGNATURE.len() as u64)?)?;
+            if tail == MPF_SIGNATURE {
+                return Ok(Some(SegmentId::from_index(i)?));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// The MPF block rewritten for the output layout, or `None` if no image moved.
+///
+/// The block records the size and offset of every image, and the offsets count
+/// from the block itself, so anything that changes the size of the primary image
+/// or moves the block invalidates it. Each recorded value is shifted by how far
+/// the image or the block moved. The block has the same length as before, so the
+/// layout does not depend on it.
+fn fix_mpf<R: Read + Seek>(
+    src: &Structure,
+    rd: &mut R,
+    op_of_src: &[Option<usize>],
+    dest: &Structure,
+) -> Result<Option<(usize, Vec<u8>)>> {
+    let subs = src.subassets();
+    let primary_end = subs[0].segments().end;
+    if subs.len() < 2 {
+        return Ok(None);
+    }
+    let Some(id) = find_mpf(src, rd, primary_end)? else {
+        return Ok(None);
+    };
+    let Some(op) = op_of_src[id.index()] else {
+        return Ok(None);
+    };
+    let old_base = src.segment(id)?.payload().offset();
+    let new_base = dest.segments()[op].payload().offset();
+    let images: Vec<usize> = (0..subs.len())
+        .filter(|&k| subs[k].media_type().is_some())
+        .collect();
+    let moved = images.iter().any(|&k| {
+        let (s, d) = (&subs[k], &dest.subassets()[k]);
+        s.range() != d.range()
+    }) || old_base != new_base;
+    if !moved {
+        return Ok(None);
+    }
+
+    let mut payload = src.read_range(rd, src.segment(id)?.payload())?;
+    let bad = || Error::InvalidFormat("MPF index does not match the images in the file".into());
+    let index = MpIndex::parse(&payload).ok_or_else(bad)?;
+    if index.entries.len() != images.len() {
+        return Err(bad());
+    }
+    let shift = |old: u32, by: i128| -> Result<u32> {
+        u32::try_from(old as i128 + by).map_err(|_| Error::LimitExceeded {
+            what: "MPF offset",
+            limit: u32::MAX as u64,
+        })
+    };
+    for (n, &k) in images.iter().enumerate() {
+        let (s, d) = (subs[k].range(), dest.subassets()[k].range());
+        let at = index.entries[n];
+        let size = index.u32(&payload, at).ok_or_else(bad)?;
+        index.put(
+            &mut payload,
+            at,
+            shift(size, d.len() as i128 - s.len() as i128)?,
+        );
+        // The first image is at offset 0 by definition.
+        if n > 0 {
+            let off = index.u32(&payload, at + 4).ok_or_else(bad)?;
+            let by =
+                (d.offset() as i128 - new_base as i128) - (s.offset() as i128 - old_base as i128);
+            index.put(&mut payload, at + 4, shift(off, by)?);
+        }
+    }
+    Ok(Some((op, payload)))
 }
 
 /// What the entropy-coded data scanner found.
@@ -539,6 +743,8 @@ pub(crate) fn subdivide<R: Read + Seek>(
 enum Op<'a> {
     /// Copy a source segment unchanged.
     Copy(SegmentId),
+    /// Copy a source segment with its payload replaced by one of the same length.
+    Patched { id: SegmentId, payload: Vec<u8> },
     /// Standard XMP in one APP1.
     XmpStd { payload: &'a [u8] },
     /// Stub main XMP pointing at extended XMP.
@@ -583,7 +789,7 @@ fn len_field(header_len: u32, payload_len: u64) -> Result<()> {
 impl Op<'_> {
     fn dims(&self, src: &Structure) -> Result<Dims> {
         let (kind, marker, header_len, payload_len) = match self {
-            Op::Copy(id) => {
+            Op::Copy(id) | Op::Patched { id, .. } => {
                 let s = src.segment(*id)?;
                 return Ok(Dims {
                     kind: s.kind(),
@@ -713,8 +919,13 @@ fn is_insertion_point(seg: &Segment) -> bool {
 
 /// Decide what the output contains. Single source of truth for the destination
 /// layout and the bytes written.
-fn plan<'a>(src: &Structure, updates: &'a Updates) -> Result<(Vec<Op<'a>>, Structure)> {
+fn plan<'a, R: Read + Seek>(
+    src: &Structure,
+    rd: &mut R,
+    updates: &'a Updates,
+) -> Result<(Vec<Op<'a>>, Structure)> {
     let n = src.segments().len();
+    let primary_end = src.subassets()[0].segments().end;
     let mut ops: Vec<Op<'a>> = Vec::with_capacity(n + 2);
     let mut groups: Groups = Vec::new();
     let mut op_of_src: Vec<Option<usize>> = vec![None; n];
@@ -761,7 +972,7 @@ fn plan<'a>(src: &Structure, updates: &'a Updates) -> Result<(Vec<Op<'a>>, Struc
                 }
             },
             _ => {
-                if !inserted && is_insertion_point(seg) {
+                if !inserted && i < primary_end && is_insertion_point(seg) {
                     inserted = true;
                     if !xmp_done {
                         if let MetadataUpdate::Set(d) = &updates.xmp {
@@ -809,7 +1020,18 @@ fn plan<'a>(src: &Structure, updates: &'a Updates) -> Result<(Vec<Op<'a>>, Struc
         dims.push(d);
     }
     let mut b = StructureBuilder::new(src.handler().clone(), src.media_type().to_owned(), total);
-    for d in &dims {
+    // Where the sub-assets after the primary start in the output.
+    let mut starts = Vec::new();
+    for sub in &src.subassets()[1..] {
+        let op = op_of_src[sub.segments().start]
+            .ok_or_else(|| Error::InvalidFormat("sub-asset start was dropped".into()))?;
+        starts.push((op, sub.media_type().map(|m| m.to_owned().into())));
+    }
+    let mut starts = starts.into_iter().peekable();
+    for (i, d) in dims.iter().enumerate() {
+        if let Some((_, media)) = starts.next_if(|(op, _)| *op == i) {
+            b.begin_subasset(media)?;
+        }
         let id = b.push_span(d.kind, d.name, d.header_len, d.payload_len, d.trailer_len)?;
         if d.subdivides {
             b.mark_subdivides(id)?;
@@ -822,7 +1044,14 @@ fn plan<'a>(src: &Structure, updates: &'a Updates) -> Result<(Vec<Op<'a>>, Struc
         }
         b.entity_of_segments_typed(*kind, *ty, &ids)?;
     }
-    Ok((ops, b.finish()?))
+    let dest = b.finish()?;
+    if let Some((op, payload)) = fix_mpf(src, rd, &op_of_src, &dest)? {
+        let Op::Copy(id) = ops[op] else {
+            return Err(Error::InvalidFormat("MPF block was not kept".into()));
+        };
+        ops[op] = Op::Patched { id, payload };
+    }
+    Ok((ops, dest))
 }
 
 fn put_marker_len(hdr: &mut [u8], marker: u8, header_len: u32, payload_len: u64) -> Result<()> {
@@ -847,7 +1076,9 @@ fn emit_new<W: Write, S: Sink + ?Sized>(em: &mut Emitter<'_, W, S>, op: &Op<'_>)
 /// Build the header of a new segment in `hdr`; returns its length and the payload.
 fn encode_new<'o>(op: &'o Op<'_>, hdr: &mut [u8; MAX_HEADER]) -> Result<(usize, &'o [u8])> {
     let (n, payload): (usize, &[u8]) = match op {
-        Op::Copy(_) => return Err(Error::InvalidFormat("not a new segment".into())),
+        Op::Copy(_) | Op::Patched { .. } => {
+            return Err(Error::InvalidFormat("not a new segment".into()))
+        }
         Op::XmpStd { payload } => {
             let h = 4 + XMP_SIG_LEN;
             put_marker_len(&mut hdr[..], APP1, h as u32, payload.len() as u64)?;
@@ -933,7 +1164,7 @@ where
     W: Write,
     S: Sink + ?Sized,
 {
-    let (ops, dest) = plan(src_structure, updates)?;
+    let (ops, dest) = plan(src_structure, src, updates)?;
     sink.begin(&dest)?;
 
     let mut buf = vec![0u8; DEFAULT_CHUNK_SIZE];
@@ -946,6 +1177,16 @@ where
                     let s = src_structure.segment(*sid)?;
                     for (role, range) in s.regions() {
                         em.copy(src, role, range, &mut buf)?;
+                    }
+                }
+                Op::Patched { id, payload } => {
+                    let s = src_structure.segment(*id)?;
+                    for (role, range) in s.regions() {
+                        if role == Role::Payload {
+                            em.put(role, payload)?;
+                        } else {
+                            em.copy(src, role, range, &mut buf)?;
+                        }
                     }
                 }
                 _ => emit_new(&mut em, op)?,
@@ -1770,5 +2011,295 @@ mod tests {
         }
         let re = parse(&mut Cursor::new(out.clone())).unwrap();
         assert!(read_xmp(&re, &mut Cursor::new(out)).is_err());
+    }
+
+    /// Image 2 of an MPF file: a complete small JPEG.
+    fn second_image() -> Vec<u8> {
+        let mut v = vec![0xFF, SOI];
+        v.extend(marker(0xE0, b"JFIF\0\x01\x01\0\0\x01\0\x01\0\0"));
+        v.extend(marker(0xDB, &[2u8; 65]));
+        v.extend(marker(SOS, &[1, 1, 0, 0, 0x3F, 0]));
+        v.extend_from_slice(&[0x9A, 0xBC, 0xFF, 0x00, 0xDE]);
+        v.extend_from_slice(&[0xFF, EOI]);
+        v
+    }
+
+    /// An MPF file: the primary image carries the MPF index, then `second`, then
+    /// `trailing`. `skew` is added to the second image's recorded offset.
+    fn mpf_file(second: &[u8], trailing: &[u8], skew: u32, little: bool) -> Vec<u8> {
+        let u16b = |v: u16| {
+            if little {
+                v.to_le_bytes()
+            } else {
+                v.to_be_bytes()
+            }
+        };
+        let u32b = |v: u32| {
+            if little {
+                v.to_le_bytes()
+            } else {
+                v.to_be_bytes()
+            }
+        };
+        let build = |first_len: u32, second_off: u32| -> Vec<u8> {
+            let mut b = Vec::new();
+            b.extend_from_slice(if little { b"II" } else { b"MM" });
+            b.extend_from_slice(&u16b(0x2A));
+            b.extend_from_slice(&u32b(8));
+            b.extend_from_slice(&u16b(3));
+            for (tag, ty, count, val) in [
+                (0xB000u16, 7u16, 4u32, u32::from_be_bytes(*b"0100")),
+                (0xB001, 4, 1, 2),
+                (0xB002, 7, 32, 50),
+            ] {
+                b.extend_from_slice(&u16b(tag));
+                b.extend_from_slice(&u16b(ty));
+                b.extend_from_slice(&u32b(count));
+                b.extend_from_slice(&if tag == 0xB000 {
+                    val.to_be_bytes()
+                } else {
+                    u32b(val)
+                });
+            }
+            b.extend_from_slice(&u32b(0));
+            assert_eq!(b.len(), 50);
+            for (size, off) in [(first_len, 0), (second.len() as u32, second_off)] {
+                b.extend_from_slice(&u32b(0x030000));
+                b.extend_from_slice(&u32b(size));
+                b.extend_from_slice(&u32b(off));
+                b.extend_from_slice(&u16b(0));
+                b.extend_from_slice(&u16b(0));
+            }
+            b
+        };
+        let head = |block: &[u8]| -> Vec<u8> {
+            let mut v = vec![0xFF, SOI];
+            v.extend(marker(0xE0, b"JFIF\0\x01\x01\0\0\x01\0\x01\0\0"));
+            let mut app2 = MPF_SIGNATURE.to_vec();
+            app2.extend_from_slice(block);
+            v.extend(marker(APP2, &app2));
+            v.extend(marker(0xDB, &[0u8; 65]));
+            v.extend(marker(SOS, &[1, 1, 0, 0, 0x3F, 0]));
+            v.extend_from_slice(&[0x12, 0x34, 0xFF, 0x00, 0x56]);
+            v.extend_from_slice(&[0xFF, EOI]);
+            v
+        };
+        let first_len = head(&build(0, 0)).len() as u32;
+        let base = 2 + 18 + 4 + 4; // SOI, APP0, APP2 marker/length, "MPF\0"
+        let mut f = head(&build(first_len, first_len - base + skew));
+        f.extend_from_slice(second);
+        f.extend_from_slice(trailing);
+        f
+    }
+
+    /// The (size, offset) pairs recorded in the file's MPF block.
+    fn recorded(file: &[u8]) -> (Vec<(u32, u32)>, u64) {
+        let s = parse(&mut Cursor::new(file.to_vec())).unwrap();
+        let id = find_mpf(
+            &s,
+            &mut Cursor::new(file.to_vec()),
+            s.subassets()[0].segments().end,
+        )
+        .unwrap()
+        .unwrap();
+        let payload = s.segment(id).unwrap().payload();
+        let block = s
+            .read_range(&mut Cursor::new(file.to_vec()), payload)
+            .unwrap();
+        let ix = MpIndex::parse(&block).unwrap();
+        let pairs = ix
+            .entries
+            .iter()
+            .map(|&at| (ix.u32(&block, at).unwrap(), ix.u32(&block, at + 4).unwrap()))
+            .collect();
+        (pairs, payload.offset())
+    }
+
+    fn assert_index_matches_layout(file: &[u8]) {
+        let s = parse(&mut Cursor::new(file.to_vec())).unwrap();
+        let (pairs, base) = recorded(file);
+        let images: Vec<_> = s
+            .subassets()
+            .iter()
+            .filter(|a| a.media_type().is_some())
+            .collect();
+        assert_eq!(pairs.len(), images.len());
+        for (n, (a, (size, off))) in images.iter().zip(pairs).enumerate() {
+            assert_eq!(size as u64, a.range().len(), "size of image {n}");
+            let expect = if n == 0 { 0 } else { a.range().offset() - base };
+            assert_eq!(off as u64, expect, "offset of image {n}");
+        }
+    }
+
+    #[test]
+    fn mpo_is_served_by_the_jpeg_handler() {
+        let f = mpf_file(&second_image(), b"", 0, false);
+        let reg = crate::HandlerRegistry::builtin();
+        let s = reg.parse("mpo", &mut Cursor::new(f.clone())).unwrap();
+        assert_eq!(s.media_type(), "image/jpeg");
+        assert_eq!(s.subassets().len(), 2);
+        let s = reg.parse_detect(&mut Cursor::new(f)).unwrap();
+        assert_eq!(s.subassets().len(), 2);
+    }
+
+    #[test]
+    fn multi_picture_file_is_listed_as_parts() {
+        for little in [false, true] {
+            let second = second_image();
+            let f = mpf_file(&second, b"", 0, little);
+            let s = parse(&mut Cursor::new(f.clone())).unwrap();
+            let subs = s.subassets();
+            assert_eq!(subs.len(), 2);
+            assert!(subs[0].is_primary() && !subs[1].is_primary());
+            assert_eq!(subs[1].range().len(), second.len() as u64);
+            assert_eq!(subs[1].range().end(), f.len() as u64);
+            assert_eq!(subs[1].media_type(), Some("image/jpeg"));
+            // Parts tile the file, and the second image's segments are listed in
+            // order: SOI, APP0, DQT, SOS, EOI.
+            assert_eq!(subs[0].range().end(), subs[1].range().offset());
+            assert_eq!(subs[0].segments().end, subs[1].segments().start);
+            let names: Vec<_> = s.segments()[subs[1].segments()]
+                .iter()
+                .map(|g| s.box_name(g.name()).unwrap().into_owned())
+                .collect();
+            assert_eq!(names, ["SOI", "APP0", "DQT", "SOS", "EOI"]);
+            assert_eq!(subs[1].relative(subs[1].range().offset() + 3), Some(3));
+            assert_eq!(subs[1].relative(0), None);
+            assert_index_matches_layout(&f);
+        }
+    }
+
+    #[test]
+    fn plain_files_have_one_part() {
+        let j = sample_jpeg();
+        let s = parse(&mut Cursor::new(j.clone())).unwrap();
+        assert_eq!(s.subassets().len(), 1);
+        assert_eq!(s.subassets()[0].range().len(), j.len() as u64);
+        assert_eq!(s.subassets()[0].media_type(), Some("image/jpeg"));
+        // Trailing data of a single image stays part of it.
+        let mut t = j;
+        t.extend_from_slice(b"trailing");
+        let s = parse(&mut Cursor::new(t)).unwrap();
+        assert_eq!(s.subassets().len(), 1);
+    }
+
+    #[test]
+    fn data_after_the_last_image_is_a_final_part() {
+        let f = mpf_file(&second_image(), b"\0\0\0\x18ftypmp42 trailing", 0, false);
+        let s = parse(&mut Cursor::new(f.clone())).unwrap();
+        let subs = s.subassets();
+        assert_eq!(subs.len(), 3);
+        assert_eq!(subs[2].media_type(), None);
+        assert_eq!(subs[2].range().end(), f.len() as u64);
+        assert_eq!(subs[1].range().end(), subs[2].range().offset());
+    }
+
+    #[test]
+    fn keeping_a_multi_picture_file_is_byte_identical() {
+        let f = mpf_file(&second_image(), b"tail", 0, false);
+        let (out, dest) = do_write(&f, &Updates::new());
+        assert_eq!(out, f);
+        assert_eq!(dest.subassets().len(), 3);
+    }
+
+    #[test]
+    fn editing_the_primary_image_keeps_the_mpf_index_valid() {
+        for little in [false, true] {
+            let second = second_image();
+            let f = mpf_file(&second, b"tail", 0, little);
+            let updates = Updates::new()
+                .set_jumbf(fake_jumbf(200))
+                .set_xmp(b"<x:xmpmeta/>".to_vec());
+            let (out, dest) = do_write(&f, &updates);
+            assert!(out.len() > f.len());
+
+            let re = parse(&mut Cursor::new(out.clone())).unwrap();
+            assert_eq!(re.subassets().len(), 3);
+            assert_index_matches_layout(&out);
+            // Later images and trailing data are untouched.
+            let subs = re.subassets();
+            assert_eq!(
+                &out[subs[1].range().offset() as usize..subs[1].range().end() as usize],
+                &second[..]
+            );
+            assert_eq!(&out[subs[2].range().offset() as usize..], b"tail");
+            // The planned layout is the written one, parts included.
+            assert_eq!(dest.subassets(), re.subassets());
+            let planned = parse(&mut Cursor::new(f.clone()))
+                .unwrap()
+                .plan(&mut Cursor::new(f.clone()), &updates)
+                .unwrap();
+            assert_eq!(planned.subassets(), re.subassets());
+
+            // The edited file is its own fixed point, and removal restores the index.
+            let (again, _) = do_write(&out, &Updates::new());
+            assert_eq!(again, out);
+            let (back, _) = do_write(&out, &Updates::remove_all());
+            assert_index_matches_layout(&back);
+            assert_eq!(back.len(), f.len());
+        }
+    }
+
+    #[test]
+    fn metadata_goes_in_the_primary_image_only() {
+        let f = mpf_file(&second_image(), b"", 0, false);
+        let (out, _) = do_write(&f, &Updates::new().set_jumbf(fake_jumbf(64)));
+        let re = parse(&mut Cursor::new(out)).unwrap();
+        let primary = re.subassets()[0].segments();
+        let e = re.require_entity(SegmentKind::Jumbf).unwrap();
+        assert!(e.parts().all(|p| primary.contains(&p.segment().index())));
+    }
+
+    #[test]
+    fn an_index_that_does_not_match_the_images_is_refused_on_edit_only() {
+        // Records one image where the file has two.
+        let mut f = mpf_file(&second_image(), b"", 0, false);
+        let s = parse(&mut Cursor::new(f.clone())).unwrap();
+        let id = find_mpf(
+            &s,
+            &mut Cursor::new(f.clone()),
+            s.subassets()[0].segments().end,
+        )
+        .unwrap()
+        .unwrap();
+        // The number-of-entries field of tag 0xB002 is at block offset 8 + 2 + 24 + 4.
+        let at = s.segment(id).unwrap().payload().offset() as usize + 8 + 2 + 24 + 4;
+        f[at..at + 4].copy_from_slice(&16u32.to_be_bytes());
+        let (kept, _) = do_write(&f, &Updates::new());
+        assert_eq!(kept, f);
+        let s = parse(&mut Cursor::new(f.clone())).unwrap();
+        let err = s
+            .write(
+                &mut Cursor::new(f.clone()),
+                &mut Cursor::new(Vec::new()),
+                &Updates::new().set_jumbf(fake_jumbf(64)),
+                &mut NullSink,
+            )
+            .unwrap_err();
+        assert!(matches!(err, Error::InvalidFormat(_)), "{err:?}");
+    }
+
+    #[test]
+    fn a_hash_over_the_parts_covers_every_byte() {
+        let f = mpf_file(&second_image(), b"tail", 0, false);
+        let s = parse(&mut Cursor::new(f.clone())).unwrap();
+        let mut whole = Sha256::new();
+        let mut per_part: Vec<Sha256> = s.subassets().iter().map(|_| Sha256::new()).collect();
+        let subs = s.subassets().to_vec();
+        s.read(&mut Cursor::new(f.clone()), &mut |c: Chunk<'_>| {
+            whole.update(c.data);
+            let k = subs
+                .iter()
+                .position(|a| a.segments().contains(&c.segment.index()))
+                .unwrap();
+            per_part[k].update(c.data);
+            Ok(())
+        })
+        .unwrap();
+        for (a, h) in subs.iter().zip(per_part) {
+            let bytes = &f[a.range().offset() as usize..a.range().end() as usize];
+            assert_eq!(h.finalize()[..], Sha256::digest(bytes)[..]);
+        }
+        assert_eq!(whole.finalize()[..], Sha256::digest(&f)[..]);
     }
 }

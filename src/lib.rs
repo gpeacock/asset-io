@@ -75,7 +75,9 @@ pub use range::ByteRange;
 pub use registry::HandlerRegistry;
 pub use segment::{labels, Name, Role, Segment, SegmentKind};
 pub use sink::{Chunk, NullSink, Sink};
-pub use structure::{Entity, Part, Region, SegmentId, Structure, StructureBuilder, MAX_SEGMENTS};
+pub use structure::{
+    Entity, Part, Region, SegmentId, Structure, StructureBuilder, SubAsset, MAX_SEGMENTS,
+};
 pub use thumbnail::{Thumbnail, ThumbnailKind};
 #[cfg(feature = "exif")]
 pub use tiff::ExifInfo;
