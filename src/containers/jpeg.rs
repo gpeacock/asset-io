@@ -54,6 +54,7 @@
 use crate::error::{Error, Result};
 use crate::handler::{ContainerHandler, FormatSpec, ReadSeek};
 use crate::plan::WritePlan;
+use crate::readahead::{ReadAhead, PARSE_WINDOW};
 use crate::segment::SegmentKind;
 use crate::segment::{Name, Role, Segment};
 use crate::sink::Sink;
@@ -223,86 +224,6 @@ impl ContainerHandler for JpegHandler {
 /// Parse a JPEG into a validated structure.
 pub fn parse<R: Read + Seek>(src: &mut R) -> Result<Structure> {
     parse_with(handler(), src)
-}
-
-/// Size of the read-ahead window used while parsing. The markers of a typical JPEG
-/// fit in a few KiB. Measured on 24 fixtures (Apple M2): 4 KiB was as fast as or
-/// faster than 8, 16 and 32 KiB, from memory and from a file.
-const PARSE_WINDOW: usize = 4 * 1024;
-
-/// A read-ahead window over a seekable stream, for a parser that makes many small
-/// reads and seeks. A seek only records the position; the stream is touched when a
-/// read misses the window. A read at least as large as the window goes straight to
-/// the stream. Positions are the stream's own, and the stream's position after use
-/// is unspecified. The first seek must be absolute (`Start` or `End`).
-struct ReadAhead<'a, R: Read + Seek> {
-    inner: &'a mut R,
-    /// The window's contents; empty when there is none. Its capacity is never used
-    /// uninitialised: `read_to_end` fills spare capacity without zeroing it first.
-    buf: Vec<u8>,
-    window: usize,
-    /// Stream offset of `buf[0]`.
-    start: u64,
-    /// Logical position.
-    pos: u64,
-}
-
-impl<'a, R: Read + Seek> ReadAhead<'a, R> {
-    fn new(inner: &'a mut R, window: usize) -> Self {
-        Self {
-            inner,
-            buf: Vec::with_capacity(window),
-            window,
-            start: 0,
-            pos: 0,
-        }
-    }
-}
-
-impl<R: Read + Seek> Read for ReadAhead<'_, R> {
-    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
-        if out.is_empty() {
-            return Ok(0);
-        }
-        let in_window = self.pos >= self.start && self.pos < self.start + self.buf.len() as u64;
-        if !in_window {
-            self.inner.seek(SeekFrom::Start(self.pos))?;
-            if out.len() >= self.window {
-                let n = self.inner.read(out)?;
-                self.pos += n as u64;
-                return Ok(n);
-            }
-            self.buf.clear();
-            let filled =
-                Read::take(&mut *self.inner, self.window as u64).read_to_end(&mut self.buf);
-            if let Err(e) = filled {
-                self.buf.clear();
-                return Err(e);
-            }
-            self.start = self.pos;
-            if self.buf.is_empty() {
-                return Ok(0);
-            }
-        }
-        let off = (self.pos - self.start) as usize;
-        let n = out.len().min(self.buf.len() - off);
-        out[..n].copy_from_slice(&self.buf[off..off + n]);
-        self.pos += n as u64;
-        Ok(n)
-    }
-}
-
-impl<R: Read + Seek> Seek for ReadAhead<'_, R> {
-    fn seek(&mut self, to: SeekFrom) -> std::io::Result<u64> {
-        self.pos = match to {
-            SeekFrom::Start(p) => p,
-            SeekFrom::Current(d) => self.pos.checked_add_signed(d).ok_or_else(|| {
-                std::io::Error::new(std::io::ErrorKind::InvalidInput, "seek before start")
-            })?,
-            SeekFrom::End(d) => self.inner.seek(SeekFrom::End(d))?,
-        };
-        Ok(self.pos)
-    }
 }
 
 fn parse_with<R: Read + Seek>(

@@ -68,6 +68,7 @@ mod handler;
 mod mapped;
 pub mod plan;
 mod range;
+mod readahead;
 mod registry;
 mod segment;
 mod sink;

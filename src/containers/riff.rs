@@ -43,6 +43,7 @@
 use crate::error::{Error, Result};
 use crate::handler::{ContainerHandler, FormatSpec, ReadSeek};
 use crate::plan::WritePlan;
+use crate::readahead::{ReadAhead, PARSE_WINDOW};
 use crate::segment::SegmentKind;
 use crate::segment::{Name, Role, Segment};
 use crate::sink::Sink;
@@ -164,6 +165,8 @@ fn parse_with<R: Read + Seek>(
     handler: Arc<dyn ContainerHandler>,
     src: &mut R,
 ) -> Result<Structure> {
+    let mut ahead = ReadAhead::new(src, PARSE_WINDOW);
+    let src = &mut ahead;
     let total = src.seek(SeekFrom::End(0))?;
     if total < 12 {
         return Err(Error::InvalidFormat("RIFF too small".into()));

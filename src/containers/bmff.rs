@@ -72,6 +72,7 @@ use crate::error::{Error, Result};
 use crate::handler::{ContainerHandler, FormatSpec, ReadSeek};
 use crate::plan::{OffsetMap, Relocate, WritePlan};
 use crate::range::ByteRange;
+use crate::readahead::{ReadAhead, PARSE_WINDOW};
 use crate::segment::SegmentKind;
 use crate::segment::{Name, Role, Segment};
 use crate::structure::{SegmentId, Structure, StructureBuilder};
@@ -275,6 +276,8 @@ impl ContainerHandler for BmffHandler {
         src: &mut dyn ReadSeek,
         f: &mut dyn FnMut(&Node<'_>) -> Result<()>,
     ) -> Result<()> {
+        let mut ahead = ReadAhead::new(src, PARSE_WINDOW);
+        let src: &mut dyn ReadSeek = &mut ahead;
         let total = src.seek(SeekFrom::End(0))?;
         let mut path = String::new();
         walk_level(src, 0, total, 1, &mut path, f)
@@ -591,6 +594,8 @@ impl StoreCounts {
 }
 
 fn parse_with(handler: Arc<dyn ContainerHandler>, src: &mut dyn ReadSeek) -> Result<Structure> {
+    let mut ahead = ReadAhead::new(src, PARSE_WINDOW);
+    let src: &mut dyn ReadSeek = &mut ahead;
     let total = src.seek(SeekFrom::End(0))?;
     if total < 8 {
         return Err(Error::InvalidFormat("BMFF too small".into()));
@@ -812,6 +817,8 @@ fn read_u32_at(src: &mut dyn ReadSeek, at: u64) -> Result<u32> {
 /// Find the offset-bearing boxes inside one top-level box by reading box headers,
 /// then read just their table headers.
 fn collect_patches(src: &mut dyn ReadSeek, seg: &Segment, map: &OffsetMap) -> Result<Vec<Patch>> {
+    let mut ahead = ReadAhead::new(src, PARSE_WINDOW);
+    let src: &mut dyn ReadSeek = &mut ahead;
     let mut cands: Vec<Candidate> = Vec::new();
     let mut path = String::new();
     let ext = seg.extent();
