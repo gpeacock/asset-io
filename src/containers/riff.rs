@@ -11,7 +11,7 @@
 // specific language governing permissions and limitations under
 // each license.
 
-//! RIFF (WebP, WAV, AVI) on the layout model.
+//! RIFF (WebP, WAV, AVI) on the structure model.
 //!
 //! A RIFF file is `RIFF size form` followed by chunks, each `id size data [pad]`
 //! with little-endian 32-bit sizes and a zero pad byte after odd-sized data. The
@@ -41,10 +41,12 @@
 //! is created from the `VP8` or `VP8L` image size if the file has none.
 
 use crate::error::{Error, Result};
-use crate::handler::{ContainerHandler, FormatSpec, ReadSeek, ReadWriteSeek};
+use crate::handler::{ContainerHandler, FormatSpec, ReadSeek};
+use crate::plan::WritePlan;
+use crate::readahead::{ReadAhead, PARSE_WINDOW};
+use crate::segment::SegmentKind;
 use crate::segment::{Name, Role, Segment};
-use crate::segment::{SegmentKind, DEFAULT_CHUNK_SIZE};
-use crate::sink::{Emitter, Sink};
+use crate::sink::Sink;
 use crate::structure::{SegmentId, Structure, StructureBuilder};
 use crate::{MetadataUpdate, Updates};
 use std::borrow::Cow;
@@ -127,28 +129,17 @@ impl ContainerHandler for RiffHandler {
         parse_with(self, &mut src)
     }
 
-    fn write(
+    fn write_plan<'a>(
         &self,
         src_structure: &Structure,
-        mut src: &mut dyn ReadSeek,
-        mut out: &mut dyn ReadWriteSeek,
-        updates: &Updates,
-        sink: &mut dyn Sink,
-    ) -> Result<Structure> {
-        write(src_structure, &mut src, &mut out, updates, sink)
-    }
-
-    fn plan(
-        &self,
-        src_structure: &Structure,
-        mut src: &mut dyn ReadSeek,
-        updates: &Updates,
-    ) -> Result<Structure> {
-        plan(src_structure, &mut src, updates).map(|(_, dest)| dest)
+        src: &mut dyn ReadSeek,
+        updates: &'a Updates,
+    ) -> Result<WritePlan<'a>> {
+        plan(src_structure, src, updates)
     }
 }
 
-/// Parse a RIFF file into a validated layout.
+/// Parse a RIFF file into a validated structure.
 pub fn parse<R: Read + Seek>(src: &mut R) -> Result<Structure> {
     parse_with(handler(), src)
 }
@@ -174,6 +165,8 @@ fn parse_with<R: Read + Seek>(
     handler: Arc<dyn ContainerHandler>,
     src: &mut R,
 ) -> Result<Structure> {
+    let mut ahead = ReadAhead::new(src, PARSE_WINDOW);
+    let src = &mut ahead;
     let total = src.seek(SeekFrom::End(0))?;
     if total < 12 {
         return Err(Error::InvalidFormat("RIFF too small".into()));
@@ -427,12 +420,12 @@ fn lacks_pad(op: &Op<'_>, src: &Structure) -> Result<bool> {
 }
 
 /// Decide what the output contains: the single source of truth for both the
-/// destination layout and the bytes written.
+/// destination structure and the bytes written.
 fn plan<'a, R: Read + Seek + ?Sized>(
     src: &Structure,
     stream: &mut R,
     updates: &'a Updates,
-) -> Result<(Vec<Op<'a>>, Structure)> {
+) -> Result<WritePlan<'a>> {
     let segs = src.segments();
     let mut head = [0u8; 12];
     read_at(stream, 0, &mut head)?;
@@ -555,7 +548,7 @@ fn plan<'a, R: Read + Seek + ?Sized>(
         ops.push(Op::Copy(SegmentId::from_index(i)?));
     }
 
-    // Destination layout.
+    // Destination structure.
     let mut all = Vec::with_capacity(ops.len());
     let mut total = 0u64;
     for op in &ops {
@@ -576,13 +569,64 @@ fn plan<'a, R: Read + Seek + ?Sized>(
             b.entity_of_segments(d.kind, &[id])?;
         }
     }
-    Ok((ops, b.finish()?))
+    let mut plan = WritePlan::new(b.finish()?);
+    for (i, op) in ops.iter().enumerate() {
+        add_steps(&mut plan, src, SegmentId::from_index(i)?, op)?;
+    }
+    Ok(plan)
+}
+
+/// The steps that write `op` as the output segment `dest`.
+fn add_steps<'a>(
+    plan: &mut WritePlan<'a>,
+    src: &Structure,
+    dest: SegmentId,
+    op: &Op<'a>,
+) -> Result<()> {
+    match op {
+        Op::Copy(sid) => {
+            plan.copy_segment(dest, src.segment(*sid)?);
+        }
+        Op::Riff { size, form } => {
+            let mut h = [0u8; 12];
+            h[..4].copy_from_slice(&RIFF);
+            h[4..8].copy_from_slice(&size.to_le_bytes());
+            h[8..].copy_from_slice(form);
+            plan.put(dest, Role::Header, h.to_vec());
+        }
+        Op::Flags { id, flags } => {
+            let s = src.segment(*id)?;
+            plan.copy(dest, Role::Header, s.header());
+            plan.put(dest, Role::Payload, flags.to_le_bytes().to_vec());
+            plan.copy(
+                dest,
+                Role::Payload,
+                s.payload().sub(4, s.payload().len() - 4)?,
+            );
+            plan.copy(dest, Role::Trailer, s.trailer());
+        }
+        Op::Chunk { id, payload, .. } => {
+            let mut h = [0u8; 8];
+            h[..4].copy_from_slice(id);
+            h[4..].copy_from_slice(&(payload.len() as u32).to_le_bytes()); // bounded by new_chunk
+            plan.put(dest, Role::Header, h.to_vec());
+            plan.put(dest, Role::Payload, payload.clone());
+            if payload.len() & 1 == 1 {
+                plan.put(dest, Role::Trailer, vec![0]);
+            }
+        }
+        Op::WithPad(inner) => {
+            add_steps(plan, src, dest, inner)?;
+            plan.put(dest, Role::Trailer, vec![0]);
+        }
+    }
+    Ok(())
 }
 
 /// Write `src` with `updates` applied, delivering every output byte to `sink`.
 ///
 /// `out` is written from its current start; offsets reported to the sink are
-/// relative to the first byte written. Returns the layout of the output.
+/// relative to the first byte written. Returns the structure of the output.
 pub fn write<R, W, S>(
     src_structure: &Structure,
     src: &mut R,
@@ -591,75 +635,13 @@ pub fn write<R, W, S>(
     sink: &mut S,
 ) -> Result<Structure>
 where
-    R: Read + Seek,
-    W: Write,
+    R: Read + Seek + ?Sized,
+    W: Write + ?Sized,
     S: Sink + ?Sized,
 {
-    let (ops, dest) = plan(src_structure, src, updates)?;
-    sink.begin(&dest)?;
-
-    let mut buf = vec![0u8; DEFAULT_CHUNK_SIZE];
-    {
-        let mut em = Emitter::new(out, sink, &dest);
-        for (i, op) in ops.iter().enumerate() {
-            em.begin_segment(SegmentId::from_index(i)?)?;
-            emit(&mut em, src_structure, src, op, &mut buf)?;
-        }
-        em.finish()?;
-    }
-    Ok(dest)
-}
-
-fn emit<R, W, S>(
-    em: &mut Emitter<'_, W, S>,
-    src_structure: &Structure,
-    src: &mut R,
-    op: &Op<'_>,
-    buf: &mut [u8],
-) -> Result<()>
-where
-    R: Read + Seek,
-    W: Write,
-    S: Sink + ?Sized,
-{
-    match op {
-        Op::Copy(sid) => {
-            let s = src_structure.segment(*sid)?;
-            for (role, range) in s.regions() {
-                em.copy(src, role, range, buf)?;
-            }
-        }
-        Op::Riff { size, form } => {
-            let mut h = [0u8; 12];
-            h[..4].copy_from_slice(&RIFF);
-            h[4..8].copy_from_slice(&size.to_le_bytes());
-            h[8..].copy_from_slice(form);
-            em.put(Role::Header, &h)?;
-        }
-        Op::Flags { id, flags } => {
-            let s = src_structure.segment(*id)?;
-            em.copy(src, Role::Header, s.header(), buf)?;
-            em.put(Role::Payload, &flags.to_le_bytes())?;
-            let rest = s.payload().sub(4, s.payload().len() - 4)?;
-            em.copy(src, Role::Payload, rest, buf)?;
-            em.copy(src, Role::Trailer, s.trailer(), buf)?;
-        }
-        Op::Chunk { id, payload, .. } => {
-            let mut h = [0u8; 8];
-            h[..4].copy_from_slice(id);
-            h[4..].copy_from_slice(&(payload.len() as u32).to_le_bytes()); // bounded by new_chunk
-            em.put(Role::Header, &h)?;
-            em.put(Role::Payload, payload)?;
-            if payload.len() & 1 == 1 {
-                em.put(Role::Trailer, &[0])?;
-            }
-        }
-        Op::WithPad(inner) => {
-            emit(em, src_structure, src, inner, buf)?;
-            em.put(Role::Trailer, &[0])?;
-        }
-    }
-    Ok(())
+    let plan = plan(src_structure, src, updates)?;
+    plan.execute(src, out, sink)?;
+    Ok(plan.into_structure())
 }
 
 #[cfg(test)]
@@ -844,6 +826,23 @@ mod tests {
         // The earlier chunk got its pad, so the file is aligned and re-parses.
         let s = parse(&mut Cursor::new(&out)).unwrap();
         assert!(s.segments().iter().all(|g| g.extent().offset() % 2 == 0));
+    }
+
+    #[test]
+    fn the_plan_tiles_its_structure_and_borrows_the_new_metadata() {
+        let mut f = wav(&[chunk(b"junk", b"abc")]);
+        f.pop();
+        let n = f.len() as u32 - 8;
+        f[4..8].copy_from_slice(&n.to_le_bytes());
+        let s = parse(&mut Cursor::new(&f)).unwrap();
+        let u = Updates::new().set_xmp(b"<x/>".to_vec());
+        let plan = s.write_plan(&mut Cursor::new(&f), &u).unwrap();
+        crate::plan::validate(&plan, f.len() as u64).unwrap();
+        // The new payload is not copied into the plan.
+        assert!(plan.steps().iter().any(|st| matches!(
+            st,
+            crate::Step::Put { data: Cow::Borrowed(d), .. } if *d == b"<x/>"
+        )));
     }
 
     #[test]

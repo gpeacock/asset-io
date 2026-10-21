@@ -27,7 +27,7 @@
 use crate::error::Result;
 use crate::segment::SegmentKind;
 use crate::structure::Structure;
-use crate::thumbnail::{Thumbnail, ThumbnailKind};
+use crate::thumbnail::Thumbnail;
 use std::io::{Cursor, Read, Seek, SeekFrom};
 
 /// TIFF/EXIF tag IDs
@@ -105,6 +105,7 @@ pub struct ThumbnailInfo {
 
 /// Basic EXIF metadata extracted from IFD0
 #[derive(Debug, Default)]
+#[non_exhaustive]
 pub struct ExifInfo {
     /// Camera manufacturer (e.g., "Canon", "Nikon")
     pub make: Option<String>,
@@ -524,11 +525,13 @@ impl Structure {
         let Some(end) = start.checked_add(info.size as usize) else {
             return Ok(None);
         };
-        Ok(exif.get(start..end).map(|bytes| Thumbnail {
-            data: bytes.to_vec(),
-            format: ThumbnailKind::Jpeg,
-            width: info.width,
-            height: info.height,
+        // The JPEGInterchangeFormat tags exist only for JPEG thumbnails.
+        Ok(exif.get(start..end).map(|bytes| {
+            let mut t = Thumbnail::new(bytes.to_vec()).with_media_type("image/jpeg");
+            if let (Some(w), Some(h)) = (info.width, info.height) {
+                t = t.with_dimensions(w, h);
+            }
+            t
         }))
     }
 }

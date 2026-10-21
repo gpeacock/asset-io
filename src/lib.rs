@@ -66,7 +66,10 @@ mod error;
 mod handler;
 #[cfg(feature = "memory-mapped")]
 mod mapped;
+pub mod plan;
 mod range;
+#[cfg(any(feature = "jpeg", feature = "png", feature = "bmff", feature = "riff"))]
+mod readahead;
 mod registry;
 mod segment;
 mod sink;
@@ -84,6 +87,7 @@ pub use error::{Error, Result};
 pub use handler::{ContainerHandler, FormatSpec, ReadSeek, ReadWriteSeek, DETECT_LEN};
 #[cfg(feature = "memory-mapped")]
 pub use mapped::MappedFile;
+pub use plan::{Step, WritePlan};
 pub use range::ByteRange;
 pub use registry::HandlerRegistry;
 pub use segment::{labels, Name, Role, Segment, SegmentKind, AFTER_BOX};
@@ -91,15 +95,10 @@ pub use sink::{Chunk, NullSink, Sink};
 pub use structure::{
     Entity, Part, Region, SegmentId, Structure, StructureBuilder, SubAsset, MAX_SEGMENTS,
 };
-pub use thumbnail::{Thumbnail, ThumbnailKind};
+pub use thumbnail::Thumbnail;
 #[cfg(feature = "exif")]
 pub use tiff::ExifInfo;
-pub use updates::Updates;
+pub use updates::{MetadataUpdate, Updates};
 pub use walk::Node;
 #[cfg(feature = "xmp")]
 pub use xmp::MiniXmp;
-
-#[cfg(feature = "bmff")]
-pub(crate) use updates::MerkleUpdate;
-#[allow(unused_imports)] // used by the built-in containers only
-pub(crate) use updates::MetadataUpdate;

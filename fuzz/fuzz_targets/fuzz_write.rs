@@ -13,6 +13,7 @@
 
 #![no_main]
 
+use asset_io::containers::bmff::BmffUpdates;
 use asset_io::{HandlerRegistry, NullSink, Updates};
 use libfuzzer_sys::fuzz_target;
 use std::io::Cursor;

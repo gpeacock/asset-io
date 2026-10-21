@@ -11,7 +11,7 @@
 // specific language governing permissions and limitations under
 // each license.
 
-//! Runs the layout model on the real files in tests/fixtures.
+//! Runs the structure model on the real files in tests/fixtures.
 
 #![cfg(all(feature = "jpeg", feature = "png"))]
 
@@ -157,7 +157,7 @@ fn real_files_set_patch_and_reopen() {
             let (mut out, dest) = write(&s, &bytes, jpeg, &Updates::new().set_jumbf(placeholder))
                 .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
 
-            // New layout must describe the output exactly.
+            // New structure must describe the output exactly.
             let reparsed = parse(&out, jpeg).unwrap();
             assert_eq!(reparsed.total_size(), dest.total_size());
             assert_eq!(reparsed.segments(), dest.segments(), "{}", path.display());
@@ -293,7 +293,7 @@ fn sweep_external_directories() {
         }
 
         // Replace the manifest (or add one) and check the output reparses to
-        // the planned layout.
+        // the planned structure.
         match write(
             &s,
             &bytes,
@@ -302,7 +302,7 @@ fn sweep_external_directories() {
         ) {
             Ok((out, dest)) => match parse(&out, *jpeg) {
                 Ok(re) if re.segments() == dest.segments() => {}
-                Ok(_) => problems.push(format!("{name}: Set layout != reparsed layout")),
+                Ok(_) => problems.push(format!("{name}: Set structure != reparsed structure")),
                 Err(e) => problems.push(format!("{name}: Set output unparsable: {e}")),
             },
             Err(e) => problems.push(format!("{name}: Set failed: {e}")),

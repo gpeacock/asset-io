@@ -11,7 +11,7 @@
 // specific language governing permissions and limitations under
 // each license.
 
-//! PNG on the layout model.
+//! PNG on the structure model.
 //!
 //! Each chunk is one segment: `length(4) type(4) [iTXt prefix]` is the header,
 //! the chunk data is the payload, and the CRC is the trailer.
@@ -19,9 +19,11 @@
 use crate::crc::Crc32;
 use crate::error::{Error, Result};
 use crate::handler::{ContainerHandler, FormatSpec, ReadSeek, ReadWriteSeek};
+use crate::plan::WritePlan;
+use crate::readahead::{ReadAhead, PARSE_WINDOW};
 use crate::segment::SegmentKind;
 use crate::segment::{Name, Role, Segment};
-use crate::sink::{flush_run, write_buffer_len, Emitter, Piece, Sink, RUN_WINDOWS};
+use crate::sink::Sink;
 use crate::structure::{SegmentId, Structure, StructureBuilder};
 use crate::{MetadataUpdate, Updates};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -94,24 +96,13 @@ impl ContainerHandler for PngHandler {
         parse_with(self, &mut src)
     }
 
-    fn write(
-        &self,
-        src_structure: &Structure,
-        mut src: &mut dyn ReadSeek,
-        mut out: &mut dyn ReadWriteSeek,
-        updates: &Updates,
-        sink: &mut dyn Sink,
-    ) -> Result<Structure> {
-        write(src_structure, &mut src, &mut out, updates, sink)
-    }
-
-    fn plan(
+    fn write_plan<'a>(
         &self,
         src_structure: &Structure,
         _src: &mut dyn ReadSeek,
-        updates: &Updates,
-    ) -> Result<Structure> {
-        plan(src_structure, updates).map(|(_, dest)| dest)
+        updates: &'a Updates,
+    ) -> Result<WritePlan<'a>> {
+        plan(src_structure, updates)
     }
 
     fn compose(&self, kind: SegmentKind, data: &[u8]) -> Result<Vec<u8>> {
@@ -147,7 +138,7 @@ impl ContainerHandler for PngHandler {
     }
 }
 
-/// Parse a PNG into a validated layout.
+/// Parse a PNG into a validated structure.
 pub fn parse<R: Read + Seek>(src: &mut R) -> Result<Structure> {
     parse_with(handler(), src)
 }
@@ -156,6 +147,8 @@ fn parse_with<R: Read + Seek>(
     handler: Arc<dyn ContainerHandler>,
     src: &mut R,
 ) -> Result<Structure> {
+    let mut ahead = ReadAhead::new(src, PARSE_WINDOW);
+    let src = &mut ahead;
     let total = src.seek(SeekFrom::End(0))?;
     src.seek(SeekFrom::Start(0))?;
     if total < SIGNATURE.len() as u64 + 12 {
@@ -308,8 +301,8 @@ fn new_chunk<'a>(
 }
 
 /// Decide what the output contains. This is the single source of truth for
-/// both the destination layout and the bytes written.
-fn plan<'a>(src: &Structure, updates: &'a Updates) -> Result<(Vec<Op<'a>>, Structure)> {
+/// both the destination structure and the bytes written.
+fn plan<'a>(src: &Structure, updates: &'a Updates) -> Result<WritePlan<'a>> {
     let mut ops: Vec<Op<'a>> = Vec::with_capacity(src.segments().len() + 2);
     let mut xmp_done = false;
     let mut jumbf_done = false;
@@ -385,7 +378,7 @@ fn plan<'a>(src: &Structure, updates: &'a Updates) -> Result<(Vec<Op<'a>>, Struc
         }
     }
 
-    // Destination size, then destination layout.
+    // Destination size, then destination structure.
     let mut total = 0u64;
     let mut dims = Vec::with_capacity(ops.len());
     for op in &ops {
@@ -419,7 +412,27 @@ fn plan<'a>(src: &Structure, updates: &'a Updates) -> Result<(Vec<Op<'a>>, Struc
             b.entity_of_segments(d.kind, &[id])?;
         }
     }
-    Ok((ops, b.finish()?))
+    let mut plan = WritePlan::new(b.finish()?);
+    for (i, op) in ops.iter().enumerate() {
+        let id = SegmentId::from_index(i)?;
+        match op {
+            Op::Copy(sid) => {
+                plan.copy_segment(id, src.segment(*sid)?);
+            }
+            Op::New {
+                ty,
+                prefix,
+                payload,
+                ..
+            } => {
+                let (hdr, n) = chunk_header(ty, prefix, payload.len());
+                plan.put(id, Role::Header, hdr[..n].to_vec());
+                plan.put(id, Role::Payload, *payload);
+                plan.put(id, Role::Trailer, chunk_crc(ty, prefix, payload).to_vec());
+            }
+        }
+    }
+    Ok(plan)
 }
 
 /// Length, type and prefix of a new chunk; returns the bytes and how many are used.
@@ -449,7 +462,7 @@ fn chunk_crc(ty: &[u8; 4], prefix: &[u8], payload: &[u8]) -> [u8; 4] {
 /// Write `src` with `updates` applied, delivering every output byte to `sink`.
 ///
 /// `out` is written from its current start; offsets reported to the sink are
-/// relative to the first byte written. Returns the layout of the output.
+/// relative to the first byte written. Returns the structure of the output.
 pub fn write<R, W, S>(
     src_structure: &Structure,
     src: &mut R,
@@ -458,69 +471,13 @@ pub fn write<R, W, S>(
     sink: &mut S,
 ) -> Result<Structure>
 where
-    R: Read + Seek,
-    W: Write,
+    R: Read + Seek + ?Sized,
+    W: Write + ?Sized,
     S: Sink + ?Sized,
 {
-    let (ops, dest) = plan(src_structure, updates)?;
-    sink.begin(&dest)?;
-
-    let chunk = write_buffer_len(dest.total_size());
-    let mut buf = vec![0u8; chunk];
-    // Source regions of consecutive copied chunks that are contiguous in `src`
-    // are read and written as one run; see `Emitter::copy_run`. A run is flushed
-    // at a gap, at a new chunk, or once it spans RUN_WINDOWS buffers, which bounds
-    // `pieces` regardless of how many small chunks the file has.
-    let run_limit = (chunk as u64).saturating_mul(RUN_WINDOWS);
-    let mut pieces: Vec<Piece> = Vec::new();
-    let mut run_len = 0u64;
-    {
-        let mut em = Emitter::new(out, sink, &dest);
-        for (i, op) in ops.iter().enumerate() {
-            let id = SegmentId::from_index(i)?;
-            match op {
-                Op::Copy(sid) => {
-                    let s: &Segment = src_structure.segment(*sid)?;
-                    for (role, range) in s.regions() {
-                        if pieces
-                            .last()
-                            .is_some_and(|p| p.range.end() != range.offset())
-                        {
-                            flush_run(&mut em, src, &mut pieces, &mut buf)?;
-                            run_len = 0;
-                        }
-                        run_len = run_len.saturating_add(range.len());
-                        pieces.push(Piece {
-                            dest: id,
-                            role,
-                            range,
-                        });
-                    }
-                    if run_len >= run_limit {
-                        flush_run(&mut em, src, &mut pieces, &mut buf)?;
-                        run_len = 0;
-                    }
-                }
-                Op::New {
-                    ty,
-                    prefix,
-                    payload,
-                    ..
-                } => {
-                    flush_run(&mut em, src, &mut pieces, &mut buf)?;
-                    run_len = 0;
-                    em.begin_segment(id)?;
-                    let (hdr, n) = chunk_header(ty, prefix, payload.len());
-                    em.put(Role::Header, &hdr[..n])?;
-                    em.put(Role::Payload, payload)?;
-                    em.put(Role::Trailer, &chunk_crc(ty, prefix, payload))?;
-                }
-            }
-        }
-        flush_run(&mut em, src, &mut pieces, &mut buf)?;
-        em.finish()?;
-    }
-    Ok(dest)
+    let plan = plan(src_structure, updates)?;
+    plan.execute(src, out, sink)?;
+    Ok(plan.into_structure())
 }
 
 /// Recompute and store the CRC of the chunk in `seg` by reading it back from `out`.
@@ -693,7 +650,7 @@ mod tests {
     }
 
     #[test]
-    fn trailing_bytes_are_kept_in_layout() {
+    fn trailing_bytes_are_kept_in_structure() {
         let mut png = sample_png();
         png.extend_from_slice(b"trailing");
         let s = parse(&mut Cursor::new(png.clone())).unwrap();

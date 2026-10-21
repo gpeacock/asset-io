@@ -11,7 +11,7 @@
 // specific language governing permissions and limitations under
 // each license.
 
-//! ISO BMFF (MP4, MOV, HEIF, AVIF, ...) on the layout model.
+//! ISO BMFF (MP4, MOV, HEIF, AVIF, ...) on the structure model.
 //!
 //! Segments are the file's top-level boxes. A box's `size`/`type` (and extended
 //! size and `uuid` type) are the header; the rest is the payload; there is no
@@ -45,7 +45,7 @@
 //! `update` box is dropped, as when a file is re-signed. `remove_jumbf` drops every
 //! C2PA box. XMP follows the same placement rules.
 //!
-//! `Updates::set_merkle` replaces the `merkle` boxes with new ones, placed right
+//! [`BmffUpdates::set_merkle`] replaces the `merkle` boxes with new ones, placed right
 //! after the last `mdat`; `remove_merkle` drops them. A file that has them takes a
 //! new manifest only if they are also set or removed, since they belong with the
 //! manifest that describes them. The boxes can be written as placeholders of their
@@ -67,18 +67,19 @@
 //! size, nothing is rewritten and `moov` is copied verbatim. `mfro` and `sidx`
 //! hold sizes and relative offsets, which these edits do not change.
 
-use super::items;
+use super::heif_items;
 use crate::error::{Error, Result};
-use crate::handler::{ContainerHandler, FormatSpec, ReadSeek, ReadWriteSeek};
+use crate::handler::{ContainerHandler, FormatSpec, ReadSeek};
+use crate::plan::{OffsetMap, Relocate, WritePlan};
 use crate::range::ByteRange;
+use crate::readahead::{ReadAhead, PARSE_WINDOW};
+use crate::segment::SegmentKind;
 use crate::segment::{Name, Role, Segment};
-use crate::segment::{SegmentKind, DEFAULT_CHUNK_SIZE};
-use crate::sink::{Emitter, Sink};
 use crate::structure::{SegmentId, Structure, StructureBuilder};
 use crate::walk::Node;
-use crate::{MerkleUpdate, MetadataUpdate, Updates};
+use crate::{MetadataUpdate, Updates};
 use std::borrow::Cow;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom};
 use std::sync::{Arc, OnceLock};
 
 /// C2PA content provenance box type, `D8FEC3D6-1B0E-483C-9297-5828877EC481`.
@@ -95,6 +96,74 @@ pub const MAX_BOX_DEPTH: u32 = 32;
 
 /// Purpose labels of C2PA boxes (see [`labels`](crate::labels)).
 pub use crate::segment::labels::{MANIFEST, MERKLE, ORIGINAL, UPDATE};
+
+/// What to do with the `merkle` boxes of a file; see [`BmffUpdates`].
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub enum MerkleUpdate {
+    /// Keep existing boxes (default)
+    #[default]
+    Keep,
+    /// Remove existing boxes
+    Remove,
+    /// Replace existing boxes with these payloads, one box each
+    Set(Vec<Vec<u8>>),
+}
+
+/// ISO BMFF options for [`Updates`]: what to do with the `merkle` boxes.
+///
+/// Merkle boxes carry proofs for hashed media blocks. Other containers ignore
+/// these options. [`Updates::remove_all`] removes them as well.
+pub trait BmffUpdates: Sized {
+    /// Replace the file's merkle boxes with one box per payload.
+    ///
+    /// The boxes are written immediately after the last `mdat`, and any existing
+    /// merkle boxes are dropped. All payloads are usually the same length (the C2PA
+    /// specification pads them to one length).
+    ///
+    /// The content usually depends on hashes of the media, which exist only after
+    /// the write. Write zeroed payloads of the final length, hash the media through
+    /// the [`Sink`](crate::Sink) during the write, then fill each box in place with
+    /// [`Structure::patch_exact`](crate::Structure::patch_exact). The boxes are the
+    /// entities labelled [`MERKLE`] of kind [`SegmentKind::Other`].
+    ///
+    /// A file that has merkle boxes cannot take a new manifest unless the boxes are
+    /// also set or removed, and an update manifest cannot change them.
+    fn set_merkle(self, payloads: Vec<Vec<u8>>) -> Self;
+
+    /// Remove the file's merkle boxes. See [`set_merkle`](Self::set_merkle).
+    fn remove_merkle(self) -> Self;
+
+    /// Keep the file's merkle boxes (explicit, same as default).
+    fn keep_merkle(self) -> Self;
+
+    /// What to do with the merkle boxes.
+    fn merkle(&self) -> &MerkleUpdate;
+}
+
+impl BmffUpdates for Updates {
+    fn set_merkle(self, payloads: Vec<Vec<u8>>) -> Self {
+        self.set_extension(MerkleUpdate::Set(payloads))
+    }
+
+    fn remove_merkle(self) -> Self {
+        self.set_extension(MerkleUpdate::Remove)
+    }
+
+    fn keep_merkle(self) -> Self {
+        self.set_extension(MerkleUpdate::Keep)
+    }
+
+    fn merkle(&self) -> &MerkleUpdate {
+        static KEEP: MerkleUpdate = MerkleUpdate::Keep;
+        static REMOVE: MerkleUpdate = MerkleUpdate::Remove;
+        match self.extension::<MerkleUpdate>() {
+            Some(m) => m,
+            None if self.removes_all() => &REMOVE,
+            None => &KEEP,
+        }
+    }
+}
 
 /// Longest purpose string looked for: longer than any defined purpose.
 const MAX_PURPOSE_LEN: usize = 32;
@@ -163,24 +232,25 @@ impl ContainerHandler for BmffHandler {
         parse_with(self, src)
     }
 
-    fn write(
+    fn write_plan<'a>(
         &self,
         src_structure: &Structure,
-        mut src: &mut dyn ReadSeek,
-        mut out: &mut dyn ReadWriteSeek,
-        updates: &Updates,
-        sink: &mut dyn Sink,
-    ) -> Result<Structure> {
-        write_impl(src_structure, &mut src, &mut out, updates, sink)
+        src: &mut dyn ReadSeek,
+        updates: &'a Updates,
+    ) -> Result<WritePlan<'a>> {
+        let (ops, structure, map) = plan(src_structure, src, updates)?;
+        steps(src_structure, src, ops, structure, map)
     }
 
+    // The structure does not depend on the offset tables, so planning alone does not
+    // read them.
     fn plan(
         &self,
         src_structure: &Structure,
-        mut src: &mut dyn ReadSeek,
+        src: &mut dyn ReadSeek,
         updates: &Updates,
     ) -> Result<Structure> {
-        plan(src_structure, &mut src, updates).map(|(_, dest, _)| dest)
+        plan(src_structure, src, updates).map(|(_, structure, _)| structure)
     }
 
     fn compose(&self, kind: SegmentKind, data: &[u8]) -> Result<Vec<u8>> {
@@ -206,13 +276,15 @@ impl ContainerHandler for BmffHandler {
         src: &mut dyn ReadSeek,
         f: &mut dyn FnMut(&Node<'_>) -> Result<()>,
     ) -> Result<()> {
+        let mut ahead = ReadAhead::new(src, PARSE_WINDOW);
+        let src: &mut dyn ReadSeek = &mut ahead;
         let total = src.seek(SeekFrom::End(0))?;
         let mut path = String::new();
         walk_level(src, 0, total, 1, &mut path, f)
     }
 }
 
-/// Parse the top-level boxes of a BMFF file into a validated layout.
+/// Parse the top-level boxes of a BMFF file into a validated structure.
 pub fn parse<R: Read + Seek>(src: &mut R) -> Result<Structure> {
     parse_with(handler(), src)
 }
@@ -522,6 +594,8 @@ impl StoreCounts {
 }
 
 fn parse_with(handler: Arc<dyn ContainerHandler>, src: &mut dyn ReadSeek) -> Result<Structure> {
+    let mut ahead = ReadAhead::new(src, PARSE_WINDOW);
+    let src: &mut dyn ReadSeek = &mut ahead;
     let total = src.seek(SeekFrom::End(0))?;
     if total < 8 {
         return Err(Error::InvalidFormat("BMFF too small".into()));
@@ -589,7 +663,7 @@ fn parse_with(handler: Arc<dyn ContainerHandler>, src: &mut dyn ReadSeek) -> Res
 /// Largest `meta` box read to look for items.
 const MAX_META_BOX: u64 = 16 << 20;
 
-fn read_items(src: &mut dyn ReadSeek, body: u64, end: u64) -> Result<Vec<items::Found>> {
+fn read_items(src: &mut dyn ReadSeek, body: u64, end: u64) -> Result<Vec<heif_items::Found>> {
     let len = end - body;
     if len > MAX_META_BOX {
         return Err(Error::LimitExceeded {
@@ -599,7 +673,7 @@ fn read_items(src: &mut dyn ReadSeek, body: u64, end: u64) -> Result<Vec<items::
     }
     let mut buf = vec![0u8; len as usize];
     read_at(src, body, &mut buf)?;
-    items::find(&buf, body)
+    heif_items::find(&buf, body)
 }
 
 /// The parts of `[offset, offset + len)` in each top-level segment it crosses,
@@ -633,10 +707,10 @@ fn item_entity(
     b: &mut StructureBuilder,
     src: &mut dyn ReadSeek,
     placed: &[(SegmentId, u64, u64)],
-    f: &items::Found,
+    f: &heif_items::Found,
 ) -> Result<()> {
     let mut extents = f.extents.clone();
-    if f.kind == items::Kind::Exif {
+    if f.kind == heif_items::Kind::Exif {
         // The item starts with the offset of the TIFF header from the end of that
         // field; the entity is the TIFF data.
         let (at, len) = extents[0];
@@ -645,7 +719,7 @@ fn item_entity(
             return Ok(());
         }
         let skip = 4u64.saturating_add(u32::from_be_bytes(h) as u64);
-        extents = items::skip_bytes(&extents, skip);
+        extents = heif_items::skip_bytes(&extents, skip);
     }
     let mut parts = Vec::new();
     for (at, len) in extents {
@@ -658,10 +732,11 @@ fn item_entity(
         return Ok(());
     }
     match f.kind {
-        items::Kind::Exif => b.entity(SegmentKind::Exif, &parts),
-        items::Kind::Thumbnail => b.entity_labelled(
+        heif_items::Kind::Exif => b.entity(SegmentKind::Exif, &parts),
+        heif_items::Kind::Thumbnail => b.entity_with_media_type(
             SegmentKind::Thumbnail,
-            String::from_utf8_lossy(&f.item_type).into_owned(),
+            Some(String::from_utf8_lossy(&f.item_type).into_owned().into()),
+            f.media_type.clone().map(Into::into),
             &parts,
         ),
     }
@@ -675,38 +750,6 @@ fn item_entity(
 const MAX_PATCHES: usize = 1 << 20;
 /// Largest box (`iloc`) read into memory to rewrite.
 const MAX_IN_MEMORY_BOX: u64 = 16 << 20;
-
-/// Where bytes moved: `(end of the old region, size change)` for each edit.
-///
-/// A file offset pointing at or past the end of an edited region moves by that
-/// edit's size change.
-#[derive(Debug, Default)]
-struct OffsetMap {
-    edits: Vec<(u64, i64)>,
-}
-
-impl OffsetMap {
-    fn add(&mut self, old_end: u64, delta: i64) {
-        if delta != 0 {
-            self.edits.push((old_end, delta));
-        }
-    }
-
-    fn is_identity(&self) -> bool {
-        self.edits.is_empty()
-    }
-
-    fn apply(&self, v: u64) -> Result<u64> {
-        let shift: i128 = self
-            .edits
-            .iter()
-            .filter(|(end, _)| *end <= v)
-            .map(|(_, d)| *d as i128)
-            .sum();
-        u64::try_from(v as i128 + shift)
-            .map_err(|_| Error::InvalidFormat("offset adjustment out of range".into()))
-    }
-}
 
 /// A run of source bytes that is rewritten while copying.
 #[derive(Debug)]
@@ -774,6 +817,8 @@ fn read_u32_at(src: &mut dyn ReadSeek, at: u64) -> Result<u32> {
 /// Find the offset-bearing boxes inside one top-level box by reading box headers,
 /// then read just their table headers.
 fn collect_patches(src: &mut dyn ReadSeek, seg: &Segment, map: &OffsetMap) -> Result<Vec<Patch>> {
+    let mut ahead = ReadAhead::new(src, PARSE_WINDOW);
+    let src: &mut dyn ReadSeek = &mut ahead;
     let mut cands: Vec<Candidate> = Vec::new();
     let mut path = String::new();
     let ext = seg.extent();
@@ -1112,8 +1157,8 @@ fn op_len(op: &Op<'_>, src: &Structure) -> Result<u64> {
 }
 
 /// Decide what the output contains: the single source of truth for both the
-/// destination layout and the bytes written.
-fn plan<'a, R: Read + Seek>(
+/// destination structure and the bytes written.
+fn plan<'a, R: Read + Seek + ?Sized>(
     src: &Structure,
     stream: &mut R,
     updates: &'a Updates,
@@ -1146,7 +1191,7 @@ fn plan<'a, R: Read + Seek>(
     };
     let update_mode = addition.is_some();
 
-    let merkle_kept = matches!(updates.merkle, MerkleUpdate::Keep);
+    let merkle_kept = matches!(updates.merkle(), MerkleUpdate::Keep);
     if update_mode && !merkle_kept {
         return Err(Error::InvalidFormat(
             "an update manifest cannot change merkle boxes".into(),
@@ -1163,7 +1208,7 @@ fn plan<'a, R: Read + Seek>(
     }
     // Merkle boxes go right after the last mdat.
     let last_mdat = segs.iter().rposition(|s| s.name() == Name::FourCC(MDAT));
-    if matches!(updates.merkle, MerkleUpdate::Set(_)) && last_mdat.is_none() {
+    if matches!(updates.merkle(), MerkleUpdate::Set(_)) && last_mdat.is_none() {
         return Err(Error::InvalidFormat(
             "BMFF has no mdat box to place merkle boxes after".into(),
         ));
@@ -1178,7 +1223,7 @@ fn plan<'a, R: Read + Seek>(
         let id = SegmentId::from_index(i)?;
         let (old_len, end) = (seg.extent().len(), seg.extent().end());
         match labels[i] {
-            Some(MERKLE) => match &updates.merkle {
+            Some(MERKLE) => match updates.merkle() {
                 MerkleUpdate::Keep => ops.push(Op::Copy(id)),
                 _ => note(&mut map, total, end, 0, old_len)?,
             },
@@ -1245,7 +1290,7 @@ fn plan<'a, R: Read + Seek>(
                 }
             }
         }
-        if let (Some(i2), MerkleUpdate::Set(boxes)) = (last_mdat, &updates.merkle) {
+        if let (Some(i2), MerkleUpdate::Set(boxes)) = (last_mdat, updates.merkle()) {
             if i2 == i {
                 let mut added = 0u64;
                 for d in boxes {
@@ -1286,7 +1331,7 @@ fn plan<'a, R: Read + Seek>(
         }
     }
 
-    // Destination layout.
+    // Destination structure.
     let mut dims = Vec::with_capacity(ops.len());
     let mut starts = Vec::with_capacity(ops.len());
     let mut size = 0u64;
@@ -1367,146 +1412,109 @@ fn plan<'a, R: Read + Seek>(
         if parts.is_empty() || parts.len() != e.part_count() {
             continue;
         }
-        match e.label() {
-            Some(l) => b.entity_labelled(kind, l.to_owned(), &parts)?,
-            None => b.entity(kind, &parts)?,
-        }
+        b.entity_with_media_type(
+            kind,
+            e.label().map(|l| l.to_owned().into()),
+            e.media_type().map(|m| m.to_owned().into()),
+            &parts,
+        )?;
     }
     Ok((ops, b.finish()?, map))
 }
 
-fn adjust_field(f: &mut [u8], width: u8, map: &OffsetMap) -> Result<()> {
-    let w = width as usize;
-    let v = map.apply(get_uint(&f[..w]))?;
-    put_uint(&mut f[..w], v)
+/// The steps that write the planned `ops`. Reads the source for what the plan
+/// needs to know: the offset tables to rewrite and the header of a relabelled box.
+fn steps<'a>(
+    src: &Structure,
+    stream: &mut dyn ReadSeek,
+    ops: Vec<Op<'a>>,
+    structure: Structure,
+    map: OffsetMap,
+) -> Result<WritePlan<'a>> {
+    let map = Arc::new(map);
+    let mut plan = WritePlan::new(structure);
+    for (i, op) in ops.into_iter().enumerate() {
+        let dest = SegmentId::from_index(i)?;
+        match op {
+            Op::Copy(sid) => {
+                plan.copy_segment(dest, src.segment(sid)?);
+            }
+            Op::Scan(sid) => {
+                let seg = src.segment(sid)?;
+                let mut patches = collect_patches(stream, seg, &map)?;
+                for (role, range) in seg.regions() {
+                    patched_steps(&mut plan, dest, role, range, &mut patches, &map)?;
+                }
+            }
+            Op::Relabel { id, from, to } => {
+                let seg = src.segment(id)?;
+                let header = seg.header();
+                // [size, type] [uuid 16] [version, flags 4] [purpose NUL] [merkle offset 8]
+                let fixed = 16 + 4 + from.len() + 1 + 8;
+                let prefix = (header.len() as usize)
+                    .checked_sub(fixed)
+                    .filter(|p| *p == 8 || *p == 16)
+                    .ok_or_else(|| bad(header.offset(), "unexpected C2PA box header"))?;
+                let mut h = vec![0u8; header.len() as usize];
+                read_at(stream, header.offset(), &mut h)?;
+                let at = prefix + 16 + 4;
+                if &h[at..at + from.len()] != from.as_bytes() || h[at + from.len()] != 0 {
+                    return Err(bad(
+                        header.offset(),
+                        "C2PA box purpose is not what was parsed",
+                    ));
+                }
+                h[at..at + to.len()].copy_from_slice(to.as_bytes());
+                plan.put(dest, Role::Header, h);
+                plan.copy(dest, Role::Payload, seg.payload());
+            }
+            Op::New {
+                header, payload, ..
+            } => {
+                plan.put(dest, Role::Header, header);
+                plan.put(dest, Role::Payload, payload);
+            }
+        }
+    }
+    Ok(plan)
 }
 
-/// Copy `range` of `src`, rewriting the patches inside it. `patches` are sorted
-/// and disjoint; those outside `range` are skipped.
-fn copy_patched<R, W, S>(
-    em: &mut Emitter<'_, W, S>,
-    src: &mut R,
+/// Append the steps that copy `range`, rewriting the patches inside it. `patches`
+/// are sorted and disjoint; those outside `range` are skipped.
+fn patched_steps(
+    plan: &mut WritePlan<'_>,
+    dest: SegmentId,
     role: Role,
     range: ByteRange,
-    patches: &[Patch],
-    map: &OffsetMap,
-    buf: &mut [u8],
-) -> Result<()>
-where
-    R: Read + Seek,
-    W: Write,
-    S: Sink + ?Sized,
-{
+    patches: &mut [Patch],
+    map: &Arc<OffsetMap>,
+) -> Result<()> {
     let mut cur = range.offset();
     for p in patches {
         let (start, len) = (p.start(), p.len());
         if start < range.offset() || start.saturating_add(len) > range.end() {
             continue;
         }
-        em.copy(src, role, ByteRange::new(cur, start - cur)?, buf)?;
+        plan.copy(dest, role, ByteRange::new(cur, start - cur)?);
         match p {
-            Patch::Bytes { data, .. } => em.put(role, data)?,
+            Patch::Bytes { data, .. } => {
+                plan.put(dest, role, std::mem::take(data));
+            }
             Patch::Table {
-                count,
                 stride,
                 field_off,
                 width,
                 ..
             } => {
-                let stride = *stride as usize;
-                let (field_off, width) = (*field_off as usize, *width);
-                if stride == 0 || stride > buf.len() || field_off + width as usize > stride {
-                    return Err(bad(start, "invalid offset table geometry"));
-                }
-                let per_block = (buf.len() / stride) as u64;
-                let mut left = *count;
-                src.seek(SeekFrom::Start(start))?;
-                while left > 0 {
-                    let n = left.min(per_block) as usize;
-                    let block = &mut buf[..n * stride];
-                    src.read_exact(block)?;
-                    for e in 0..n {
-                        adjust_field(&mut block[e * stride + field_off..], width, map)?;
-                    }
-                    em.put(role, block)?;
-                    left -= n as u64;
-                }
+                let rule = Relocate::new(map.clone(), *stride, *field_off, *width)
+                    .map_err(|_| bad(start, "invalid offset table geometry"))?;
+                plan.relocate(dest, role, ByteRange::new(start, len)?, rule);
             }
         }
         cur = start + len;
     }
-    em.copy(src, role, ByteRange::new(cur, range.end() - cur)?, buf)
-}
-
-fn write_impl<R, W, S>(
-    src_structure: &Structure,
-    src: &mut R,
-    out: &mut W,
-    updates: &Updates,
-    sink: &mut S,
-) -> Result<Structure>
-where
-    R: Read + Seek,
-    W: Write,
-    S: Sink + ?Sized,
-{
-    let (ops, dest, map) = plan(src_structure, src, updates)?;
-    sink.begin(&dest)?;
-
-    let mut buf = vec![0u8; DEFAULT_CHUNK_SIZE];
-    {
-        let mut em = Emitter::new(out, sink, &dest);
-        for (i, op) in ops.iter().enumerate() {
-            em.begin_segment(SegmentId::from_index(i)?)?;
-            match op {
-                Op::Copy(sid) => {
-                    for (role, range) in src_structure.segment(*sid)?.regions() {
-                        em.copy(src, role, range, &mut buf)?;
-                    }
-                }
-                Op::Scan(sid) => {
-                    let seg = src_structure.segment(*sid)?;
-                    let patches = {
-                        let s: &mut dyn ReadSeek = &mut *src;
-                        collect_patches(s, seg, &map)?
-                    };
-                    for (role, range) in seg.regions() {
-                        copy_patched(&mut em, src, role, range, &patches, &map, &mut buf)?;
-                    }
-                }
-                Op::Relabel { id, from, to } => {
-                    let seg = src_structure.segment(*id)?;
-                    let header = seg.header();
-                    // [size, type] [uuid 16] [version, flags 4] [purpose NUL] [merkle offset 8]
-                    let fixed = 16 + 4 + from.len() + 1 + 8;
-                    let prefix = (header.len() as usize)
-                        .checked_sub(fixed)
-                        .filter(|p| *p == 8 || *p == 16)
-                        .ok_or_else(|| bad(header.offset(), "unexpected C2PA box header"))?;
-                    let mut h = vec![0u8; header.len() as usize];
-                    read_at(src, header.offset(), &mut h)?;
-                    let at = prefix + 16 + 4;
-                    if &h[at..at + from.len()] != from.as_bytes() || h[at + from.len()] != 0 {
-                        return Err(bad(
-                            header.offset(),
-                            "C2PA box purpose is not what was parsed",
-                        ));
-                    }
-                    h[at..at + to.len()].copy_from_slice(to.as_bytes());
-                    em.put(Role::Header, &h)?;
-                    em.copy(src, Role::Payload, seg.payload(), &mut buf)?;
-                }
-                Op::New {
-                    header, payload, ..
-                } => {
-                    em.put(Role::Header, header)?;
-                    em.put(Role::Payload, payload)?;
-                }
-            }
-        }
-        em.finish()?;
-    }
-    Ok(dest)
+    plan.copy(dest, role, ByteRange::new(cur, range.end() - cur)?);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1771,7 +1779,7 @@ mod tests {
             .handler()
             .write(&s, &mut Cursor::new(src), &mut out, u, &mut NullSink)?;
         let out = out.into_inner();
-        // The layout returned is the layout of what was written.
+        // The structure returned is the structure of what was written.
         let again = parse(&mut Cursor::new(&out))?;
         assert_eq!(dest.segments(), again.segments());
         assert_eq!(dest.total_size(), out.len() as u64);
@@ -1952,8 +1960,8 @@ mod tests {
             seen: u64,
         }
         impl crate::Sink for Sum {
-            fn begin(&mut self, layout: &Structure) -> Result<()> {
-                self.mdat = layout
+            fn begin(&mut self, structure: &Structure) -> Result<()> {
+                self.mdat = structure
                     .segments()
                     .iter()
                     .enumerate()
@@ -2015,6 +2023,47 @@ mod tests {
         let added = (8 + 16 + 4 + 9 + 8 + 5) as u32;
         assert_eq!(stco_entry(&out), e0 + added);
         assert!(media_at(&out, stco_entry(&out)));
+    }
+
+    #[test]
+    fn merkle_option_defaults_and_remove_all() {
+        assert!(matches!(Updates::new().merkle(), MerkleUpdate::Keep));
+        assert!(matches!(
+            Updates::remove_all().merkle(),
+            MerkleUpdate::Remove
+        ));
+        // An explicit choice beats remove_all.
+        assert!(matches!(
+            Updates::remove_all().keep_merkle().merkle(),
+            MerkleUpdate::Keep
+        ));
+
+        // remove_all drops the merkle boxes a file has.
+        let (f, _) = media_file(&[], &[], None);
+        let with = rewrite(&f, &Updates::new().set_merkle(vec![vec![1u8; 4]])).unwrap();
+        let s = parse(&mut Cursor::new(&with)).unwrap();
+        assert_eq!(merkle_payloads(&s, &with).len(), 1);
+        let out = rewrite(&with, &Updates::remove_all()).unwrap();
+        let s = parse(&mut Cursor::new(&out)).unwrap();
+        assert!(merkle_payloads(&s, &out).is_empty());
+    }
+
+    #[test]
+    fn offset_tables_are_a_relocation_step_not_a_copy() {
+        let (f, _) = media_file(&[], &[], None);
+        let s = parse(&mut Cursor::new(&f)).unwrap();
+        let u = Updates::new().set_jumbf(b"STORE".to_vec());
+        let plan = s.write_plan(&mut Cursor::new(&f), &u).unwrap();
+        crate::plan::validate(&plan, f.len() as u64).unwrap();
+        let tables: Vec<_> = plan
+            .steps()
+            .iter()
+            .filter(|st| matches!(st, crate::Step::Relocate { .. }))
+            .collect();
+        assert_eq!(tables.len(), 1);
+        // Planning the structure alone does not read the tables.
+        let structure = s.plan(&mut Cursor::new(&f), &u).unwrap();
+        assert_eq!(structure.total_size(), plan.structure().total_size());
     }
 
     #[test]
@@ -2279,10 +2328,15 @@ mod tests {
     /// `ftyp`, a `meta` listing a HEVC item, an EXIF item and a JPEG thumbnail of
     /// the first, then an `mdat` holding the data of the last two.
     fn heif(exif: &[u8], thumb: &[u8]) -> Vec<u8> {
-        use items::build::{iinf, iloc0, infe, meta, thmb};
+        heif_with(exif, thumb, heif_items::build::infe(3, b"jpeg"))
+    }
+
+    /// [`heif`] with a chosen `infe` (item 3) for the thumbnail.
+    fn heif_with(exif: &[u8], thumb: &[u8], thumb_infe: Vec<u8>) -> Vec<u8> {
+        use heif_items::build::{iinf, iloc0, infe, meta, thmb};
         let build = |e_at: u32, t_at: u32| {
             let body = meta(&[
-                iinf(&[infe(1, b"hvc1"), infe(2, b"Exif"), infe(3, b"jpeg")]),
+                iinf(&[infe(1, b"hvc1"), infe(2, b"Exif"), thumb_infe.clone()]),
                 thmb(3, 1),
                 iloc0(&[
                     (2, &[(e_at, exif.len() as u32)]),
@@ -2322,13 +2376,47 @@ mod tests {
         );
         let t = s.embedded_thumbnail(&mut Cursor::new(&f)).unwrap().unwrap();
         assert_eq!(
-            (t.data.as_slice(), t.format),
-            (THUMB, crate::ThumbnailKind::Jpeg)
+            (t.data.as_slice(), t.media_type()),
+            (THUMB, Some("image/jpeg"))
         );
         // Still a tiling, and the C2PA rules are not disturbed.
         let covered: u64 = s.regions().map(|r| r.range.len()).sum();
         assert_eq!(covered, f.len() as u64);
         assert_eq!(rewrite(&f, &Updates::new()).unwrap(), f);
+    }
+
+    #[test]
+    fn thumbnail_media_types_follow_the_item() {
+        use heif_items::build::{infe, infe_mime};
+        let media = |thumb_infe: Vec<u8>, write: bool| {
+            let f = heif_with(TIFF, THUMB, thumb_infe);
+            let s = parse(&mut Cursor::new(&f)).unwrap();
+            let (s, f) = if write {
+                // The media type is carried through a write that moves the item.
+                let out = rewrite(&f, &Updates::new().set_jumbf(b"STORE".to_vec())).unwrap();
+                (parse(&mut Cursor::new(&out)).unwrap(), out)
+            } else {
+                (s, f)
+            };
+            let t = s.embedded_thumbnail(&mut Cursor::new(&f)).unwrap().unwrap();
+            assert_eq!(t.data, THUMB);
+            let e = s.entities(SegmentKind::Thumbnail).next().unwrap();
+            assert_eq!(e.media_type(), t.media_type());
+            t.media_type().map(str::to_owned)
+        };
+        for write in [false, true] {
+            assert_eq!(
+                media(infe(3, b"jpeg"), write).as_deref(),
+                Some("image/jpeg")
+            );
+            assert_eq!(
+                media(infe_mime(3, b"image/png"), write).as_deref(),
+                Some("image/png")
+            );
+            // A coded item is a bitstream, not a file, so it has no media type.
+            assert_eq!(media(infe(3, b"av01"), write), None);
+            assert_eq!(media(infe_mime(3, b"nonsense"), write), None);
+        }
     }
 
     #[test]
@@ -2349,7 +2437,7 @@ mod tests {
         let out = out.into_inner();
         assert!(out.len() > f.len());
 
-        // The layout returned describes the items where they now are ...
+        // The structure returned describes the items where they now are ...
         for (kind, want) in [(SegmentKind::Exif, TIFF), (SegmentKind::Thumbnail, THUMB)] {
             assert_eq!(item(&dest, &out, kind).unwrap().1, want);
         }

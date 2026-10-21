@@ -11,7 +11,7 @@
 // specific language governing permissions and limitations under
 // each license.
 
-//! Validated container layout.
+//! Validated container structure.
 
 use crate::error::{Error, Result};
 use crate::handler::{ContainerHandler, ReadSeek, ReadWriteSeek};
@@ -33,7 +33,9 @@ pub const MAX_SEGMENTS: usize = 1 << 22;
 pub struct SegmentId(u32);
 
 impl SegmentId {
-    pub(crate) fn from_index(i: usize) -> Result<Self> {
+    /// The id of the segment at position `i` in [`Structure::segments`]. The index
+    /// is not checked against any structure; [`Structure::segment`] does that.
+    pub fn from_index(i: usize) -> Result<Self> {
         u32::try_from(i)
             .map(SegmentId)
             .map_err(|_| Error::LimitExceeded {
@@ -75,6 +77,7 @@ impl Part {
 pub struct Entity {
     kind: SegmentKind,
     label: Option<Cow<'static, str>>,
+    media_type: Option<Cow<'static, str>>,
     jumbf_type: Option<[u8; 16]>,
     first: Part,
     rest: Vec<Part>,
@@ -96,6 +99,14 @@ impl Entity {
     /// container does not distinguish them.
     pub fn label(&self) -> Option<&str> {
         self.label.as_deref()
+    }
+
+    /// Media type of the entity's data, when the container records one: for
+    /// example `image/jpeg` for a HEIF `jpeg` thumbnail, or the content type of a
+    /// HEIF `mime` item. `None` when the container does not say, as with
+    /// [`SubAsset::media_type`].
+    pub fn media_type(&self) -> Option<&str> {
+        self.media_type.as_deref()
     }
 
     /// Classification.
@@ -173,6 +184,7 @@ impl SubAsset {
 
 /// A region of the file with a role, in file order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Region {
     /// Owning segment.
     pub segment: SegmentId,
@@ -182,7 +194,7 @@ pub struct Region {
     pub range: ByteRange,
 }
 
-/// The parsed layout of an asset.
+/// The parsed structure of an asset.
 ///
 /// Invariants, enforced by [`StructureBuilder`]:
 /// - `segments` are in file order and tile `[0, total_size)` exactly;
@@ -406,7 +418,7 @@ impl Structure {
 
     /// Append a range to `out`. The range is validated against the asset size
     /// before any allocation, and reads grow `out` only as data arrives.
-    fn read_into<R: Read + Seek>(
+    fn read_into<R: Read + Seek + ?Sized>(
         &self,
         src: &mut R,
         range: ByteRange,
@@ -499,7 +511,11 @@ impl Structure {
     }
 
     /// Read an entity's parts, concatenated.
-    pub fn read_entity<R: Read + Seek>(&self, src: &mut R, entity: &Entity) -> Result<Vec<u8>> {
+    pub fn read_entity<R: Read + Seek + ?Sized>(
+        &self,
+        src: &mut R,
+        entity: &Entity,
+    ) -> Result<Vec<u8>> {
         let mut out = Vec::new();
         for part in entity.parts() {
             self.read_into(src, part.range, &mut out)?;
@@ -656,7 +672,7 @@ impl Structure {
     /// Overwrite an entity's payload in an already-written stream.
     ///
     /// `data` must fit the entity's total payload capacity; the remainder is
-    /// zero-filled so the layout is unchanged. Container checksums that cover
+    /// zero-filled so the structure is unchanged. Container checksums that cover
     /// the patched payload (PNG CRC) are recomputed. `out` must contain the
     /// asset starting at offset 0.
     pub fn patch<W: Read + Write + Seek>(
@@ -693,7 +709,7 @@ impl Structure {
     }
 
     /// Write this asset to `out` with `updates` applied, delivering every output
-    /// byte to `sink`, and return the layout of what was written. `src` must be
+    /// byte to `sink`, and return the structure of what was written. `src` must be
     /// the stream this structure was parsed from. The container's handler does the
     /// work; callers never name the format.
     pub fn write(
@@ -706,7 +722,7 @@ impl Structure {
         self.handler.write(self, src, out, updates, sink)
     }
 
-    /// The layout `write` would produce for `updates`, without writing: where each
+    /// The structure `write` would produce for `updates`, without writing: where each
     /// entity would land, and the total size. `src` must be the stream this
     /// structure was parsed from.
     ///
@@ -776,7 +792,7 @@ pub struct StructureBuilder {
 }
 
 impl StructureBuilder {
-    /// Start a layout for an asset of known size, owned by `handler`.
+    /// Start a structure for an asset of known size, owned by `handler`.
     pub fn new(
         handler: Arc<dyn ContainerHandler>,
         media_type: impl Into<Cow<'static, str>>,
@@ -940,13 +956,13 @@ impl StructureBuilder {
         for &id in ids {
             parts.push((id, self.segment(id)?.payload()));
         }
-        self.entity_with_label(kind, None, jumbf_type, &parts)
+        self.entity_described(kind, None, None, jumbf_type, &parts)
     }
 
     /// Declare an entity from explicit `(segment, range)` parts. Each range must
     /// lie within its segment's extent.
     pub fn entity(&mut self, kind: SegmentKind, parts: &[(SegmentId, ByteRange)]) -> Result<()> {
-        self.entity_with_label(kind, None, None, parts)
+        self.entity_described(kind, None, None, None, parts)
     }
 
     /// Like [`entity`](Self::entity), with a container-defined [label](Entity::label).
@@ -956,13 +972,26 @@ impl StructureBuilder {
         label: impl Into<Cow<'static, str>>,
         parts: &[(SegmentId, ByteRange)],
     ) -> Result<()> {
-        self.entity_with_label(kind, Some(label.into()), None, parts)
+        self.entity_described(kind, Some(label.into()), None, None, parts)
     }
 
-    fn entity_with_label(
+    /// Like [`entity_labelled`](Self::entity_labelled), with the
+    /// [media type](Entity::media_type) of the data as well. Either may be `None`.
+    pub fn entity_with_media_type(
         &mut self,
         kind: SegmentKind,
         label: Option<Cow<'static, str>>,
+        media_type: Option<Cow<'static, str>>,
+        parts: &[(SegmentId, ByteRange)],
+    ) -> Result<()> {
+        self.entity_described(kind, label, media_type, None, parts)
+    }
+
+    fn entity_described(
+        &mut self,
+        kind: SegmentKind,
+        label: Option<Cow<'static, str>>,
+        media_type: Option<Cow<'static, str>>,
         jumbf_type: Option<[u8; 16]>,
         parts: &[(SegmentId, ByteRange)],
     ) -> Result<()> {
@@ -980,6 +1009,7 @@ impl StructureBuilder {
         self.entities.push(Entity {
             kind,
             label,
+            media_type,
             jumbf_type,
             first,
             rest,
