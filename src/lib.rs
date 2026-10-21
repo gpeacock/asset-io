@@ -68,6 +68,7 @@ mod handler;
 mod mapped;
 pub mod plan;
 mod range;
+#[cfg(any(feature = "jpeg", feature = "png", feature = "bmff", feature = "riff"))]
 mod readahead;
 mod registry;
 mod segment;
