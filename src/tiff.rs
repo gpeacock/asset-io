@@ -1,3 +1,16 @@
+// Copyright 2026 Adobe. All rights reserved.
+// This file is licensed to you under the Apache License,
+// Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
+// or the MIT license (http://opensource.org/licenses/MIT),
+// at your option.
+
+// Unless required by applicable law or agreed to in writing,
+// this software is distributed on an "AS IS" BASIS, WITHOUT
+// WARRANTIES OR REPRESENTATIONS OF ANY KIND, either express or
+// implied. See the LICENSE-MIT and LICENSE-APACHE files for the
+// specific language governing permissions and limitations under
+// each license.
+
 //! Minimal TIFF/EXIF parser
 //!
 //! This module provides lightweight TIFF parsing for:
@@ -12,6 +25,9 @@
 //! - Tags: tag ID (2), type (2), count (4), value/offset (4)
 
 use crate::error::Result;
+use crate::segment::SegmentKind;
+use crate::structure::Structure;
+use crate::thumbnail::{Thumbnail, ThumbnailKind};
 use std::io::{Cursor, Read, Seek, SeekFrom};
 
 /// TIFF/EXIF tag IDs
@@ -472,6 +488,48 @@ fn parse_thumbnail_from_ifd(
             height,
         })),
         _ => Ok(None),
+    }
+}
+
+/// The TIFF header onward. Some writers put the JPEG-style `Exif\0\0` prefix in
+/// containers (WebP) that do not use it; it is skipped when present.
+fn tiff_data(data: &[u8]) -> &[u8] {
+    data.strip_prefix(b"Exif\0\0").unwrap_or(data)
+}
+
+/// EXIF access for any container that reports [`SegmentKind::Exif`] entities
+/// (JPEG `APP1`, PNG `eXIf`). The entity payload starts at the TIFF header.
+impl Structure {
+    /// Basic EXIF fields from the first EXIF entity, or `None` if there is none or
+    /// it is not valid TIFF.
+    pub fn exif_info<R: Read + Seek>(&self, src: &mut R) -> Result<Option<ExifInfo>> {
+        match self.entities(SegmentKind::Exif).next() {
+            Some(e) => parse_exif_info(tiff_data(&self.read_entity(src, e)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// The JPEG thumbnail embedded in the first EXIF entity, if present and
+    /// entirely inside it.
+    pub(crate) fn exif_thumbnail<R: Read + Seek>(&self, src: &mut R) -> Result<Option<Thumbnail>> {
+        let Some(e) = self.entities(SegmentKind::Exif).next() else {
+            return Ok(None);
+        };
+        let data = self.read_entity(src, e)?;
+        let exif = tiff_data(&data);
+        let Some(info) = parse_thumbnail_info(exif)? else {
+            return Ok(None);
+        };
+        let start = info.offset as usize;
+        let Some(end) = start.checked_add(info.size as usize) else {
+            return Ok(None);
+        };
+        Ok(exif.get(start..end).map(|bytes| Thumbnail {
+            data: bytes.to_vec(),
+            format: ThumbnailKind::Jpeg,
+            width: info.width,
+            height: info.height,
+        }))
     }
 }
 
