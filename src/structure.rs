@@ -222,6 +222,8 @@ impl Structure {
         .ok()
     }
 
+    // Used by the built-in writers; which ones depends on the enabled features.
+    #[allow(dead_code)]
     /// How many leading segments are the container's own structure.
     pub(crate) fn box_count(&self) -> usize {
         self.boxes
@@ -394,7 +396,7 @@ impl Structure {
         Ok(())
     }
 
-    /// Read a range into memory. Fails above [`MAX_SEGMENT_SIZE`]; use
+    /// Read a range into memory. Fails above `MAX_SEGMENT_SIZE`; use
     /// [`stream_range`](Self::stream_range) for large ranges.
     pub fn read_range<R: Read + Seek>(&self, src: &mut R, range: ByteRange) -> Result<Vec<u8>> {
         let mut out = Vec::new();
@@ -561,7 +563,7 @@ impl Structure {
     }
 
     /// An entity's bytes from `data`. Borrowed, with no copy, when the entity is
-    /// a single part; copied (up to [`MAX_SEGMENT_SIZE`]) when it spans several.
+    /// a single part; copied (up to `MAX_SEGMENT_SIZE`) when it spans several.
     pub fn slice_entity<'a>(&self, data: &'a [u8], entity: &Entity) -> Result<Cow<'a, [u8]>> {
         let mut parts = entity.parts();
         let Some(first) = parts.next() else {
@@ -599,7 +601,7 @@ impl Structure {
     /// Deliver every byte of the asset to `sink`, in file order, tagged with its
     /// segment and role: the read-side counterpart of [`write`](Self::write). Runs
     /// the sink would skip ([`Sink::wants`]) are not read. Chunks are at most
-    /// [`DEFAULT_CHUNK_SIZE`] bytes and borrow one reused buffer.
+    /// `DEFAULT_CHUNK_SIZE` bytes and borrow one reused buffer.
     pub fn read<R: Read + Seek>(&self, src: &mut R, sink: &mut dyn Sink) -> Result<()> {
         sink.begin(self)?;
         let mut buf = vec![0u8; DEFAULT_CHUNK_SIZE];

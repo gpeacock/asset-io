@@ -17,6 +17,8 @@
 ///
 /// Specifies how to handle a particular type of metadata when writing an asset.
 /// By default, all metadata is kept unchanged.
+// Only the built-in writers read the payload; none may be enabled.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Default)]
 pub(crate) enum MetadataUpdate {
     /// Keep existing metadata (default)
