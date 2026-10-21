@@ -398,7 +398,7 @@ fn hostile_truncation_and_mutation() {
         for i in 0..400 {
             let mut m = bytes[..head].to_vec();
             for _ in 0..1 + (i % 4) {
-                let pos = if rng.next() % 2 == 0 {
+                let pos = if rng.next().is_multiple_of(2) {
                     (rng.next() as usize) % m.len().min(512)
                 } else {
                     (rng.next() as usize) % m.len()

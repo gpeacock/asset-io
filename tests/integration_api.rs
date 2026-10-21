@@ -49,14 +49,12 @@ fn store(uuid: u8, children: &[&[u8]]) -> Vec<u8> {
     boxed(b"jumb", &body)
 }
 
+/// An entity as a caller observes it: kind, label, and its parts as
+/// (segment index, offset, length).
+type EntityShape = (SegmentKind, Option<String>, Vec<(usize, u64, u64)>);
+
 /// Everything about a layout a caller can observe.
-fn shape(
-    s: &Structure,
-) -> (
-    u64,
-    Vec<asset_io::Segment>,
-    Vec<(SegmentKind, Option<String>, Vec<(usize, u64, u64)>)>,
-) {
+fn shape(s: &Structure) -> (u64, Vec<asset_io::Segment>, Vec<EntityShape>) {
     let mut entities = Vec::new();
     for kind in [
         SegmentKind::Jumbf,

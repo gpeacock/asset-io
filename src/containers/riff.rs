@@ -838,7 +838,7 @@ mod tests {
         // VP8L: signature, then 14-bit width-1 and height-1 packed: 3 x 2
         // (width - 1 = 2 in the low bits; height - 1 = 1 split across the words).
         let vp8l = chunk(b"VP8L", &[0x2f, 0x02, 0x40, 0, 0, 0]);
-        let bare = riff(b"WEBP", &[vp8l.clone()]);
+        let bare = riff(b"WEBP", std::slice::from_ref(&vp8l));
 
         // No VP8X: one is created first, from the image size.
         let out = rewrite(&bare, &Updates::new().set_xmp(b"<x/>".to_vec())).unwrap();

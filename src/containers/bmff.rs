@@ -1852,7 +1852,7 @@ mod tests {
     #[test]
     fn a_new_manifest_needs_a_decision_about_merkle_boxes() {
         let (m1, m2) = (jman("m1", b"1"), jman("m2", b"2"));
-        let first = jstore(&[m1.clone()]);
+        let first = jstore(std::slice::from_ref(&m1));
         let (f, _) = media_file(
             &[c2pa_box(MANIFEST, &first)],
             &[c2pa_box(MERKLE, b"D")],
@@ -2118,7 +2118,7 @@ mod tests {
     #[test]
     fn an_update_keeps_the_manifest_as_original_and_adds_an_update_box() {
         let (m1, m2) = (jman("m1", b"1"), jman("m2", b"2"));
-        let first = jstore(&[m1.clone()]);
+        let first = jstore(std::slice::from_ref(&m1));
         let (f, e0) = media_file(&[c2pa_box(MANIFEST, &first)], &[], None);
         let out = rewrite(
             &f,
@@ -2144,8 +2144,8 @@ mod tests {
     fn later_updates_replace_the_update_store() {
         let (m1, m2, m3) = (jman("m1", b"1"), jman("m2", b"2"), jman("m3", b"3"));
         for before_moov in [false, true] {
-            let update = c2pa_box(UPDATE, &jstore(&[m2.clone()]));
-            let original = c2pa_box(ORIGINAL, &jstore(&[m1.clone()]));
+            let update = c2pa_box(UPDATE, &jstore(std::slice::from_ref(&m2)));
+            let original = c2pa_box(ORIGINAL, &jstore(std::slice::from_ref(&m1)));
             let (f, _) = if before_moov {
                 media_file(&[original, update], &[], None)
             } else {
@@ -2157,7 +2157,10 @@ mod tests {
                 payload_of(&out, UPDATE).unwrap(),
                 jstore(&[m2.clone(), m3.clone()])
             );
-            assert_eq!(payload_of(&out, ORIGINAL).unwrap(), jstore(&[m1.clone()]));
+            assert_eq!(
+                payload_of(&out, ORIGINAL).unwrap(),
+                jstore(std::slice::from_ref(&m1))
+            );
             // An update box ahead of the media moves it; the offsets follow.
             assert!(
                 media_at(&out, stco_entry(&out)),
@@ -2182,7 +2185,7 @@ mod tests {
 
         // Nothing to update.
         let (clean, _) = media_file(&[], &[], None);
-        let full = jstore(&[m1.clone()]);
+        let full = jstore(std::slice::from_ref(&m1));
         let out = rewrite(&clean, &Updates::new().set_jumbf(full.clone()).as_update()).unwrap();
         assert_eq!(payload_of(&out, MANIFEST).unwrap(), full);
 
@@ -2190,8 +2193,8 @@ mod tests {
         // and the old update store is gone.
         let (f, _) = media_file(
             &[
-                c2pa_box(ORIGINAL, &jstore(&[m1.clone()])),
-                c2pa_box(UPDATE, &jstore(&[m2.clone()])),
+                c2pa_box(ORIGINAL, &jstore(std::slice::from_ref(&m1))),
+                c2pa_box(UPDATE, &jstore(std::slice::from_ref(&m2))),
             ],
             &[],
             None,
@@ -2204,7 +2207,11 @@ mod tests {
         assert!(media_at(&out, stco_entry(&out)));
 
         // Set after update clears the hint.
-        let (f, _) = media_file(&[c2pa_box(MANIFEST, &jstore(&[m1.clone()]))], &[], None);
+        let (f, _) = media_file(
+            &[c2pa_box(MANIFEST, &jstore(std::slice::from_ref(&m1)))],
+            &[],
+            None,
+        );
         let extended = jstore(&[m1.clone(), jman("m9", b"9")]);
         let plain = Updates::new().set_jumbf(extended.clone());
         let out = rewrite(&f, &plain).unwrap();

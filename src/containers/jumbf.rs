@@ -218,10 +218,10 @@ mod tests {
     #[test]
     fn the_children_after_the_frozen_ones_are_the_addition() {
         let (m1, m2, m3) = (manifest(b"1"), manifest(b"2"), manifest(b"3"));
-        let frozen = superbox(&STORE, &[m1.clone()]);
+        let frozen = superbox(&STORE, std::slice::from_ref(&m1));
 
         let one = addition_to(&frozen, &superbox(&STORE, &[m1.clone(), m2.clone()])).unwrap();
-        assert_eq!(one.unwrap(), superbox(&STORE, &[m2.clone()]));
+        assert_eq!(one.unwrap(), superbox(&STORE, std::slice::from_ref(&m2)));
 
         let two = addition_to(&frozen, &superbox(&STORE, &[m1, m2.clone(), m3.clone()])).unwrap();
         assert_eq!(two.unwrap(), superbox(&STORE, &[m2, m3]));
@@ -230,7 +230,7 @@ mod tests {
     #[test]
     fn extend_undoes_addition_to() {
         let (m1, m2, m3) = (manifest(b"1"), manifest(b"2"), manifest(b"3"));
-        let frozen = superbox(&STORE, &[m1.clone()]);
+        let frozen = superbox(&STORE, std::slice::from_ref(&m1));
         let full = superbox(&STORE, &[m1, m2, m3]);
         let add = addition_to(&frozen, &full).unwrap().unwrap();
         assert_eq!(extend(&frozen, &add).unwrap(), full);
@@ -248,9 +248,11 @@ mod tests {
         let frozen = superbox(&STORE, &[m1.clone(), m2.clone()]);
         // Nothing added, fewer children, a changed child, another type.
         assert!(addition_to(&frozen, &frozen).unwrap().is_none());
-        assert!(addition_to(&frozen, &superbox(&STORE, &[m1.clone()]))
-            .unwrap()
-            .is_none());
+        assert!(
+            addition_to(&frozen, &superbox(&STORE, std::slice::from_ref(&m1)))
+                .unwrap()
+                .is_none()
+        );
         let changed = superbox(&STORE, &[m1.clone(), manifest(b"X"), manifest(b"3")]);
         assert!(addition_to(&frozen, &changed).unwrap().is_none());
         let other = superbox(&OTHER, &[m1, m2, manifest(b"3")]);
