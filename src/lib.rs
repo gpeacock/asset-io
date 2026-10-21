@@ -63,6 +63,7 @@
 pub mod containers;
 mod crc;
 mod error;
+mod execute;
 mod handler;
 #[cfg(feature = "memory-mapped")]
 mod mapped;
@@ -84,6 +85,7 @@ mod xmp;
 
 pub use crc::Crc32;
 pub use error::{Error, Result};
+pub use execute::{Action, Execution};
 pub use handler::{ContainerHandler, FormatSpec, ReadSeek, ReadWriteSeek, DETECT_LEN};
 #[cfg(feature = "memory-mapped")]
 pub use mapped::MappedFile;

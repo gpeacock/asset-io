@@ -22,9 +22,10 @@
 //! that does no I/O itself), because the plan is plain data.
 
 use crate::error::{Error, Result};
+use crate::execute::{Action, Execution};
 use crate::range::ByteRange;
 use crate::segment::{Role, Segment};
-use crate::sink::{flush_run, write_buffer_len, Emitter, Piece, Sink, RUN_WINDOWS};
+use crate::sink::Sink;
 use crate::structure::{SegmentId, Structure};
 use std::borrow::Cow;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -112,7 +113,7 @@ impl Relocate {
     }
 
     /// Rewrite the offset in each whole entry of `block`.
-    fn apply(&self, block: &mut [u8]) -> Result<()> {
+    pub(crate) fn apply(&self, block: &mut [u8]) -> Result<()> {
         let (off, w) = (self.field_off as usize, self.width as usize);
         for entry in block.chunks_exact_mut(self.stride as usize) {
             let f = &mut entry[off..off + w];
@@ -280,6 +281,12 @@ impl<'a> WritePlan<'a> {
         self.structure
     }
 
+    /// Start carrying the plan out, step by step, with the I/O left to the caller;
+    /// see [`Execution`].
+    pub fn start(&self) -> Execution<'_, 'a> {
+        Execution::new(self)
+    }
+
     /// Perform the write: run every step against `src`, write the bytes to `out`
     /// and deliver them to `sink`. `out` is written from its current position;
     /// offsets reported to the sink are relative to the first byte written.
@@ -287,108 +294,34 @@ impl<'a> WritePlan<'a> {
     /// Fails, and may leave partial output, if the steps do not produce exactly
     /// the structure: bytes at the wrong offset, in the wrong role, or too few or too
     /// many of them.
+    ///
+    /// This drives [`start`](Self::start) with blocking reads and writes.
     pub fn execute<R, W, S>(&self, src: &mut R, out: &mut W, sink: &mut S) -> Result<()>
     where
         R: Read + Seek + ?Sized,
         W: Write + ?Sized,
         S: Sink + ?Sized,
     {
-        sink.begin(&self.structure)?;
-
-        let chunk = write_buffer_len(self.structure.total_size());
-        let mut buf = vec![0u8; chunk];
-        // Source regions that are contiguous in `src` are read and written as one
-        // run (see `Emitter::copy_run`). A run is flushed at a gap, at bytes the
-        // handler supplies, or, between segments, once it spans RUN_WINDOWS
-        // buffers, which bounds `pieces` however many small segments there are.
-        let run_limit = (chunk as u64).saturating_mul(RUN_WINDOWS);
-        let mut pieces: Vec<Piece> = Vec::new();
-        let mut run_len = 0u64;
-
-        let mut em = Emitter::new(out, sink, &self.structure);
-        for step in &self.steps {
-            match step {
-                Step::Copy {
-                    dest,
-                    role,
-                    src: range,
-                } => {
-                    if range.is_empty() {
-                        continue;
+        let mut run = self.start();
+        // Where the source stream is, so that a read that continues the last one
+        // does not seek.
+        let mut at: Option<u64> = None;
+        loop {
+            match run.step(sink)? {
+                Action::Read { offset, buf } => {
+                    if at != Some(offset) {
+                        src.seek(SeekFrom::Start(offset))?;
                     }
-                    if let Some(last) = pieces.last() {
-                        let gap = last.range.end() != range.offset();
-                        if gap || (last.dest != *dest && run_len >= run_limit) {
-                            flush_run(&mut em, src, &mut pieces, &mut buf)?;
-                            run_len = 0;
-                        }
-                    }
-                    run_len = run_len.saturating_add(range.len());
-                    pieces.push(Piece {
-                        dest: *dest,
-                        role: *role,
-                        range: *range,
-                    });
+                    src.read_exact(buf)?;
+                    at = Some(offset + buf.len() as u64);
                 }
-                Step::Put { dest, role, data } => {
-                    flush_run(&mut em, src, &mut pieces, &mut buf)?;
-                    run_len = 0;
-                    em.enter_segment(*dest)?;
-                    em.put(*role, data)?;
-                }
-                Step::Relocate {
-                    dest,
-                    role,
-                    src: range,
-                    rule,
-                } => {
-                    flush_run(&mut em, src, &mut pieces, &mut buf)?;
-                    run_len = 0;
-                    em.enter_segment(*dest)?;
-                    relocate(&mut em, src, *role, *range, rule, &mut buf)?;
-                }
+                Action::Write(bytes) => out.write_all(bytes)?,
+                Action::Done => break,
             }
         }
-        flush_run(&mut em, src, &mut pieces, &mut buf)?;
-        em.finish()
+        out.flush()?;
+        Ok(())
     }
-}
-
-/// Copy `range` through `buf`, rewriting the offsets in it.
-fn relocate<R, W, S>(
-    em: &mut Emitter<'_, W, S>,
-    src: &mut R,
-    role: Role,
-    range: ByteRange,
-    rule: &Relocate,
-    buf: &mut [u8],
-) -> Result<()>
-where
-    R: Read + Seek + ?Sized,
-    W: Write + ?Sized,
-    S: Sink + ?Sized,
-{
-    let stride = rule.stride as usize;
-    if !range.len().is_multiple_of(stride as u64) {
-        return Err(Error::InvalidSegment {
-            offset: range.offset(),
-            reason: "offset table is not a whole number of entries".into(),
-        });
-    }
-    let per_block = (buf.len() / stride).max(1);
-    let mut left = range.len() / stride as u64;
-    src.seek(SeekFrom::Start(range.offset()))?;
-    while left > 0 {
-        let n = left.min(per_block as u64) as usize;
-        let block = buf
-            .get_mut(..n * stride)
-            .ok_or_else(|| Error::InvalidFormat("copy buffer smaller than a table entry".into()))?;
-        src.read_exact(block)?;
-        rule.apply(block)?;
-        em.put(role, block)?;
-        left -= n as u64;
-    }
-    Ok(())
 }
 
 impl Structure {
