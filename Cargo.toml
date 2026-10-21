@@ -8,6 +8,7 @@ description = "Streaming, container-agnostic access to media file structure and 
 repository = "https://github.com/gpeacock/asset-io"
 keywords = ["asset", "c2pa", "xmp", "jumbf", "metadata"]
 categories = ["multimedia", "parsing"]
+exclude = ["tests/", "fuzz/", "fuzz.sh", "FUZZING_SETUP.md", "Makefile"]
 
 [dependencies]
 thiserror = "1.0"
@@ -23,7 +24,7 @@ tempfile = "3"
 criterion = "0.5"
 
 [features]
-default = ["jpeg", "png", "bmff", "riff"]
+default = ["jpeg", "png"]
 jpeg = ["md5", "memchr"]
 png = []
 bmff = []

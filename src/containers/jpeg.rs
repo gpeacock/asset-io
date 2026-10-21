@@ -20,7 +20,7 @@
 //! a restart marker. Progressive files therefore have one such segment per scan,
 //! with their DHT/DRI markers as ordinary segments between them. A scan that
 //! contains restart markers is flagged as subdividing; see
-//! [`Structure::elements`](crate::Structure::elements) and [`subdivide`].
+//! [`Structure::elements`](crate::Structure::elements) and `subdivide`.
 //!
 //! JUMBF is carried in JPEG XT APP11 segments. A manifest larger than one
 //! segment spans several; they form a single [`Entity`](crate::Entity) whose

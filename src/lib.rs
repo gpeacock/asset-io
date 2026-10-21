@@ -101,4 +101,5 @@ pub use xmp::MiniXmp;
 
 #[cfg(feature = "bmff")]
 pub(crate) use updates::MerkleUpdate;
+#[allow(unused_imports)] // used by the built-in containers only
 pub(crate) use updates::MetadataUpdate;

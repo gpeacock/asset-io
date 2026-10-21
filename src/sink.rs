@@ -78,6 +78,8 @@ where
     }
 }
 
+// Used by the built-in writers; which ones depends on the enabled features.
+#[allow(dead_code)]
 /// One source region of a run for [`Emitter::copy_run`], and the segment and role it
 /// lands in.
 #[derive(Debug, Clone, Copy)]
@@ -87,6 +89,8 @@ pub(crate) struct Piece {
     pub(crate) range: ByteRange,
 }
 
+// Used by the built-in writers; which ones depends on the enabled features.
+#[allow(dead_code)]
 /// Writes to `out`, forwards to the sink, and checks the bytes land where the
 /// destination layout says they should.
 pub(crate) struct Emitter<'a, W: Write, S: Sink + ?Sized> {
@@ -97,6 +101,7 @@ pub(crate) struct Emitter<'a, W: Write, S: Sink + ?Sized> {
     cur: Option<SegmentId>,
 }
 
+#[allow(dead_code)] // used by the built-in writers; which ones depends on the features
 impl<'a, W: Write, S: Sink + ?Sized> Emitter<'a, W, S> {
     pub(crate) fn new(out: &'a mut W, sink: &'a mut S, dest: &'a Structure) -> Self {
         Self {
@@ -263,24 +268,29 @@ impl<'a, W: Write, S: Sink + ?Sized> Emitter<'a, W, S> {
 
 /// How many copy buffers a run may span before it is flushed. Bounds the pieces a
 /// writer holds, however many small segments the asset has.
+#[allow(dead_code)] // used by the built-in writers; which ones depends on the features
 pub(crate) const RUN_WINDOWS: u64 = 16;
 
 /// Copy buffer for large writes. Measured on one machine (Apple M2, 128 MB PNGs): 64
 /// and 128 KiB were slow in memory, 16 and 32 KiB slow from disk, 256 KiB good in
 /// both. Not measured on other CPUs.
+#[allow(dead_code)] // used by the built-in writers; which ones depends on the features
 const WRITE_BUFFER: usize = 256 * 1024;
 
 /// Smallest copy buffer.
+#[allow(dead_code)] // used by the built-in writers; which ones depends on the features
 const MIN_WRITE_BUFFER: usize = 4096;
 
 /// Size of the copy buffer for writing an output of `total` bytes. It is also the
 /// read and write window of a run, so a small asset gets a buffer no larger than
 /// itself and does not pay for a large allocation.
+#[allow(dead_code)] // used by the built-in writers; which ones depends on the features
 pub(crate) fn write_buffer_len(total: u64) -> usize {
     (total.min(WRITE_BUFFER as u64) as usize).max(MIN_WRITE_BUFFER)
 }
 
 /// Copy the pending run, if any, and clear it.
+#[allow(dead_code)] // used by the built-in writers; which ones depends on the features
 pub(crate) fn flush_run<R, W, S>(
     em: &mut Emitter<'_, W, S>,
     src: &mut R,
