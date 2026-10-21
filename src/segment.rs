@@ -2,7 +2,6 @@
 
 use crate::error::{Error, Result};
 use crate::range::ByteRange;
-use std::borrow::Cow;
 
 /// Entity labels that mean the same in every container.
 ///
@@ -20,6 +19,11 @@ pub mod labels {
     /// A Merkle tree box.
     pub const MERKLE: &str = "merkle";
 }
+
+/// The name a box-based hash gives the bytes beyond the end of a container's own
+/// structure, listed as its last box (C2PA 18.7.2). See
+/// [`Structure::trailing`](crate::Structure::trailing).
+pub const AFTER_BOX: &str = "c2pa.after";
 
 /// Chunk size for streaming large segments (64KB)
 pub const DEFAULT_CHUNK_SIZE: usize = 65536;
@@ -125,46 +129,6 @@ impl Name {
     /// True for unnamed elements (signature bytes, fill, trailing data).
     pub const fn is_none(&self) -> bool {
         matches!(self, Name::None)
-    }
-
-    /// The element's name as a box-based hash lists it, or `None` if it has no
-    /// name.
-    ///
-    /// JPEG markers use the symbols of ISO/IEC 10918-1 Table B.1 (`SOI`, `APP11`,
-    /// `SOS`, `RST3`, ...). Four character codes are returned as text. This is the
-    /// only place that mapping lives, so callers need no per-container tables.
-    pub fn box_name(&self) -> Option<Cow<'static, str>> {
-        match *self {
-            Name::None => None,
-            Name::Marker(m) => Some(jpeg_marker_symbol(m)),
-            Name::FourCC(cc) => Some(Cow::Owned(String::from_utf8_lossy(&cc).into_owned())),
-            Name::Id(n) => Some(Cow::Owned(n.to_string())),
-        }
-    }
-}
-
-/// ISO/IEC 10918-1 Table B.1 symbol for a marker code.
-fn jpeg_marker_symbol(m: u8) -> Cow<'static, str> {
-    match m {
-        0x01 => "TEM".into(),
-        0xC4 => "DHT".into(),
-        0xC8 => "JPG".into(),
-        0xCC => "DAC".into(),
-        0xC0..=0xCF => Cow::Owned(format!("SOF{}", m - 0xC0)),
-        0xD0..=0xD7 => Cow::Owned(format!("RST{}", m - 0xD0)),
-        0xD8 => "SOI".into(),
-        0xD9 => "EOI".into(),
-        0xDA => "SOS".into(),
-        0xDB => "DQT".into(),
-        0xDC => "DNL".into(),
-        0xDD => "DRI".into(),
-        0xDE => "DHP".into(),
-        0xDF => "EXP".into(),
-        0xE0..=0xEF => Cow::Owned(format!("APP{}", m - 0xE0)),
-        0xF0..=0xFD => Cow::Owned(format!("JPG{}", m - 0xF0)),
-        0xFE => "COM".into(),
-        // 0x02..=0xBF are reserved (RES); 0x00 and 0xFF are never markers.
-        _ => "RES".into(),
     }
 }
 
@@ -284,30 +248,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn box_names() {
-        let n = |m| Name::Marker(m).box_name().unwrap().into_owned();
-        assert_eq!(n(0xD8), "SOI");
-        assert_eq!(n(0xD9), "EOI");
-        assert_eq!(n(0xDA), "SOS");
-        assert_eq!(n(0xE0), "APP0");
-        assert_eq!(n(0xEB), "APP11");
-        assert_eq!(n(0xEF), "APP15");
-        assert_eq!(n(0xC0), "SOF0");
-        assert_eq!(n(0xC2), "SOF2");
-        assert_eq!(n(0xC4), "DHT");
-        assert_eq!(n(0xCC), "DAC");
-        assert_eq!(n(0xD0), "RST0");
-        assert_eq!(n(0xD7), "RST7");
-        assert_eq!(n(0xDB), "DQT");
-        assert_eq!(n(0xDD), "DRI");
-        assert_eq!(n(0xF0), "JPG0");
-        assert_eq!(n(0xFD), "JPG13");
-        assert_eq!(n(0xFE), "COM");
-        assert_eq!(n(0x10), "RES");
-        assert_eq!(Name::FourCC(*b"IHDR").box_name().unwrap(), "IHDR");
-        assert_eq!(Name::FourCC(*b"PNGh").box_name().unwrap(), "PNGh");
-        assert!(Name::None.box_name().is_none());
+    fn none_name() {
         assert!(Name::None.is_none());
+        assert!(!Name::Marker(0xD8).is_none());
     }
 
     #[test]

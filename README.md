@@ -55,9 +55,11 @@ Each handler has an `id()` (`"jpeg"`, `"png"`, `"bmff"`, `"riff"`) and declares 
 
 ## Multi-part assets
 
-`Structure::subassets()` lists the parts of an asset: contiguous, in file order, covering every byte, each with its absolute `range()`, media type, segments, and a `relative(offset)` helper for part-relative hash ranges. A file that embeds nothing else has one part. A JPEG that holds several images (Multi-Picture Format, Ultra HDR) has one per image, plus one for any data after the last image; their markers are listed in order, so a box hash can cover them as one asset, or each part can be hashed on its own for a C2PA multi-asset hash. asset-io reports the geometry; the caller decides how to hash it.
+`Structure::subassets()` lists the parts of an asset: contiguous, in file order, covering every byte, each with its absolute `range()`, media type, segments, and a `relative(offset)` helper for part-relative hash ranges. A file that embeds nothing else has one part. A JPEG that holds several images (Multi-Picture Format, Ultra HDR) has one per image, plus one for any data after the last image; their markers are listed in order, so each part can be hashed on its own for a C2PA multi-asset hash. asset-io reports the geometry; the caller decides how to hash it.
 
-Edits to a multi-picture JPEG add metadata to the first image and shift the sizes and offsets recorded in its MPF index to match. If the index disagrees with the images, the edit fails instead of writing a stale index.
+`Structure::trailing()` is the range of bytes beyond the end of the container's own structure: data after the last chunk, or everything after the first image of a multi-image JPEG. A box hash of the whole asset lists the structure's boxes and then these bytes as one last box named `AFTER_BOX` (`c2pa.after`, C2PA 18.7.2); the hash of a single part never includes it. JPEG and PNG report it; the other containers do not yet, so bytes after their last box are not covered by a box hash.
+
+Edits to a multi-picture JPEG add metadata to the first image and shift the sizes and offsets recorded in its MPF index to match. The edit fails instead of writing a stale or ambiguous index: the index must be well formed, appear once, and record the offset of every image and the size of every image but the first exactly. The first image's size may be recorded short of the image, as in Pixel Ultra HDR files, and is corrected on an edit. Parsing and copying unchanged never consult it. Bytes after an image that start like another image but do not parse as one are trailing data.
 
 ## Zero-copy
 

@@ -186,9 +186,34 @@ pub struct Structure {
     segments: Vec<Segment>,
     entities: Vec<Entity>,
     subassets: Vec<SubAsset>,
+    /// How many leading segments are the container's own structure. Segments from
+    /// here on are data beyond the end of it.
+    boxes: usize,
 }
 
 impl Structure {
+    /// The bytes beyond the end of the container's own structure, up to the end of
+    /// the file: data after the last chunk or box, and, in a multi-image file,
+    /// everything after the primary image. `None` when there are none, and for
+    /// containers that do not report it.
+    ///
+    /// A box-based hash lists these bytes as one final box named
+    /// [`AFTER_BOX`](crate::AFTER_BOX) (C2PA 18.7.2). A hash of one part of a
+    /// multi-asset file covers that part only and never includes them.
+    pub fn trailing(&self) -> Option<ByteRange> {
+        let first = self.segments.get(self.boxes)?;
+        ByteRange::new(
+            first.extent().offset(),
+            self.total_size - first.extent().offset(),
+        )
+        .ok()
+    }
+
+    /// How many leading segments are the container's own structure.
+    pub(crate) fn box_count(&self) -> usize {
+        self.boxes
+    }
+
     /// The parts of the asset, in file order: contiguous, non-overlapping, and
     /// covering every byte. A file that embeds nothing else has one, the whole
     /// file. A Multi-Picture Format JPEG has one per image, plus one for any data
@@ -731,6 +756,8 @@ pub struct StructureBuilder {
     entities: Vec<Entity>,
     /// Segment index and media type where each sub-asset after the primary starts.
     sub_starts: Vec<(usize, Option<Cow<'static, str>>)>,
+    /// Segment index where data beyond the container's structure starts, if declared.
+    boxes: Option<usize>,
 }
 
 impl StructureBuilder {
@@ -748,7 +775,19 @@ impl StructureBuilder {
             segments: Vec::new(),
             entities: Vec::new(),
             sub_starts: Vec::new(),
+            boxes: None,
         }
+    }
+
+    /// Declare that the container's own structure ends here: segments pushed from
+    /// now on are data beyond it (see [`Structure::trailing`]). Without a call, every
+    /// segment is part of the structure.
+    pub fn end_boxes(&mut self) -> Result<()> {
+        if self.boxes.is_some() {
+            return Err(Error::InvalidFormat("structure end declared twice".into()));
+        }
+        self.boxes = Some(self.segments.len());
+        Ok(())
     }
 
     /// Declare that the next segment pushed starts a new [`SubAsset`]. The first
@@ -762,6 +801,35 @@ impl StructureBuilder {
         }
         self.sub_starts.push((at, media_type));
         Ok(())
+    }
+
+    /// Undo the last [`begin_subasset`](Self::begin_subasset) and everything pushed
+    /// since, for a parser that found the sub-asset was not one after all. Returns
+    /// the offset where it started, which is also the cursor again.
+    ///
+    /// Fails if there is no sub-asset to undo, or if an entity already refers to one
+    /// of the segments being removed.
+    pub fn rollback_subasset(&mut self) -> Result<u64> {
+        let Some(&(at, _)) = self.sub_starts.last() else {
+            return Err(Error::InvalidFormat("no sub-asset to roll back".into()));
+        };
+        if self
+            .entities
+            .iter()
+            .any(|e| e.parts().any(|p| p.segment().index() >= at))
+        {
+            return Err(Error::InvalidFormat(
+                "an entity refers to the sub-asset being rolled back".into(),
+            ));
+        }
+        let start = self
+            .segments
+            .get(at)
+            .map_or(self.cursor, |s| s.extent().offset());
+        self.segments.truncate(at);
+        self.sub_starts.pop();
+        self.cursor = start;
+        Ok(start)
     }
 
     /// Offset where the next segment must start.
@@ -961,6 +1029,12 @@ impl StructureBuilder {
             start = end;
             media = next_media;
         }
+        let boxes = self.boxes.unwrap_or(self.segments.len());
+        if boxes > self.segments.len() {
+            return Err(Error::InvalidFormat(
+                "structure ends after the last segment".into(),
+            ));
+        }
         Ok(Structure {
             handler: self.handler,
             media_type: self.media_type,
@@ -968,6 +1042,7 @@ impl StructureBuilder {
             segments: self.segments,
             entities: self.entities,
             subassets,
+            boxes,
         })
     }
 }
@@ -1037,6 +1112,46 @@ mod tests {
             .unwrap();
         b.begin_subasset(None).unwrap();
         assert!(b.finish().is_err(), "trailing empty sub-asset");
+    }
+
+    #[test]
+    fn rolling_back_a_subasset_restores_the_cursor() {
+        let mut b = builder(30);
+        assert!(b.rollback_subasset().is_err(), "nothing to roll back");
+        b.push_span(SegmentKind::Header, Name::None, 10, 0, 0)
+            .unwrap();
+        b.begin_subasset(Some("a/b".into())).unwrap();
+        b.push_span(SegmentKind::Other, Name::None, 5, 0, 0)
+            .unwrap();
+        b.push_span(SegmentKind::Other, Name::None, 5, 0, 0)
+            .unwrap();
+        assert_eq!(b.rollback_subasset().unwrap(), 10);
+        assert_eq!(b.cursor(), 10);
+        assert!(b.rollback_subasset().is_err(), "already undone");
+        // The rest is pushed as part of the primary asset.
+        b.push_span(SegmentKind::Other, Name::None, 20, 0, 0)
+            .unwrap();
+        let s = b.finish().unwrap();
+        assert_eq!(s.subassets().len(), 1);
+        assert_eq!(s.segments().len(), 2);
+
+        // A sub-asset with nothing pushed yet rolls back too.
+        let mut b = builder(30);
+        b.push_span(SegmentKind::Header, Name::None, 10, 0, 0)
+            .unwrap();
+        b.begin_subasset(None).unwrap();
+        assert_eq!(b.rollback_subasset().unwrap(), 10);
+
+        // An entity that refers to the removed segments blocks it.
+        let mut b = builder(30);
+        let first = b
+            .push_span(SegmentKind::Header, Name::None, 10, 0, 0)
+            .unwrap();
+        b.begin_subasset(None).unwrap();
+        let second = b.push_span(SegmentKind::Xmp, Name::None, 4, 16, 0).unwrap();
+        b.entity_of_segments(SegmentKind::Xmp, &[second]).unwrap();
+        assert!(b.rollback_subasset().is_err());
+        let _ = first;
     }
 
     #[test]

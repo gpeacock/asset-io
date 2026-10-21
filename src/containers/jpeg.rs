@@ -22,24 +22,31 @@
 //! [`Structure::subassets`] reports one part per image, plus one for any data after
 //! the last image. Only the first image's XMP, EXIF and JUMBF are interpreted as the
 //! asset's; later images are left as plain segments. New metadata is inserted into
-//! the first image.
+//! the first image. Bytes that start like an image (`FF D8 FF`) but do not parse as
+//! one are trailing data, as they are after a single image.
 //!
 //! The MPF APP2 segment records each image's size and offset. When an edit changes
 //! the size of the first image or moves the block, the recorded values are shifted
-//! to match, so the output stays a valid MPF file. If the index does not match the
-//! images in the file, the edit is refused rather than writing a stale index;
-//! parsing and copying unchanged are not affected.
+//! to match, so the output stays a valid MPF file. The edit is refused rather than
+//! writing a stale or ambiguous index when the index is not one that can be edited
+//! safely: it must be well formed (one `MPEntry` array, outside the header and the
+//! IFD, agreeing with the stated image count), appear once, and record the offset
+//! of every image and the size of every image but the first exactly. The first
+//! image's size may be recorded short of the image, as in Pixel Ultra HDR files, and
+//! is rewritten to the true size; one that claims more than the image is refused.
+//! Parsing and copying unchanged never consult it.
 //!
 //! Not yet ported: EXIF thumbnail location.
 
 use crate::error::{Error, Result};
 use crate::handler::{ContainerHandler, FormatSpec, ReadSeek, ReadWriteSeek};
+use crate::segment::SegmentKind;
 use crate::segment::{Name, Role, Segment};
-use crate::segment::{SegmentKind, DEFAULT_CHUNK_SIZE};
-use crate::sink::{Emitter, Sink};
+use crate::sink::{flush_run, write_buffer_len, Emitter, Piece, Sink, RUN_WINDOWS};
 use crate::structure::{Part, SegmentId, Structure, StructureBuilder};
 use crate::ByteRange;
 use crate::{MetadataUpdate, Updates};
+use std::borrow::Cow;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::sync::{Arc, OnceLock};
 
@@ -115,9 +122,42 @@ pub fn handler() -> Arc<dyn ContainerHandler> {
 /// The JPEG container's [`ContainerHandler::id`].
 pub const ID: &str = "jpeg";
 
+/// ISO/IEC 10918-1 Table B.1 symbol for a marker code.
+fn marker_symbol(m: u8) -> Cow<'static, str> {
+    match m {
+        0x01 => "TEM".into(),
+        0xC4 => "DHT".into(),
+        0xC8 => "JPG".into(),
+        0xCC => "DAC".into(),
+        0xC0..=0xCF => Cow::Owned(format!("SOF{}", m - 0xC0)),
+        0xD0..=0xD7 => Cow::Owned(format!("RST{}", m - 0xD0)),
+        0xD8 => "SOI".into(),
+        0xD9 => "EOI".into(),
+        0xDA => "SOS".into(),
+        0xDB => "DQT".into(),
+        0xDC => "DNL".into(),
+        0xDD => "DRI".into(),
+        0xDE => "DHP".into(),
+        0xDF => "EXP".into(),
+        0xE0..=0xEF => Cow::Owned(format!("APP{}", m - 0xE0)),
+        0xF0..=0xFD => Cow::Owned(format!("JPG{}", m - 0xF0)),
+        0xFE => "COM".into(),
+        // 0x02..=0xBF are reserved (RES); 0x00 and 0xFF are never markers.
+        _ => "RES".into(),
+    }
+}
+
 impl ContainerHandler for JpegHandler {
     fn id(&self) -> &'static str {
         ID
+    }
+
+    fn box_name(&self, name: Name) -> Option<Cow<'static, str>> {
+        match name {
+            Name::Marker(m) => Some(marker_symbol(m)),
+            Name::None => None,
+            other => Some(Cow::Owned(other.to_string())),
+        }
     }
 
     fn formats(&self) -> &[FormatSpec] {
@@ -182,10 +222,94 @@ pub fn parse<R: Read + Seek>(src: &mut R) -> Result<Structure> {
     parse_with(handler(), src)
 }
 
+/// Size of the read-ahead window used while parsing. The markers of a typical JPEG
+/// fit in a few KiB. Measured on 24 fixtures (Apple M2): 4 KiB was as fast as or
+/// faster than 8, 16 and 32 KiB, from memory and from a file.
+const PARSE_WINDOW: usize = 4 * 1024;
+
+/// A read-ahead window over a seekable stream, for a parser that makes many small
+/// reads and seeks. A seek only records the position; the stream is touched when a
+/// read misses the window. A read at least as large as the window goes straight to
+/// the stream. Positions are the stream's own, and the stream's position after use
+/// is unspecified. The first seek must be absolute (`Start` or `End`).
+struct ReadAhead<'a, R: Read + Seek> {
+    inner: &'a mut R,
+    /// The window's contents; empty when there is none. Its capacity is never used
+    /// uninitialised: `read_to_end` fills spare capacity without zeroing it first.
+    buf: Vec<u8>,
+    window: usize,
+    /// Stream offset of `buf[0]`.
+    start: u64,
+    /// Logical position.
+    pos: u64,
+}
+
+impl<'a, R: Read + Seek> ReadAhead<'a, R> {
+    fn new(inner: &'a mut R, window: usize) -> Self {
+        Self {
+            inner,
+            buf: Vec::with_capacity(window),
+            window,
+            start: 0,
+            pos: 0,
+        }
+    }
+}
+
+impl<R: Read + Seek> Read for ReadAhead<'_, R> {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        if out.is_empty() {
+            return Ok(0);
+        }
+        let in_window = self.pos >= self.start && self.pos < self.start + self.buf.len() as u64;
+        if !in_window {
+            self.inner.seek(SeekFrom::Start(self.pos))?;
+            if out.len() >= self.window {
+                let n = self.inner.read(out)?;
+                self.pos += n as u64;
+                return Ok(n);
+            }
+            self.buf.clear();
+            let filled =
+                Read::take(&mut *self.inner, self.window as u64).read_to_end(&mut self.buf);
+            if let Err(e) = filled {
+                self.buf.clear();
+                return Err(e);
+            }
+            self.start = self.pos;
+            if self.buf.is_empty() {
+                return Ok(0);
+            }
+        }
+        let off = (self.pos - self.start) as usize;
+        let n = out.len().min(self.buf.len() - off);
+        out[..n].copy_from_slice(&self.buf[off..off + n]);
+        self.pos += n as u64;
+        Ok(n)
+    }
+}
+
+impl<R: Read + Seek> Seek for ReadAhead<'_, R> {
+    fn seek(&mut self, to: SeekFrom) -> std::io::Result<u64> {
+        self.pos = match to {
+            SeekFrom::Start(p) => p,
+            SeekFrom::Current(d) => self.pos.checked_add_signed(d).ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, "seek before start")
+            })?,
+            SeekFrom::End(d) => self.inner.seek(SeekFrom::End(d))?,
+        };
+        Ok(self.pos)
+    }
+}
+
 fn parse_with<R: Read + Seek>(
     handler: Arc<dyn ContainerHandler>,
     src: &mut R,
 ) -> Result<Structure> {
+    // A parse is a long run of reads of one to a few bytes, each preceded by a seek.
+    // From a `File` that is a syscall apiece; the window makes it a copy.
+    let mut ahead = ReadAhead::new(src, PARSE_WINDOW);
+    let src = &mut ahead;
     let total = src.seek(SeekFrom::End(0))?;
     src.seek(SeekFrom::Start(0))?;
     if total < 4 {
@@ -200,16 +324,85 @@ fn parse_with<R: Read + Seek>(
     let mut b = StructureBuilder::new(handler, "image/jpeg", total);
     b.push_span(SegmentKind::Header, Name::Marker(SOI), 2, 0, 0)?;
 
-    let mut offset = 2u64;
-    let mut xmp_open: Option<Vec<SegmentId>> = None;
-    let mut jumbf_open: Option<Open> = None;
-    // End offset of the last segment added to `jumbf_open`. C2PA A.3.1 requires the
-    // APP11 segments of one manifest to be sequential and contiguous.
-    let mut jumbf_end: u64 = 0;
-    // Only the first image carries the asset's metadata; later images of a
-    // multi-picture file are listed as segments and left uninterpreted.
-    let mut primary = true;
+    // Only the first image carries the asset's metadata.
+    let mut meta = Meta::default();
+    let mut offset = scan_image(src, &mut b, total, 2, true, &mut meta)?;
+    // The first image's markers are the structure. Everything after its EOI, later
+    // images and trailing data alike, is data beyond the end of it.
+    b.end_boxes()?;
+    if let Some(ids) = meta.xmp_open.take() {
+        b.entity_of_segments(SegmentKind::Xmp, &ids)?;
+    }
+    if let Some(o) = meta.jumbf_open.take() {
+        b.entity_of_segments_typed(SegmentKind::Jumbf, o.ty, &o.ids)?;
+    }
 
+    // Another image directly after this one makes a multi-picture file. Later
+    // images are listed as segments and left uninterpreted. Bytes that start like an
+    // image but are not one are trailing data, as they are in a single-image file:
+    // the layout is rolled back to the end of the last good image.
+    let mut multi = false;
+    while total - offset >= 4 && next_is_image(src, offset)? {
+        b.begin_subasset(Some("image/jpeg".into()))?;
+        match scan_image(src, &mut b, total, offset, false, &mut Meta::default()) {
+            Ok(end) => {
+                offset = end;
+                multi = true;
+            }
+            Err(e) if is_malformed(&e) => {
+                offset = b.rollback_subasset()?;
+                break;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+
+    if offset < total {
+        if multi {
+            b.begin_subasset(None)?;
+        }
+        b.push_span(SegmentKind::Other, Name::None, 0, total - offset, 0)?;
+    }
+    b.finish()
+}
+
+/// Whether `e` says the bytes are not a well-formed image, as opposed to a failure
+/// to read them, which must not be mistaken for trailing data.
+fn is_malformed(e: &Error) -> bool {
+    match e {
+        Error::InvalidFormat(_) | Error::InvalidSegment { .. } | Error::LimitExceeded { .. } => {
+            true
+        }
+        Error::Io(io) => io.kind() == std::io::ErrorKind::UnexpectedEof,
+        _ => false,
+    }
+}
+
+/// Metadata being assembled while the primary image is scanned.
+#[derive(Default)]
+struct Meta {
+    xmp_open: Option<Vec<SegmentId>>,
+    jumbf_open: Option<Open>,
+    /// End offset of the last segment added to `jumbf_open`. C2PA A.3.1 requires the
+    /// APP11 segments of one manifest to be sequential and contiguous.
+    jumbf_end: u64,
+}
+
+/// List the markers of one image, from `offset` through its `EOI`, and return the
+/// offset after it. Only the primary image's metadata is interpreted.
+fn scan_image<R: Read + Seek>(
+    src: &mut R,
+    b: &mut StructureBuilder,
+    total: u64,
+    mut offset: u64,
+    primary: bool,
+    meta: &mut Meta,
+) -> Result<u64> {
+    let Meta {
+        xmp_open,
+        jumbf_open,
+        jumbf_end,
+    } = meta;
     loop {
         if total - offset < 2 {
             return Err(Error::InvalidFormat("JPEG truncated: missing EOI".into()));
@@ -250,14 +443,7 @@ fn parse_with<R: Read + Seek>(
         match marker {
             EOI => {
                 b.push_span(SegmentKind::Other, Name::Marker(EOI), 2, 0, 0)?;
-                offset = mstart + 2;
-                // Another image directly after this one: a multi-picture file.
-                if total - offset >= 4 && next_is_image(src, offset)? {
-                    b.begin_subasset(Some("image/jpeg".into()))?;
-                    primary = false;
-                    continue;
-                }
-                break;
+                return Ok(mstart + 2);
             }
             0x01 | 0xD0..=0xD7 | SOI => {
                 b.push_span(SegmentKind::Other, Name::Marker(marker), 2, 0, 0)?;
@@ -354,7 +540,7 @@ fn parse_with<R: Read + Seek>(
                 let first = z <= 1;
                 let overhead = if first { 8 } else { 16 };
                 let continues = !first && jumbf_open.as_ref().is_some_and(|o| o.en == en);
-                if continues && mstart != jumbf_end {
+                if continues && mstart != *jumbf_end {
                     return Err(Error::InvalidFormat(
                         "JUMBF APP11 segments are not contiguous".into(),
                     ));
@@ -391,7 +577,7 @@ fn parse_with<R: Read + Seek>(
                 if let Some(ids) = xmp_open.take() {
                     b.entity_of_segments(SegmentKind::Xmp, &ids)?;
                 }
-                xmp_open = Some(vec![id]);
+                *xmp_open = Some(vec![id]);
             }
             Class::XmpExt => {
                 if let Some(ids) = xmp_open.as_mut() {
@@ -403,7 +589,7 @@ fn parse_with<R: Read + Seek>(
                     if let Some(o) = jumbf_open.take() {
                         b.entity_of_segments_typed(SegmentKind::Jumbf, o.ty, &o.ids)?;
                     }
-                    jumbf_open = Some(Open {
+                    *jumbf_open = Some(Open {
                         en,
                         ids: vec![id],
                         ty: jtype,
@@ -411,37 +597,23 @@ fn parse_with<R: Read + Seek>(
                 } else if let Some(o) = jumbf_open.as_mut() {
                     o.ids.push(id);
                 }
-                jumbf_end = mstart + seg_total;
+                *jumbf_end = mstart + seg_total;
             }
             Class::JumbfRaw => {
                 if let Some(o) = jumbf_open.take() {
                     b.entity_of_segments_typed(SegmentKind::Jumbf, o.ty, &o.ids)?;
                 }
-                jumbf_open = Some(Open {
+                *jumbf_open = Some(Open {
                     en: 0,
                     ids: vec![id],
                     ty: jtype,
                 });
-                jumbf_end = mstart + seg_total;
+                *jumbf_end = mstart + seg_total;
             }
         }
 
         offset = mstart + seg_total;
     }
-
-    if offset < total {
-        if !primary {
-            b.begin_subasset(None)?;
-        }
-        b.push_span(SegmentKind::Other, Name::None, 0, total - offset, 0)?;
-    }
-    if let Some(ids) = xmp_open.take() {
-        b.entity_of_segments(SegmentKind::Xmp, &ids)?;
-    }
-    if let Some(o) = jumbf_open.take() {
-        b.entity_of_segments_typed(SegmentKind::Jumbf, o.ty, &o.ids)?;
-    }
-    b.finish()
 }
 
 /// Whether another JPEG image starts at `offset` (`FF D8 FF`).
@@ -476,20 +648,56 @@ impl MpIndex {
             return None;
         }
         let ifd = me.u32(p, 4)? as usize;
+        if ifd < 8 {
+            return None;
+        }
         let count = me.u16(p, ifd)? as usize;
-        let mut found = None;
+        // The IFD: a count, the entries, and the offset of the next IFD.
+        let ifd_end = ifd.checked_add(2 + count * 12 + 4)?;
+        if ifd_end > p.len() {
+            return None;
+        }
+        let mut array = None;
+        let mut images = None;
         for i in 0..count {
-            let e = ifd.checked_add(2 + i * 12)?;
-            if me.u16(p, e)? == 0xB002 {
-                // Entry fields: tag, type, count (bytes), value (offset of the array).
-                found = Some((
-                    me.u32(p, e.checked_add(8)?)? as usize,
-                    me.u32(p, e + 4)? as usize,
-                ));
+            // Entry fields: tag, type, count, value (inline, or the offset of data).
+            let e = ifd + 2 + i * 12;
+            let (tag, ty, n, val) = (
+                me.u16(p, e)?,
+                me.u16(p, e + 2)?,
+                me.u32(p, e + 4)?,
+                me.u32(p, e + 8)?,
+            );
+            match tag {
+                // NumberOfImages: one LONG.
+                0xB001 => {
+                    if images.is_some() || ty != 4 || n != 1 {
+                        return None;
+                    }
+                    images = Some(val as usize);
+                }
+                // MPEntry: UNDEFINED, 16 bytes per image. A second one would leave
+                // readers disagreeing about which index is the real one.
+                0xB002 => {
+                    if array.is_some() || ty != 7 {
+                        return None;
+                    }
+                    array = Some((val as usize, n as usize));
+                }
+                _ => {}
             }
         }
-        let (at, len) = found?;
-        if len % 16 != 0 || at.checked_add(len)? > p.len() {
+        let (at, len) = array?;
+        let end = at.checked_add(len)?;
+        if len == 0 || len % 16 != 0 || end > p.len() {
+            return None;
+        }
+        // The entries are rewritten in place, so they must not overlap the header or
+        // the IFD, and the block must be self-consistent about how many there are.
+        if at < 8 || (at < ifd_end && ifd < end) {
+            return None;
+        }
+        if images.is_some_and(|n| n != len / 16) {
             return None;
         }
         let entries = (0..len / 16).map(|k| at + 16 * k + 4).collect();
@@ -524,23 +732,35 @@ impl MpIndex {
     }
 }
 
-/// The MPF block of the source, as the segment holding it.
-fn find_mpf<R: Read + Seek>(
+/// Every MPF block in the primary image, as the segments holding them. A valid
+/// file has at most one.
+fn find_all_mpf<R: Read + Seek>(
     src: &Structure,
     rd: &mut R,
     primary_end: usize,
-) -> Result<Option<SegmentId>> {
+) -> Result<Vec<SegmentId>> {
+    let mut found = Vec::new();
     for (i, seg) in src.segments()[..primary_end].iter().enumerate() {
         if seg.name() == Name::Marker(APP2) && seg.header().len() == 4 + MPF_SIGNATURE.len() as u64
         {
             let h = seg.header();
             let tail = src.read_range(rd, h.sub(4, MPF_SIGNATURE.len() as u64)?)?;
             if tail == MPF_SIGNATURE {
-                return Ok(Some(SegmentId::from_index(i)?));
+                found.push(SegmentId::from_index(i)?);
             }
         }
     }
-    Ok(None)
+    Ok(found)
+}
+
+/// The MPF block of the source, as the segment holding it.
+#[cfg(test)]
+fn find_mpf<R: Read + Seek>(
+    src: &Structure,
+    rd: &mut R,
+    primary_end: usize,
+) -> Result<Option<SegmentId>> {
+    Ok(find_all_mpf(src, rd, primary_end)?.first().copied())
 }
 
 /// The MPF block rewritten for the output layout, or `None` if no image moved.
@@ -561,7 +781,8 @@ fn fix_mpf<R: Read + Seek>(
     if subs.len() < 2 {
         return Ok(None);
     }
-    let Some(id) = find_mpf(src, rd, primary_end)? else {
+    let blocks = find_all_mpf(src, rd, primary_end)?;
+    let Some(&id) = blocks.first() else {
         return Ok(None);
     };
     let Some(op) = op_of_src[id.index()] else {
@@ -579,34 +800,78 @@ fn fix_mpf<R: Read + Seek>(
     if !moved {
         return Ok(None);
     }
+    // Only an edit that must rewrite the index needs to know which one is real.
+    if blocks.len() > 1 {
+        return Err(Error::Ambiguous {
+            what: "MPF block",
+            count: blocks.len(),
+        });
+    }
 
     let mut payload = src.read_range(rd, src.segment(id)?.payload())?;
-    let bad = || Error::InvalidFormat("MPF index does not match the images in the file".into());
-    let index = MpIndex::parse(&payload).ok_or_else(bad)?;
-    if index.entries.len() != images.len() {
-        return Err(bad());
-    }
-    let shift = |old: u32, by: i128| -> Result<u32> {
-        u32::try_from(old as i128 + by).map_err(|_| Error::LimitExceeded {
-            what: "MPF offset",
+    let bad = || Error::InvalidFormat("MPF index is not well formed".into());
+    let mismatch = |what: String, recorded: u64, found: u64| {
+        Error::InvalidFormat(format!(
+            "MPF index does not match the images in the file: {what} is recorded as {recorded}, \
+             found {found}"
+        ))
+    };
+    let to_u32 = |v: u64| -> Result<u32> {
+        u32::try_from(v).map_err(|_| Error::LimitExceeded {
+            what: "MPF value",
             limit: u32::MAX as u64,
         })
     };
+    let index = MpIndex::parse(&payload).ok_or_else(bad)?;
+    if index.entries.len() != images.len() {
+        return Err(mismatch(
+            "the number of images".into(),
+            index.entries.len() as u64,
+            images.len() as u64,
+        ));
+    }
     for (n, &k) in images.iter().enumerate() {
         let (s, d) = (subs[k].range(), dest.subassets()[k].range());
         let at = index.entries[n];
-        let size = index.u32(&payload, at).ok_or_else(bad)?;
-        index.put(
-            &mut payload,
-            at,
-            shift(size, d.len() as i128 - s.len() as i128)?,
-        );
-        // The first image is at offset 0 by definition.
+
+        // The recorded values must describe the file as it is. Rewriting a wrong
+        // index would only move the error. The size of the first image is the one
+        // exception: writers in the wild record a few hundred bytes less than the
+        // image (every Pixel Ultra HDR sample does), nothing is located by it, and
+        // it is rewritten to the true size below. One that claims more than the
+        // image is not.
+        let size = u64::from(index.u32(&payload, at).ok_or_else(bad)?);
+        let size_ok = if n == 0 {
+            size <= s.len()
+        } else {
+            size == s.len()
+        };
+        if !size_ok {
+            return Err(mismatch(format!("the size of image {n}"), size, s.len()));
+        }
+        index.put(&mut payload, at, to_u32(d.len())?);
+
+        // The first image is at offset 0 by definition; the others are recorded
+        // relative to the block, and are what readers find the images by.
+        let off = u64::from(index.u32(&payload, at + 4).ok_or_else(bad)?);
+        let expected = if n == 0 {
+            Some(0)
+        } else {
+            s.offset().checked_sub(old_base)
+        };
+        match expected {
+            Some(e) if e == off => {}
+            e => {
+                return Err(mismatch(
+                    format!("the offset of image {n}"),
+                    off,
+                    e.unwrap_or(0),
+                ))
+            }
+        }
         if n > 0 {
-            let off = index.u32(&payload, at + 4).ok_or_else(bad)?;
-            let by =
-                (d.offset() as i128 - new_base as i128) - (s.offset() as i128 - old_base as i128);
-            index.put(&mut payload, at + 4, shift(off, by)?);
+            let new = d.offset().checked_sub(new_base).ok_or_else(bad)?;
+            index.put(&mut payload, at + 4, to_u32(new)?);
         }
     }
     Ok(Some((op, payload)))
@@ -1038,7 +1303,17 @@ fn plan<'a, R: Read + Seek>(
         starts.push((op, sub.media_type().map(|m| m.to_owned().into())));
     }
     let mut starts = starts.into_iter().peekable();
+    // Where the data beyond the first image's structure starts in the output.
+    let trailing_op = match src.box_count() {
+        k if k < n => Some(
+            op_of_src[k].ok_or_else(|| Error::InvalidFormat("trailing data was dropped".into()))?,
+        ),
+        _ => None,
+    };
     for (i, d) in dims.iter().enumerate() {
+        if trailing_op == Some(i) {
+            b.end_boxes()?;
+        }
         if let Some((_, media)) = starts.next_if(|(op, _)| *op == i) {
             b.begin_subasset(media)?;
         }
@@ -1177,20 +1452,50 @@ where
     let (ops, dest) = plan(src_structure, src, updates)?;
     sink.begin(&dest)?;
 
-    let mut buf = vec![0u8; DEFAULT_CHUNK_SIZE];
+    let chunk = write_buffer_len(dest.total_size());
+    let mut buf = vec![0u8; chunk];
+    // Source regions of consecutive copied segments that are contiguous in `src` are
+    // read and written as one run; see `Emitter::copy_run`. A run is flushed at a
+    // gap, before any segment that is not a plain copy, and once it spans
+    // RUN_WINDOWS buffers.
+    let run_limit = (chunk as u64).saturating_mul(RUN_WINDOWS);
+    let mut pieces: Vec<Piece> = Vec::new();
+    let mut run_len = 0u64;
     {
         let mut em = Emitter::new(out, sink, &dest);
         for (i, op) in ops.iter().enumerate() {
-            em.begin_segment(SegmentId::from_index(i)?)?;
+            let id = SegmentId::from_index(i)?;
             match op {
                 Op::Copy(sid) => {
                     let s = src_structure.segment(*sid)?;
                     for (role, range) in s.regions() {
-                        em.copy(src, role, range, &mut buf)?;
+                        if pieces
+                            .last()
+                            .is_some_and(|p| p.range.end() != range.offset())
+                        {
+                            flush_run(&mut em, src, &mut pieces, &mut buf)?;
+                            run_len = 0;
+                        }
+                        run_len = run_len.saturating_add(range.len());
+                        pieces.push(Piece {
+                            dest: id,
+                            role,
+                            range,
+                        });
+                    }
+                    if run_len >= run_limit {
+                        flush_run(&mut em, src, &mut pieces, &mut buf)?;
+                        run_len = 0;
                     }
                 }
-                Op::Patched { id, payload } => {
-                    let s = src_structure.segment(*id)?;
+                Op::Patched {
+                    id: patched,
+                    payload,
+                } => {
+                    flush_run(&mut em, src, &mut pieces, &mut buf)?;
+                    run_len = 0;
+                    em.begin_segment(id)?;
+                    let s = src_structure.segment(*patched)?;
                     for (role, range) in s.regions() {
                         if role == Role::Payload {
                             em.put(role, payload)?;
@@ -1199,9 +1504,15 @@ where
                         }
                     }
                 }
-                _ => emit_new(&mut em, op)?,
+                _ => {
+                    flush_run(&mut em, src, &mut pieces, &mut buf)?;
+                    run_len = 0;
+                    em.begin_segment(id)?;
+                    emit_new(&mut em, op)?;
+                }
             }
         }
+        flush_run(&mut em, src, &mut pieces, &mut buf)?;
         em.finish()?;
     }
     Ok(dest)
@@ -1338,6 +1649,30 @@ mod tests {
         )
         .unwrap();
         (out.into_inner(), dest)
+    }
+
+    #[test]
+    fn box_names() {
+        let n = |m| marker_symbol(m).into_owned();
+        assert_eq!(n(0xD8), "SOI");
+        assert_eq!(n(0xD9), "EOI");
+        assert_eq!(n(0xDA), "SOS");
+        assert_eq!(n(0xE0), "APP0");
+        assert_eq!(n(0xEB), "APP11");
+        assert_eq!(n(0xEF), "APP15");
+        assert_eq!(n(0xC0), "SOF0");
+        assert_eq!(n(0xC2), "SOF2");
+        assert_eq!(n(0xC4), "DHT");
+        assert_eq!(n(0xCC), "DAC");
+        assert_eq!(n(0xD0), "RST0");
+        assert_eq!(n(0xD7), "RST7");
+        assert_eq!(n(0xDB), "DQT");
+        assert_eq!(n(0xDD), "DRI");
+        assert_eq!(n(0xF0), "JPG0");
+        assert_eq!(n(0xFD), "JPG13");
+        assert_eq!(n(0xFE), "COM");
+        assert_eq!(n(0x10), "RES");
+        assert!(JpegHandler.box_name(Name::None).is_none());
     }
 
     #[test]
@@ -2311,5 +2646,301 @@ mod tests {
             assert_eq!(h.finalize()[..], Sha256::digest(bytes)[..]);
         }
         assert_eq!(whole.finalize()[..], Sha256::digest(&f)[..]);
+    }
+
+    fn try_write(f: &[u8], updates: &Updates) -> Result<(Vec<u8>, Structure)> {
+        let s = parse(&mut Cursor::new(f.to_vec()))?;
+        let mut out = Cursor::new(Vec::new());
+        let dest = write(
+            &s,
+            &mut Cursor::new(f.to_vec()),
+            &mut out,
+            updates,
+            &mut NullSink,
+        )?;
+        Ok((out.into_inner(), dest))
+    }
+
+    /// Where the MPF block (the bytes after `MPF\0`) starts in the file, and a copy.
+    fn mpf_block(f: &[u8]) -> (usize, Vec<u8>) {
+        let s = parse(&mut Cursor::new(f.to_vec())).unwrap();
+        let id = find_mpf(
+            &s,
+            &mut Cursor::new(f.to_vec()),
+            s.subassets()[0].segments().end,
+        )
+        .unwrap()
+        .unwrap();
+        let r = s.segment(id).unwrap().payload();
+        let (a, b) = (r.offset() as usize, r.end() as usize);
+        (a, f[a..b].to_vec())
+    }
+
+    #[test]
+    fn bytes_that_only_look_like_an_image_are_trailing_data() {
+        let junk: [&[u8]; 4] = [
+            b"\xFF\xD8\xFF garbage that is not a jpeg",
+            b"\xFF\xD8\xFF\xE0\x00\x01",       // marker length below 2
+            b"\xFF\xD8\xFF\xE1\xFF\xFF short", // segment runs past the end
+            b"\xFF\xD8\xFF\xDB",               // cut off inside a marker
+        ];
+        for t in junk {
+            // After a single image: part of it, as before multi-picture support.
+            let mut f = sample_jpeg();
+            f.extend_from_slice(t);
+            let s = parse(&mut Cursor::new(f.clone())).unwrap();
+            assert_eq!(s.subassets().len(), 1);
+            assert_eq!(s.trailing().map(|r| r.len()), Some(t.len() as u64));
+            let (out, _) = do_write(&f, &Updates::new());
+            assert_eq!(out, f);
+
+            // After the last image of a multi-picture file: a part of its own.
+            let second = second_image();
+            let f = mpf_file(&second, t, 0, false);
+            let s = parse(&mut Cursor::new(f.clone())).unwrap();
+            let subs = s.subassets();
+            assert_eq!(subs.len(), 3);
+            assert_eq!(subs[1].range().len(), second.len() as u64);
+            assert_eq!(subs[2].media_type(), None);
+            assert_eq!(&f[subs[2].range().offset() as usize..], t);
+            let (out, _) = do_write(&f, &Updates::new().set_jumbf(fake_jumbf(64)));
+            assert_index_matches_layout(&out);
+        }
+    }
+
+    #[test]
+    fn data_beyond_the_first_image_is_reported_as_trailing() {
+        use crate::ByteRange;
+        let j = sample_jpeg();
+        let s = parse(&mut Cursor::new(j.clone())).unwrap();
+        assert_eq!(s.trailing(), None);
+
+        let mut t = j.clone();
+        t.extend_from_slice(b"trailing");
+        let s = parse(&mut Cursor::new(t)).unwrap();
+        assert_eq!(
+            s.trailing(),
+            Some(ByteRange::new(j.len() as u64, 8).unwrap())
+        );
+
+        // In a multi-picture file everything after the first image is beyond it.
+        for tail in [&b""[..], b"tail"] {
+            let f = mpf_file(&second_image(), tail, 0, false);
+            let s = parse(&mut Cursor::new(f.clone())).unwrap();
+            let first_end = s.subassets()[0].range().end();
+            assert_eq!(
+                s.trailing(),
+                Some(ByteRange::new(first_end, f.len() as u64 - first_end).unwrap())
+            );
+
+            // An edit moves it with the file, and what was planned is what is written.
+            let (out, dest) = do_write(&f, &Updates::new().set_jumbf(fake_jumbf(200)));
+            let re = parse(&mut Cursor::new(out.clone())).unwrap();
+            assert_eq!(dest.trailing(), re.trailing());
+            let r = re.trailing().unwrap();
+            assert_eq!(&out[r.offset() as usize..], &f[first_end as usize..]);
+
+            // Removing the metadata puts it back where it was.
+            let (back, _) = do_write(&out, &Updates::remove_all());
+            assert_eq!(back.len(), f.len());
+        }
+    }
+
+    #[test]
+    fn a_second_image_cut_short_is_trailing_data() {
+        let second = second_image();
+        let f = mpf_file(&second[..second.len() - 2], b"", 0, false);
+        let s = parse(&mut Cursor::new(f.clone())).unwrap();
+        assert_eq!(s.subassets().len(), 1);
+        let (out, _) = do_write(&f, &Updates::new());
+        assert_eq!(out, f);
+    }
+
+    #[test]
+    fn an_index_that_disagrees_with_the_file_is_refused_on_edit_only() {
+        let edit = Updates::new().set_jumbf(fake_jumbf(64));
+        let good = mpf_file(&second_image(), b"", 0, false);
+        let (base, _) = mpf_block(&good);
+        assert!(try_write(&good, &edit).is_ok());
+        // Entries start at block offset 50, 16 bytes each: attributes, size, offset.
+        for (what, at) in [
+            ("offset of the first image", 58),
+            ("size of the second image", 70),
+            ("offset of the second image", 74),
+        ] {
+            let mut f = good.clone();
+            f[base + at + 3] ^= 1;
+            // Copying unchanged never consults the index.
+            let (kept, _) = do_write(&f, &Updates::new());
+            assert_eq!(kept, f, "{what}");
+            let err = try_write(&f, &edit).unwrap_err();
+            assert!(matches!(err, Error::InvalidFormat(_)), "{what}: {err:?}");
+        }
+    }
+
+    #[test]
+    fn a_first_image_size_recorded_short_is_accepted_and_corrected() {
+        let edit = Updates::new().set_jumbf(fake_jumbf(64));
+        let good = mpf_file(&second_image(), b"", 0, false);
+        let (base, block) = mpf_block(&good);
+        let first_len = parse(&mut Cursor::new(good.clone())).unwrap().subassets()[0]
+            .range()
+            .len();
+        let set_size = |f: &mut Vec<u8>, v: u32| {
+            f[base + 54..base + 58].copy_from_slice(&v.to_be_bytes());
+        };
+        assert_eq!(
+            u32::from_be_bytes(block[54..58].try_into().unwrap()) as u64,
+            first_len
+        );
+
+        // Recorded a few hundred bytes short, as Pixel Ultra HDR files do.
+        for short in [1u32, 307, first_len as u32 - 1] {
+            let mut f = good.clone();
+            set_size(&mut f, first_len as u32 - short.min(first_len as u32 - 1));
+            let (kept, _) = do_write(&f, &Updates::new());
+            assert_eq!(kept, f, "copying never consults the index");
+            let (out, _) = do_write(&f, &edit);
+            assert_index_matches_layout(&out);
+        }
+
+        // Claiming more than the image is refused.
+        let mut f = good.clone();
+        set_size(&mut f, first_len as u32 + 1);
+        let err = try_write(&f, &edit).unwrap_err();
+        assert!(matches!(err, Error::InvalidFormat(_)), "{err:?}");
+        assert!(err.to_string().contains("size of image 0"), "{err}");
+    }
+
+    #[test]
+    fn a_hostile_mpf_index_is_not_parsed() {
+        for little in [false, true] {
+            let f = mpf_file(&second_image(), b"", 0, little);
+            let (_, block) = mpf_block(&f);
+            let ix = MpIndex::parse(&block).expect("a good index parses");
+            assert_eq!(ix.entries, [54, 70]);
+
+            let w16 = |b: &mut [u8], at: usize, v: u16| {
+                let v = if little {
+                    v.to_le_bytes()
+                } else {
+                    v.to_be_bytes()
+                };
+                b[at..at + 2].copy_from_slice(&v);
+            };
+            let w32 = |b: &mut [u8], at: usize, v: u32| {
+                let v = if little {
+                    v.to_le_bytes()
+                } else {
+                    v.to_be_bytes()
+                };
+                b[at..at + 4].copy_from_slice(&v);
+            };
+            // Layout: header 0..8, IFD at 8 (count, then entries at 10, 22, 34 with
+            // tag/type/count/value at +0/+2/+4/+8), next IFD at 46, entries at 50.
+            let end = block.len() as u32;
+            let cases: Vec<(&str, Vec<u8>)> = {
+                let with = |f: &dyn Fn(&mut Vec<u8>)| {
+                    let mut b = block.clone();
+                    f(&mut b);
+                    b
+                };
+                vec![
+                    ("magic", with(&|b| w16(b, 2, 0x2B))),
+                    ("byte order", with(&|b| b[0] = b'X')),
+                    ("IFD inside the header", with(&|b| w32(b, 4, 4))),
+                    ("IFD past the end", with(&|b| w32(b, 4, 0xFFFF_FFF0))),
+                    ("huge entry count", with(&|b| w16(b, 8, 0xFFFF))),
+                    ("array inside the header", with(&|b| w32(b, 42, 0))),
+                    ("array over the IFD", with(&|b| w32(b, 42, 20))),
+                    ("array past the end", with(&|b| w32(b, 42, end - 16))),
+                    ("length not a multiple of 16", with(&|b| w32(b, 38, 31))),
+                    ("empty array", with(&|b| w32(b, 38, 0))),
+                    ("array of the wrong type", with(&|b| w16(b, 36, 4))),
+                    ("second MPEntry", with(&|b| w16(b, 22, 0xB002))),
+                    ("image count disagrees", with(&|b| w32(b, 30, 3))),
+                    ("image count of the wrong type", with(&|b| w16(b, 24, 3))),
+                ]
+            };
+            for (what, b) in cases {
+                assert!(MpIndex::parse(&b).is_none(), "{what} (little: {little})");
+            }
+
+            // Any prefix of the block is refused without panicking.
+            for n in 0..block.len() {
+                assert!(MpIndex::parse(&block[..n]).is_none(), "{n} bytes");
+            }
+        }
+    }
+
+    #[test]
+    fn two_mpf_blocks_are_ambiguous_only_when_an_edit_needs_the_index() {
+        let f = mpf_file(&second_image(), b"", 0, false);
+        let s = parse(&mut Cursor::new(f.clone())).unwrap();
+        let id = find_mpf(
+            &s,
+            &mut Cursor::new(f.clone()),
+            s.subassets()[0].segments().end,
+        )
+        .unwrap()
+        .unwrap();
+        let x = s.segment(id).unwrap().extent();
+        let (a, b) = (x.offset() as usize, x.end() as usize);
+        let mut dup = f[..b].to_vec();
+        dup.extend_from_slice(&f[a..b]);
+        dup.extend_from_slice(&f[b..]);
+
+        let (kept, _) = do_write(&dup, &Updates::new());
+        assert_eq!(kept, dup);
+        let err = try_write(&dup, &Updates::new().set_jumbf(fake_jumbf(64))).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                Error::Ambiguous {
+                    what: "MPF block",
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+    }
+
+    /// Every byte of the MPF block altered several ways: parsing and copying never
+    /// fail or panic, and an edit that is accepted leaves an index that matches.
+    #[test]
+    fn a_mutated_mpf_block_is_refused_or_stays_consistent() {
+        let edit = Updates::new().set_jumbf(fake_jumbf(64));
+        for little in [false, true] {
+            let good = mpf_file(&second_image(), b"tail", 0, little);
+            let (base, block) = mpf_block(&good);
+            let mut accepted = 0;
+            for pos in 0..block.len() {
+                let o = block[pos];
+                for v in [
+                    o ^ 0xFF,
+                    0,
+                    1,
+                    0xFF,
+                    o.wrapping_add(1),
+                    o.wrapping_sub(1),
+                    o ^ 0x80,
+                ] {
+                    let mut f = good.clone();
+                    f[base + pos] = v;
+                    let (kept, _) = do_write(&f, &Updates::new());
+                    assert_eq!(kept, f);
+                    if let Ok((out, dest)) = try_write(&f, &edit) {
+                        accepted += 1;
+                        let re = parse(&mut Cursor::new(out.clone())).unwrap();
+                        assert_eq!(re.subassets(), dest.subassets());
+                        assert_index_matches_layout(&out);
+                    }
+                }
+            }
+            assert!(
+                accepted > 0,
+                "changes to bytes the edit ignores are accepted"
+            );
+        }
     }
 }

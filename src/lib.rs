@@ -73,7 +73,7 @@ pub use handler::{ContainerHandler, FormatSpec, ReadSeek, ReadWriteSeek, DETECT_
 pub use mapped::MappedFile;
 pub use range::ByteRange;
 pub use registry::HandlerRegistry;
-pub use segment::{labels, Name, Role, Segment, SegmentKind};
+pub use segment::{labels, Name, Role, Segment, SegmentKind, AFTER_BOX};
 pub use sink::{Chunk, NullSink, Sink};
 pub use structure::{
     Entity, Part, Region, SegmentId, Structure, StructureBuilder, SubAsset, MAX_SEGMENTS,

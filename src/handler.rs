@@ -221,9 +221,14 @@ pub trait ContainerHandler: std::fmt::Debug + Send + Sync {
     }
 
     /// The name a box-based hash lists for `name`, or `None` if the element is not
-    /// a box. The default covers JPEG markers, four character codes and numeric
-    /// ids; override it for names with other text.
+    /// a box. The default covers four character codes and numeric ids; override it
+    /// for names with other text, such as JPEG marker symbols.
     fn box_name(&self, name: Name) -> Option<Cow<'static, str>> {
-        name.box_name()
+        match name {
+            Name::None => None,
+            Name::FourCC(cc) => Some(Cow::Owned(String::from_utf8_lossy(&cc).into_owned())),
+            Name::Id(n) => Some(Cow::Owned(n.to_string())),
+            Name::Marker(_) => Some(Cow::Owned(name.to_string())),
+        }
     }
 }

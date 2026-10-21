@@ -247,7 +247,8 @@ mod tests {
         fn box_name(&self, name: Name) -> Option<Cow<'static, str>> {
             match name {
                 Name::Id(n) => Some(Cow::Owned(format!("rec{n}"))),
-                other => other.box_name(),
+                Name::FourCC(cc) => Some(Cow::Owned(String::from_utf8_lossy(&cc).into_owned())),
+                _ => None,
             }
         }
     }
