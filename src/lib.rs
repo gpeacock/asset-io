@@ -75,6 +75,7 @@ mod registry;
 mod segment;
 mod sink;
 mod structure;
+mod task;
 mod thumbnail;
 #[cfg(feature = "exif")]
 mod tiff;
@@ -97,6 +98,7 @@ pub use sink::{Chunk, NullSink, Sink};
 pub use structure::{
     Entity, Part, Region, SegmentId, Structure, StructureBuilder, SubAsset, MAX_SEGMENTS,
 };
+pub use task::{Io, Progress, ReadRequest, Task, DEFAULT_WINDOW};
 pub use thumbnail::Thumbnail;
 #[cfg(feature = "exif")]
 pub use tiff::ExifInfo;
