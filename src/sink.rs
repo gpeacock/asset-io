@@ -65,6 +65,15 @@ where
     }
 }
 
+/// One source region of a run for [`Emitter::copy_run`], and the segment and role it
+/// lands in.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Piece {
+    pub(crate) dest: SegmentId,
+    pub(crate) role: Role,
+    pub(crate) range: ByteRange,
+}
+
 /// Writes to `out`, forwards to the sink, and checks the bytes land where the
 /// destination layout says they should.
 pub(crate) struct Emitter<'a, W: Write, S: Sink + ?Sized> {
@@ -102,11 +111,9 @@ impl<'a, W: Write, S: Sink + ?Sized> Emitter<'a, W, S> {
         Ok(())
     }
 
-    /// Write bytes for the current segment.
-    pub(crate) fn put(&mut self, role: Role, data: &[u8]) -> Result<()> {
-        if data.is_empty() {
-            return Ok(());
-        }
+    /// Show `data` to the sink as bytes of the current segment and advance the
+    /// output position. Writing the bytes to `out` is the caller's job.
+    fn deliver(&mut self, role: Role, data: &[u8]) -> Result<()> {
         let id = self
             .cur
             .ok_or_else(|| Error::InvalidFormat("write outside of a segment".into()))?;
@@ -119,7 +126,6 @@ impl<'a, W: Write, S: Sink + ?Sized> Emitter<'a, W, S> {
                 data,
             })?;
         }
-        self.out.write_all(data)?;
         self.pos = self
             .pos
             .checked_add(data.len() as u64)
@@ -127,6 +133,78 @@ impl<'a, W: Write, S: Sink + ?Sized> Emitter<'a, W, S> {
                 what: "output size",
                 limit: u64::MAX,
             })?;
+        Ok(())
+    }
+
+    /// Write bytes for the current segment.
+    pub(crate) fn put(&mut self, role: Role, data: &[u8]) -> Result<()> {
+        if data.is_empty() {
+            return Ok(());
+        }
+        self.deliver(role, data)?;
+        self.out.write_all(data)?;
+        Ok(())
+    }
+
+    /// Copy a run of source regions that are contiguous in `src` and land in
+    /// consecutive output segments. Each window of the run is read once into `buf`,
+    /// shown to the sink as slices tagged with their segment and role, and written
+    /// to `out` once. Reads and writes are then a function of the run's length, not
+    /// of how many segments it crosses. Still two copies per byte (src to `buf` to
+    /// `out`); the sink sees borrowed slices of `buf`.
+    ///
+    /// The caller has begun the first piece's segment; later segments are begun here.
+    pub(crate) fn copy_run<R: Read + Seek>(
+        &mut self,
+        src: &mut R,
+        pieces: &[Piece],
+        buf: &mut [u8],
+    ) -> Result<()> {
+        let Some(first) = pieces.first() else {
+            return Ok(());
+        };
+        if buf.is_empty() {
+            return Err(Error::InvalidFormat("empty copy buffer".into()));
+        }
+        let start = first.range.offset();
+        let mut end = start;
+        for p in pieces {
+            if p.range.offset() != end {
+                return Err(Error::InvalidSegment {
+                    offset: p.range.offset(),
+                    reason: "copy run is not contiguous".into(),
+                });
+            }
+            end = p.range.end();
+        }
+
+        src.seek(SeekFrom::Start(start))?;
+        let mut left = end - start;
+        let mut pi = 0usize;
+        let mut done = 0u64; // bytes of pieces[pi] already delivered
+        while left > 0 {
+            let n = left.min(buf.len() as u64) as usize;
+            src.read_exact(&mut buf[..n])?;
+            let mut w = 0usize;
+            while w < n {
+                let p = pieces
+                    .get(pi)
+                    .ok_or_else(|| Error::InvalidFormat("copy run exhausted".into()))?;
+                if done == 0 && self.cur != Some(p.dest) {
+                    self.begin_segment(p.dest)?;
+                }
+                let take = (p.range.len() - done).min((n - w) as u64) as usize;
+                self.deliver(p.role, &buf[w..w + take])?;
+                w += take;
+                done += take as u64;
+                if done == p.range.len() {
+                    pi += 1;
+                    done = 0;
+                }
+            }
+            self.out.write_all(&buf[..n])?;
+            left -= n as u64;
+        }
         Ok(())
     }
 
@@ -168,4 +246,43 @@ impl<'a, W: Write, S: Sink + ?Sized> Emitter<'a, W, S> {
         self.out.flush()?;
         Ok(())
     }
+}
+
+/// How many copy buffers a run may span before it is flushed. Bounds the pieces a
+/// writer holds, however many small segments the asset has.
+pub(crate) const RUN_WINDOWS: u64 = 16;
+
+/// Copy buffer for large writes. Measured on one machine (Apple M2, 128 MB PNGs): 64
+/// and 128 KiB were slow in memory, 16 and 32 KiB slow from disk, 256 KiB good in
+/// both. Not measured on other CPUs.
+const WRITE_BUFFER: usize = 256 * 1024;
+
+/// Smallest copy buffer.
+const MIN_WRITE_BUFFER: usize = 4096;
+
+/// Size of the copy buffer for writing an output of `total` bytes. It is also the
+/// read and write window of a run, so a small asset gets a buffer no larger than
+/// itself and does not pay for a large allocation.
+pub(crate) fn write_buffer_len(total: u64) -> usize {
+    (total.min(WRITE_BUFFER as u64) as usize).max(MIN_WRITE_BUFFER)
+}
+
+/// Copy the pending run, if any, and clear it.
+pub(crate) fn flush_run<R, W, S>(
+    em: &mut Emitter<'_, W, S>,
+    src: &mut R,
+    pieces: &mut Vec<Piece>,
+    buf: &mut [u8],
+) -> Result<()>
+where
+    R: Read + Seek,
+    W: Write,
+    S: Sink + ?Sized,
+{
+    if let Some(first) = pieces.first() {
+        em.begin_segment(first.dest)?;
+        em.copy_run(src, pieces, buf)?;
+    }
+    pieces.clear();
+    Ok(())
 }

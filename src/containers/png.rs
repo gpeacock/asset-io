@@ -6,9 +6,9 @@
 use crate::crc::Crc32;
 use crate::error::{Error, Result};
 use crate::handler::{ContainerHandler, FormatSpec, ReadSeek, ReadWriteSeek};
+use crate::segment::SegmentKind;
 use crate::segment::{Name, Role, Segment};
-use crate::segment::{SegmentKind, DEFAULT_CHUNK_SIZE};
-use crate::sink::{Emitter, Sink};
+use crate::sink::{flush_run, write_buffer_len, Emitter, Piece, Sink, RUN_WINDOWS};
 use crate::structure::{SegmentId, Structure, StructureBuilder};
 use crate::{MetadataUpdate, Updates};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -216,6 +216,8 @@ fn parse_with<R: Read + Seek>(
         found_iend = ty == IEND;
     }
 
+    // The chunks through IEND are the structure; anything after is data beyond it.
+    b.end_boxes()?;
     if offset < total {
         b.push_span(SegmentKind::Other, Name::None, 0, total - offset, 0)?;
     }
@@ -387,7 +389,15 @@ fn plan<'a>(src: &Structure, updates: &'a Updates) -> Result<(Vec<Op<'a>>, Struc
     }
 
     let mut b = StructureBuilder::new(src.handler().clone(), src.media_type().to_owned(), total);
-    for d in &dims {
+    // Where the data beyond the chunk structure starts in the output.
+    let k = src.box_count();
+    let trailing_op = ops
+        .iter()
+        .position(|op| matches!(op, Op::Copy(id) if id.index() == k));
+    for (i, d) in dims.iter().enumerate() {
+        if trailing_op == Some(i) {
+            b.end_boxes()?;
+        }
         let id = b.push_span(d.kind, d.name, d.header_len, d.payload_len, d.trailer_len)?;
         if matches!(
             d.kind,
@@ -442,16 +452,40 @@ where
     let (ops, dest) = plan(src_structure, updates)?;
     sink.begin(&dest)?;
 
-    let mut buf = vec![0u8; DEFAULT_CHUNK_SIZE];
+    let chunk = write_buffer_len(dest.total_size());
+    let mut buf = vec![0u8; chunk];
+    // Source regions of consecutive copied chunks that are contiguous in `src`
+    // are read and written as one run; see `Emitter::copy_run`. A run is flushed
+    // at a gap, at a new chunk, or once it spans RUN_WINDOWS buffers, which bounds
+    // `pieces` regardless of how many small chunks the file has.
+    let run_limit = (chunk as u64).saturating_mul(RUN_WINDOWS);
+    let mut pieces: Vec<Piece> = Vec::new();
+    let mut run_len = 0u64;
     {
         let mut em = Emitter::new(out, sink, &dest);
         for (i, op) in ops.iter().enumerate() {
-            em.begin_segment(SegmentId::from_index(i)?)?;
+            let id = SegmentId::from_index(i)?;
             match op {
                 Op::Copy(sid) => {
                     let s: &Segment = src_structure.segment(*sid)?;
                     for (role, range) in s.regions() {
-                        em.copy(src, role, range, &mut buf)?;
+                        if pieces
+                            .last()
+                            .is_some_and(|p| p.range.end() != range.offset())
+                        {
+                            flush_run(&mut em, src, &mut pieces, &mut buf)?;
+                            run_len = 0;
+                        }
+                        run_len = run_len.saturating_add(range.len());
+                        pieces.push(Piece {
+                            dest: id,
+                            role,
+                            range,
+                        });
+                    }
+                    if run_len >= run_limit {
+                        flush_run(&mut em, src, &mut pieces, &mut buf)?;
+                        run_len = 0;
                     }
                 }
                 Op::New {
@@ -460,6 +494,9 @@ where
                     payload,
                     ..
                 } => {
+                    flush_run(&mut em, src, &mut pieces, &mut buf)?;
+                    run_len = 0;
+                    em.begin_segment(id)?;
                     let (hdr, n) = chunk_header(ty, prefix, payload.len());
                     em.put(Role::Header, &hdr[..n])?;
                     em.put(Role::Payload, payload)?;
@@ -467,6 +504,7 @@ where
                 }
             }
         }
+        flush_run(&mut em, src, &mut pieces, &mut buf)?;
         em.finish()?;
     }
     Ok(dest)
@@ -647,6 +685,38 @@ mod tests {
         png.extend_from_slice(b"trailing");
         let s = parse(&mut Cursor::new(png.clone())).unwrap();
         assert_eq!(s.segments().last().unwrap().extent().len(), 8);
+    }
+
+    #[test]
+    fn data_after_iend_is_reported_as_trailing() {
+        let clean = sample_png();
+        let s = parse(&mut Cursor::new(clean.clone())).unwrap();
+        assert_eq!(s.trailing(), None);
+
+        let mut png = clean.clone();
+        png.extend_from_slice(b"trailing");
+        let s = parse(&mut Cursor::new(png.clone())).unwrap();
+        let t = s.trailing().unwrap();
+        assert_eq!((t.offset(), t.len()), (clean.len() as u64, 8));
+
+        // An edit moves it with the file, and what was planned is what is written.
+        let updates = Updates::new().set_jumbf(vec![0xAB; 100]);
+        let mut out = Cursor::new(Vec::new());
+        let dest = write(
+            &s,
+            &mut Cursor::new(png.clone()),
+            &mut out,
+            &updates,
+            &mut crate::sink::NullSink,
+        )
+        .unwrap();
+        let out = out.into_inner();
+        let re = parse(&mut Cursor::new(out.clone())).unwrap();
+        assert_eq!(dest.trailing(), re.trailing());
+        assert_eq!(
+            &out[re.trailing().unwrap().offset() as usize..],
+            b"trailing"
+        );
     }
 
     #[test]
