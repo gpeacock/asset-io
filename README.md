@@ -4,6 +4,10 @@ Streaming, container-agnostic access to the structure and metadata of media file
 
 A parsed file is a `Structure`: a gapless tiling of `Segment`s (header, payload, trailer) plus `Entity`s that group the parts of logical items such as XMP and JUMBF. It holds geometry only. It does not hash, sign or interpret C2PA; callers decide what each byte range means.
 
+## Upgrading from 0.1
+
+0.2 is a redesign, not a drop-in update. The 0.1 `Asset` type and its per-format `*_io` modules are gone. Parsing, reading and writing now go through `HandlerRegistry` and `Structure`, and hashing or other byte-level work goes through a `Sink`. The `parallel`, `c2pa`, `embed-fixtures` and `test-utils` features and the `rayon`, `c2pa`, `atree`, `fs2`, `byteorder` and `log` dependencies were removed. The default features are now `jpeg`, `png`, `bmff` and `riff`. The 0.1 examples (`parallel_hash`, `progress_cancel`, `c2pa_embeddable`) do not exist in 0.2.
+
 ## Containers
 
 | Feature | Container | Read | Write |
