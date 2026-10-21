@@ -20,6 +20,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 /// Errors that can occur while reading or writing a container
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum Error {
     /// I/O error
     #[error("I/O error: {0}")]

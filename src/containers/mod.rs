@@ -13,14 +13,22 @@
 
 //! Built-in container handlers, one module per format, each behind its feature.
 //!
-//! Each module exposes `handler()` for registration plus direct `parse` and
-//! `write` functions. Most callers go through
-//! [`HandlerRegistry`](crate::HandlerRegistry) instead.
+//! Each handler module ([`jpeg`], [`png`], [`bmff`], [`riff`]) exposes `handler()`
+//! for registration plus direct `parse` and `write` functions. Most callers go
+//! through [`HandlerRegistry`](crate::HandlerRegistry) instead.
+//!
+//! The other modules are not handlers; they hold code that more than one handler
+//! uses, or that a handler splits out:
+//!
+//! - [`jumbf`]: JUMBF box parsing, shared by every handler that carries a manifest
+//!   store.
+//! - `heif_items` (private): reads HEIF items (EXIF data, thumbnails) for the BMFF
+//!   handler.
 
 #[cfg(feature = "bmff")]
 pub mod bmff;
 #[cfg(feature = "bmff")]
-mod items;
+mod heif_items;
 #[cfg(feature = "jpeg")]
 pub mod jpeg;
 pub mod jumbf;

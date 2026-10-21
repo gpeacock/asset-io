@@ -65,8 +65,8 @@ fn main() -> asset_io::Result<()> {
             _ => "unknown size".into(),
         };
         println!(
-            "\nThumbnail: {:?}, {dims}, {} bytes",
-            t.format,
+            "\nThumbnail: {}, {dims}, {} bytes",
+            t.media_type().unwrap_or("unknown type"),
             t.data.len()
         );
     }

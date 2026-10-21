@@ -22,6 +22,7 @@ use crate::segment::Name;
 /// elements (ISO BMFF boxes) also report the nested ones, which are not segments:
 /// segments tile the file once, nodes describe its hierarchy.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct Node<'a> {
     /// Slash-separated names from the root, for example `/moov/trak/mdia`. Valid
     /// only during the callback.
@@ -41,4 +42,39 @@ pub struct Node<'a> {
     pub flags: Option<u32>,
     /// Extended type of a `uuid` box.
     pub user_type: Option<[u8; 16]>,
+}
+
+impl<'a> Node<'a> {
+    /// A node with no FullBox fields or user type; add them with the `with_*` methods.
+    pub const fn new(
+        path: &'a str,
+        name: Name,
+        extent: ByteRange,
+        header_len: u32,
+        depth: u32,
+    ) -> Self {
+        Self {
+            path,
+            name,
+            extent,
+            header_len,
+            depth,
+            version: None,
+            flags: None,
+            user_type: None,
+        }
+    }
+
+    /// Sets the FullBox version and flags.
+    pub const fn with_full_box(mut self, version: u8, flags: u32) -> Self {
+        self.version = Some(version);
+        self.flags = Some(flags);
+        self
+    }
+
+    /// Sets the extended type of a `uuid` box.
+    pub const fn with_user_type(mut self, user_type: [u8; 16]) -> Self {
+        self.user_type = Some(user_type);
+        self
+    }
 }

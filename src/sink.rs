@@ -22,6 +22,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 
 /// A run of bytes, borrowed from the buffer being read or written. No copy is made.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct Chunk<'a> {
     /// Segment these bytes belong to, in the structure given to [`Sink::begin`].
     pub segment: SegmentId,
@@ -33,6 +34,18 @@ pub struct Chunk<'a> {
     pub data: &'a [u8],
 }
 
+impl<'a> Chunk<'a> {
+    /// A chunk of `data` at `offset` in the asset, belonging to `role` of `segment`.
+    pub const fn new(segment: SegmentId, role: Role, offset: u64, data: &'a [u8]) -> Self {
+        Self {
+            segment,
+            role,
+            offset,
+            data,
+        }
+    }
+}
+
 /// Receives bytes during a read or a write.
 ///
 /// Every byte the sink wants is delivered exactly once, in order, tagged with
@@ -40,9 +53,9 @@ pub struct Chunk<'a> {
 /// no hashing semantics to them. Return [`Error::UserCanceled`] from `chunk` to
 /// stop the operation.
 pub trait Sink {
-    /// Called once before any bytes, with the complete layout of the asset being
+    /// Called once before any bytes, with the complete structure of the asset being
     /// read or of the output being written.
-    fn begin(&mut self, _layout: &Structure) -> Result<()> {
+    fn begin(&mut self, _structure: &Structure) -> Result<()> {
         Ok(())
     }
 
@@ -78,8 +91,6 @@ where
     }
 }
 
-// Used by the built-in writers; which ones depends on the enabled features.
-#[allow(dead_code)]
 /// One source region of a run for [`Emitter::copy_run`], and the segment and role it
 /// lands in.
 #[derive(Debug, Clone, Copy)]
@@ -89,11 +100,9 @@ pub(crate) struct Piece {
     pub(crate) range: ByteRange,
 }
 
-// Used by the built-in writers; which ones depends on the enabled features.
-#[allow(dead_code)]
 /// Writes to `out`, forwards to the sink, and checks the bytes land where the
-/// destination layout says they should.
-pub(crate) struct Emitter<'a, W: Write, S: Sink + ?Sized> {
+/// destination structure says they should.
+pub(crate) struct Emitter<'a, W: Write + ?Sized, S: Sink + ?Sized> {
     out: &'a mut W,
     sink: &'a mut S,
     dest: &'a Structure,
@@ -101,8 +110,7 @@ pub(crate) struct Emitter<'a, W: Write, S: Sink + ?Sized> {
     cur: Option<SegmentId>,
 }
 
-#[allow(dead_code)] // used by the built-in writers; which ones depends on the features
-impl<'a, W: Write, S: Sink + ?Sized> Emitter<'a, W, S> {
+impl<'a, W: Write + ?Sized, S: Sink + ?Sized> Emitter<'a, W, S> {
     pub(crate) fn new(out: &'a mut W, sink: &'a mut S, dest: &'a Structure) -> Self {
         Self {
             out,
@@ -120,13 +128,22 @@ impl<'a, W: Write, S: Sink + ?Sized> Emitter<'a, W, S> {
             return Err(Error::InvalidSegment {
                 offset: self.pos,
                 reason: format!(
-                    "output position diverged from planned layout (expected {})",
+                    "output position diverged from planned structure (expected {})",
                     seg.extent().offset()
                 ),
             });
         }
         self.cur = Some(id);
         Ok(())
+    }
+
+    /// Start `id` unless it is already the current segment, which a run split
+    /// inside one segment leaves it.
+    pub(crate) fn enter_segment(&mut self, id: SegmentId) -> Result<()> {
+        if self.cur == Some(id) {
+            return Ok(());
+        }
+        self.begin_segment(id)
     }
 
     /// Show `data` to the sink as bytes of the current segment and advance the
@@ -136,6 +153,21 @@ impl<'a, W: Write, S: Sink + ?Sized> Emitter<'a, W, S> {
             .cur
             .ok_or_else(|| Error::InvalidFormat("write outside of a segment".into()))?;
         let seg = self.dest.segment(id)?;
+        let region = match role {
+            Role::Header => seg.header(),
+            Role::Payload => seg.payload(),
+            Role::Trailer => seg.trailer(),
+        };
+        let end = self.pos.saturating_add(data.len() as u64);
+        if self.pos < region.offset() || end > region.end() {
+            return Err(Error::InvalidSegment {
+                offset: self.pos,
+                reason: format!(
+                    "{} bytes do not lie in the {role:?} of their segment",
+                    data.len()
+                ),
+            });
+        }
         if self.sink.wants(seg, role) {
             self.sink.chunk(Chunk {
                 segment: id,
@@ -172,7 +204,7 @@ impl<'a, W: Write, S: Sink + ?Sized> Emitter<'a, W, S> {
     /// `out`); the sink sees borrowed slices of `buf`.
     ///
     /// The caller has begun the first piece's segment; later segments are begun here.
-    pub(crate) fn copy_run<R: Read + Seek>(
+    pub(crate) fn copy_run<R: Read + Seek + ?Sized>(
         &mut self,
         src: &mut R,
         pieces: &[Piece],
@@ -226,36 +258,13 @@ impl<'a, W: Write, S: Sink + ?Sized> Emitter<'a, W, S> {
         Ok(())
     }
 
-    /// Copy `range` of `src` into the current segment through a reusable buffer.
-    /// The buffer is the only copy: the same slice goes to the sink and the writer.
-    pub(crate) fn copy<R: Read + Seek>(
-        &mut self,
-        src: &mut R,
-        role: Role,
-        range: ByteRange,
-        buf: &mut [u8],
-    ) -> Result<()> {
-        if range.is_empty() {
-            return Ok(());
-        }
-        src.seek(SeekFrom::Start(range.offset()))?;
-        let mut remaining = range.len();
-        while remaining > 0 {
-            let n = remaining.min(buf.len() as u64) as usize;
-            src.read_exact(&mut buf[..n])?;
-            self.put(role, &buf[..n])?;
-            remaining -= n as u64;
-        }
-        Ok(())
-    }
-
-    /// Verify the whole destination layout was written.
+    /// Verify the whole destination structure was written.
     pub(crate) fn finish(self) -> Result<()> {
         if self.pos != self.dest.total_size() {
             return Err(Error::InvalidSegment {
                 offset: self.pos,
                 reason: format!(
-                    "wrote {} bytes, planned layout is {}",
+                    "wrote {} bytes, planned structure is {}",
                     self.pos,
                     self.dest.total_size()
                 ),
@@ -268,29 +277,24 @@ impl<'a, W: Write, S: Sink + ?Sized> Emitter<'a, W, S> {
 
 /// How many copy buffers a run may span before it is flushed. Bounds the pieces a
 /// writer holds, however many small segments the asset has.
-#[allow(dead_code)] // used by the built-in writers; which ones depends on the features
 pub(crate) const RUN_WINDOWS: u64 = 16;
 
 /// Copy buffer for large writes. Measured on one machine (Apple M2, 128 MB PNGs): 64
 /// and 128 KiB were slow in memory, 16 and 32 KiB slow from disk, 256 KiB good in
 /// both. Not measured on other CPUs.
-#[allow(dead_code)] // used by the built-in writers; which ones depends on the features
 const WRITE_BUFFER: usize = 256 * 1024;
 
 /// Smallest copy buffer.
-#[allow(dead_code)] // used by the built-in writers; which ones depends on the features
 const MIN_WRITE_BUFFER: usize = 4096;
 
 /// Size of the copy buffer for writing an output of `total` bytes. It is also the
 /// read and write window of a run, so a small asset gets a buffer no larger than
 /// itself and does not pay for a large allocation.
-#[allow(dead_code)] // used by the built-in writers; which ones depends on the features
 pub(crate) fn write_buffer_len(total: u64) -> usize {
     (total.min(WRITE_BUFFER as u64) as usize).max(MIN_WRITE_BUFFER)
 }
 
 /// Copy the pending run, if any, and clear it.
-#[allow(dead_code)] // used by the built-in writers; which ones depends on the features
 pub(crate) fn flush_run<R, W, S>(
     em: &mut Emitter<'_, W, S>,
     src: &mut R,
@@ -298,12 +302,12 @@ pub(crate) fn flush_run<R, W, S>(
     buf: &mut [u8],
 ) -> Result<()>
 where
-    R: Read + Seek,
-    W: Write,
+    R: Read + Seek + ?Sized,
+    W: Write + ?Sized,
     S: Sink + ?Sized,
 {
     if let Some(first) = pieces.first() {
-        em.begin_segment(first.dest)?;
+        em.enter_segment(first.dest)?;
         em.copy_run(src, pieces, buf)?;
     }
     pieces.clear();

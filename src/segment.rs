@@ -53,6 +53,7 @@ pub const MAX_SEGMENT_SIZE: u64 = 256 * 1024 * 1024;
 /// This represents what the segment IS from the SDK's perspective,
 /// independent of how it's physically stored in any particular format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum SegmentKind {
     /// File header/signature
     Header,
@@ -109,6 +110,7 @@ pub enum Role {
 /// What the name means is container-defined: a JPEG marker byte, or the four
 /// character code of a PNG chunk, RIFF chunk or BMFF box.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum Name {
     /// Unnamed (signature, trailing data, ...).
     None,

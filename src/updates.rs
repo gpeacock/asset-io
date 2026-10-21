@@ -13,14 +13,16 @@
 
 //! Metadata updates to apply when writing an asset.
 
-/// Metadata update strategy (internal)
+use std::any::{Any, TypeId};
+use std::collections::HashMap;
+
+/// What to do with one kind of metadata when writing an asset.
 ///
-/// Specifies how to handle a particular type of metadata when writing an asset.
-/// By default, all metadata is kept unchanged.
-// Only the built-in writers read the payload; none may be enabled.
-#[allow(dead_code)]
+/// By default, all metadata is kept unchanged. A handler reads it from
+/// [`Updates::xmp`] and [`Updates::jumbf`].
 #[derive(Debug, Clone, Default)]
-pub(crate) enum MetadataUpdate {
+#[non_exhaustive]
+pub enum MetadataUpdate {
     /// Keep existing metadata (default)
     #[default]
     Keep,
@@ -28,19 +30,6 @@ pub(crate) enum MetadataUpdate {
     Remove,
     /// Replace or add metadata
     Set(Vec<u8>),
-}
-
-/// What to do with merkle boxes (internal)
-#[derive(Debug, Clone, Default)]
-#[allow(dead_code)] // `Set` is only built when the `bmff` feature is on
-pub(crate) enum MerkleUpdate {
-    /// Keep existing boxes (default)
-    #[default]
-    Keep,
-    /// Remove existing boxes
-    Remove,
-    /// Replace existing boxes with these payloads, one box each
-    Set(Vec<Vec<u8>>),
 }
 
 /// Updates to apply when writing a file
@@ -80,8 +69,22 @@ pub struct Updates {
     /// (see [`Updates::set_jumbf`]).
     pub(crate) jumbf_scope: Option<[u8; 16]>,
 
-    /// Merkle box update strategy (see [`Updates::set_merkle`])
-    pub(crate) merkle: MerkleUpdate,
+    /// Set by [`Updates::remove_all`], for handlers that remove more than XMP and
+    /// JUMBF then.
+    pub(crate) remove_all: bool,
+
+    /// Options a container defines for itself (see [`Updates::set_extension`]).
+    extensions: Extensions,
+}
+
+/// Values of any type, one per type, kept by [`Updates`].
+#[derive(Default)]
+struct Extensions(HashMap<TypeId, Box<dyn Any + Send + Sync>>);
+
+impl std::fmt::Debug for Extensions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Extensions({})", self.0.len())
+    }
 }
 
 impl Updates {
@@ -164,12 +167,65 @@ impl Updates {
     /// Whether the JUMBF update applies to existing JUMBF of type `ty`, as a
     /// container that carries JUMBF of any type reports it. A type that is not
     /// known is never touched by an update limited to one type.
-    #[allow(dead_code)] // only containers that carry JUMBF of any type call it
-    pub(crate) fn jumbf_targets(&self, ty: Option<[u8; 16]>) -> bool {
+    pub fn jumbf_targets(&self, ty: Option<[u8; 16]>) -> bool {
         match self.jumbf_scope {
             None => true,
             Some(scope) => ty == Some(scope),
         }
+    }
+
+    /// What to do with the XMP.
+    pub fn xmp(&self) -> &MetadataUpdate {
+        &self.xmp
+    }
+
+    /// What to do with the JUMBF.
+    pub fn jumbf(&self) -> &MetadataUpdate {
+        &self.jumbf
+    }
+
+    /// Whether the JUMBF being set is an update to the existing store; see
+    /// [`as_update`](Self::as_update).
+    pub fn is_jumbf_update(&self) -> bool {
+        self.jumbf_is_update
+    }
+
+    /// The JUMBF type the JUMBF update is limited to, or `None` for any JUMBF; see
+    /// [`set_jumbf`](Self::set_jumbf).
+    pub fn jumbf_scope(&self) -> Option<[u8; 16]> {
+        self.jumbf_scope
+    }
+
+    /// Whether these updates came from [`remove_all`](Self::remove_all). A handler
+    /// that has options of its own (see [`extension`](Self::extension)) treats an
+    /// option that was not set as removed then.
+    pub fn removes_all(&self) -> bool {
+        self.remove_all
+    }
+
+    /// Attach an option that one container defines for itself, such as the merkle
+    /// boxes of ISO BMFF. One value is kept per type; a later value of the same
+    /// type replaces the earlier. Containers that do not know the type ignore it.
+    /// A container that defines an option usually offers builder methods that call
+    /// this, so callers rarely do.
+    pub fn set_extension<T: Any + Send + Sync>(mut self, value: T) -> Self {
+        self.extensions.0.insert(TypeId::of::<T>(), Box::new(value));
+        self
+    }
+
+    /// The option of type `T`, if one was set with
+    /// [`set_extension`](Self::set_extension).
+    pub fn extension<T: Any + Send + Sync>(&self) -> Option<&T> {
+        self.extensions
+            .0
+            .get(&TypeId::of::<T>())
+            .and_then(|v| v.downcast_ref::<T>())
+    }
+
+    /// Forget the option of type `T`.
+    pub fn clear_extension<T: Any + Send + Sync>(mut self) -> Self {
+        self.extensions.0.remove(&TypeId::of::<T>());
+        self
     }
 
     /// Mark the JUMBF given to [`set_jumbf`](Self::set_jumbf) as an update
@@ -232,40 +288,6 @@ impl Updates {
         self
     }
 
-    /// Replace the file's merkle boxes with one box per payload.
-    ///
-    /// Merkle boxes carry proofs for hashed media blocks. Only ISO BMFF has them;
-    /// other containers ignore this. The boxes are written immediately after the
-    /// last `mdat`, and any existing merkle boxes are dropped. All payloads are
-    /// usually the same length (the C2PA specification pads them to one length).
-    ///
-    /// The content usually depends on hashes of the media, which exist only after
-    /// the write. Write zeroed payloads of the final length, hash the media through
-    /// the [`Sink`](crate::Sink) during the write, then fill each box in place with
-    /// [`Structure::patch_exact`](crate::Structure::patch_exact). The boxes are the
-    /// entities labelled [`bmff::MERKLE`](crate::containers::bmff::MERKLE) of kind
-    /// [`SegmentKind::Other`](crate::SegmentKind::Other).
-    ///
-    /// A file that has merkle boxes cannot take a new manifest unless the boxes are
-    /// also set or removed, and an update manifest cannot change them.
-    #[cfg(feature = "bmff")]
-    pub fn set_merkle(mut self, payloads: Vec<Vec<u8>>) -> Self {
-        self.merkle = MerkleUpdate::Set(payloads);
-        self
-    }
-
-    /// Remove the file's merkle boxes. See [`set_merkle`](Self::set_merkle).
-    pub fn remove_merkle(mut self) -> Self {
-        self.merkle = MerkleUpdate::Remove;
-        self
-    }
-
-    /// Keep the file's merkle boxes (explicit, same as default).
-    pub fn keep_merkle(mut self) -> Self {
-        self.merkle = MerkleUpdate::Keep;
-        self
-    }
-
     /// Create updates that keep all existing metadata (no changes)
     ///
     /// This is an alias for `Updates::new()` or `Updates::default()`.
@@ -283,7 +305,9 @@ impl Updates {
     /// let updates = Updates::remove_all();
     /// ```
     pub fn remove_all() -> Self {
-        Self::new().remove_xmp().remove_jumbf().remove_merkle()
+        let mut updates = Self::new().remove_xmp().remove_jumbf();
+        updates.remove_all = true;
+        updates
     }
 
     /// Create updates that set new XMP (legacy constructor)
@@ -300,5 +324,33 @@ impl Updates {
     /// the builder pattern.
     pub fn with_jumbf(jumbf: Vec<u8>) -> Self {
         Self::new().set_jumbf(jumbf)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Debug, PartialEq)]
+    struct Opt(u8);
+
+    #[test]
+    fn extensions_are_kept_per_type() {
+        let u = Updates::new();
+        assert!(u.extension::<Opt>().is_none());
+        let u = u.set_extension(Opt(1)).set_extension(7u32);
+        assert_eq!(u.extension::<Opt>(), Some(&Opt(1)));
+        assert_eq!(u.extension::<u32>(), Some(&7));
+        let u = u.set_extension(Opt(2));
+        assert_eq!(u.extension::<Opt>(), Some(&Opt(2)));
+        let u = u.clear_extension::<Opt>();
+        assert!(u.extension::<Opt>().is_none());
+        assert_eq!(u.extension::<u32>(), Some(&7));
+    }
+
+    #[test]
+    fn remove_all_is_remembered() {
+        assert!(!Updates::new().remove_xmp().remove_jumbf().removes_all());
+        assert!(Updates::remove_all().removes_all());
     }
 }

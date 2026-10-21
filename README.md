@@ -49,7 +49,7 @@ structure.write(&mut src, &mut out, &updates, &mut NullSink)?;
 
 `set_jumbf` replaces the JUMBF of the same type (the type in its description box) and leaves JUMBF of other types alone; `remove_jumbf_of(type)` removes one type, and `remove_jumbf()` removes all. This applies to JPEG, which carries JUMBF of any type. `Entity::jumbf_type()` gives each entity's type. PNG, RIFF and ISO BMFF reserve an element for the manifest store, and the type does not select anything there.
 
-`Structure::plan(src, &updates)` returns the layout `write` would produce, without writing: where each entity would land and the output size.
+`Structure::plan(src, &updates)` returns the structure `write` would produce, without writing: where each entity would land and the output size.
 
 `Structure::store(src)` reads the JUMBF store as a reader sees it. For ISO BMFF that combines an original store and its update; `containers::jumbf::{addition_to, extend}` convert between the two forms.
 
@@ -65,6 +65,12 @@ Each handler has an `id()` (`"jpeg"`, `"png"`, `"bmff"`, `"riff"`) and declares 
 
 Edits to a multi-picture JPEG add metadata to the first image and shift the sizes and offsets recorded in its MPF index to match. The edit fails instead of writing a stale or ambiguous index: the index must be well formed, appear once, and record the offset of every image and the size of every image but the first exactly. The first image's size may be recorded short of the image, as in Pixel Ultra HDR files, and is corrected on an edit. Parsing and copying unchanged never consult it. Bytes after an image that start like another image but do not parse as one are trailing data.
 
+## Writing a handler
+
+A handler implements `ContainerHandler`: `parse` builds a `Structure` with `StructureBuilder`, and `write_plan` describes a write as a `WritePlan`, a structure plus ordered `Step`s that either copy source bytes (`Copy`) or supply new ones (`Put`). It does no I/O of its own. The default `write` runs the plan with `WritePlan::execute`, which coalesces reads, feeds the sink and checks the bytes against the structure; the default `plan` returns the plan's structure. A container with absolute file offsets (ISO BMFF chunk tables) uses `Step::Relocate`, which copies a table of offsets and rewrites them from an `OffsetMap`; the plan stays plain data. `plan::validate` checks a plan without any I/O, for a handler's tests. Read what to change from `Updates` (`xmp()`, `jumbf()`, ...). Options only one container has live outside `Updates`: attach them with `Updates::set_extension` and read them with `Updates::extension` (ISO BMFF's merkle boxes are `containers::bmff::BmffUpdates`). `tests/external_handler.rs` is a complete handler written with only the public API.
+
+Register a handler with `HandlerRegistry::with_handler`; the last handler registered for a format wins. Enums and structs a handler touches are `#[non_exhaustive]`, so new variants and fields are not breaking changes.
+
 ## Zero-copy
 
 With the bytes in memory, `Structure::slice`, `slice_entity` and `read_slice` borrow instead of copying. The `memory-mapped` feature adds `MappedFile` for that. Mapping is `unsafe`: the file must not change while mapped, so don't map files untrusted parties can write.
@@ -73,7 +79,7 @@ With the bytes in memory, `Structure::slice`, `slice_entity` and `read_slice` bo
 
 - `MiniXmp` (feature `xmp`): minimal XMP read/modify.
 - `Structure::exif_info` (feature `exif`): basic EXIF fields, for containers that report EXIF entities: JPEG, PNG, WebP, and HEIF/AVIF (the `Exif` item).
-- `Structure::embedded_thumbnail`: a thumbnail the container stores as its own element (a HEIF `thmb` item, entity kind `Thumbnail`; its data is the coded item, a JPEG only when the item type is `jpeg`), or with the `exif` feature the JPEG thumbnail inside EXIF data.
+- `Structure::embedded_thumbnail`: a thumbnail the container stores as its own element (a HEIF `thmb` item, entity kind `Thumbnail`; its data is the coded item unless the item is a `jpeg` or a `mime` item), or with the `exif` feature the JPEG thumbnail inside EXIF data. `Thumbnail::media_type()` says what the data is, or `None` when the container cannot tell (a coded `hvc1`/`av01` item); `Entity::media_type()` and `SubAsset::media_type()` report media types the same way.
 
 Run `cargo run --example inspect --features all-formats,xmp,exif -- <file>` to print a file's structure.
 

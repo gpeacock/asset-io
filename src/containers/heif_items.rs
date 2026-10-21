@@ -13,6 +13,14 @@
 
 //! HEIF items found through the file-level `meta` box: EXIF data and thumbnails.
 //!
+//! This is not a container handler. It is a parser for one part of ISO BMFF that
+//! the [`bmff`](super::bmff) handler calls when it parses a file, and only that
+//! handler uses it. The handler turns what it finds into
+//! [`Exif`](crate::SegmentKind::Exif) and
+//! [`Thumbnail`](crate::SegmentKind::Thumbnail) entities, which the
+//! container-agnostic code (`Structure::exif_info`, `Structure::embedded_thumbnail`)
+//! then reads without knowing the format.
+//!
 //! HEIF (HEIC, AVIF) stores images and metadata as items. `iinf` lists them with
 //! a type, `iloc` says where their bytes are, and `iref` links them: a `thmb`
 //! reference from item A to item B says A is a thumbnail of B. This module reads
@@ -55,6 +63,10 @@ pub(super) enum Kind {
 pub(super) struct Found {
     pub kind: Kind,
     pub item_type: [u8; 4],
+    /// Media type of the item's data: `image/jpeg` for a `jpeg` item, the content
+    /// type the file gives for a `mime` item, and `None` for anything else (coded
+    /// bitstreams such as `hvc1` are not files of any media type).
+    pub media_type: Option<String>,
     /// `(file offset, length)` of each extent, in order.
     pub extents: Vec<(u64, u64)>,
 }
@@ -103,6 +115,14 @@ impl<'a> Reader<'a> {
         }
     }
 
+    /// A NUL-terminated string, without the NUL.
+    fn cstr(&mut self) -> Option<&'a [u8]> {
+        let n = self.b.iter().position(|&c| c == 0)?;
+        let s = self.take(n)?;
+        self.take(1)?;
+        Some(s)
+    }
+
     fn id(&mut self, wide: bool) -> Option<u32> {
         if wide {
             self.u32()
@@ -144,8 +164,29 @@ fn boxes(buf: &[u8]) -> Result<Vec<([u8; 4], usize, usize)>> {
     Ok(out)
 }
 
-/// `(item id, item type)` for every `infe` entry that has a type (version 2, 3).
-fn parse_iinf(p: &[u8]) -> Result<Vec<(u32, [u8; 4])>> {
+/// An item's type and, when the file says, its content type.
+struct Info {
+    item_type: [u8; 4],
+    media_type: Option<String>,
+}
+
+/// Longest media type accepted, in bytes.
+const MAX_MEDIA_TYPE: usize = 255;
+
+/// `text` if it looks like a media type: `type/subtype`, printable ASCII, bounded.
+/// Anything else is dropped rather than reported, since the file is not trusted.
+fn media_type_of(text: &[u8]) -> Option<String> {
+    let ok = (3..=MAX_MEDIA_TYPE).contains(&text.len())
+        && text.iter().all(|c| (0x20..0x7f).contains(c))
+        && text.iter().filter(|&&c| c == b'/').count() == 1
+        && text[0] != b'/'
+        && text[text.len() - 1] != b'/';
+    ok.then(|| String::from_utf8_lossy(text).trim().to_owned())
+        .filter(|t| !t.is_empty())
+}
+
+/// `(item id, type info)` for every `infe` entry that has a type (version 2, 3).
+fn parse_iinf(p: &[u8]) -> Result<Vec<(u32, Info)>> {
     let mut r = Reader { b: p };
     let version = r.u8().ok_or_else(|| malformed("iinf"))?;
     r.take(3).ok_or_else(|| malformed("iinf"))?;
@@ -172,7 +213,22 @@ fn parse_iinf(p: &[u8]) -> Result<Vec<(u32, [u8; 4])>> {
             .take(4)
             .and_then(|t| t.try_into().ok())
             .ok_or_else(|| malformed("infe"))?;
-        out.push((id, item_type));
+        // A `mime` item names its content type after the item name. A string that is
+        // missing or malformed leaves the type unknown; it does not fail the file.
+        let media_type = if item_type == *b"jpeg" {
+            Some("image/jpeg".to_owned())
+        } else if item_type == *b"mime" {
+            e.cstr().and_then(|_name| e.cstr()).and_then(media_type_of)
+        } else {
+            None
+        };
+        out.push((
+            id,
+            Info {
+                item_type,
+                media_type,
+            },
+        ));
     }
     Ok(out)
 }
@@ -195,7 +251,7 @@ fn parse_thumbnails(p: &[u8]) -> Result<HashSet<u32>> {
 
 fn parse_iloc(
     p: &[u8],
-    wanted: &HashMap<u32, (Kind, [u8; 4])>,
+    wanted: &HashMap<u32, (Kind, Info)>,
     idat: Option<u64>,
 ) -> Result<Vec<Found>> {
     let bad = || malformed("iloc");
@@ -234,7 +290,7 @@ fn parse_iloc(
         let base = r.uint(base_size).ok_or_else(bad)?;
         let extent_count = r.u16().ok_or_else(bad)? as usize;
 
-        let Some(&(kind, item_type)) = wanted.get(&id) else {
+        let Some((kind, info)) = wanted.get(&id) else {
             r.take(extent_count * per_extent).ok_or_else(bad)?;
             continue;
         };
@@ -264,8 +320,9 @@ fn parse_iloc(
         }
         if ok && !extents.is_empty() {
             out.push(Found {
-                kind,
-                item_type,
+                kind: *kind,
+                item_type: info.item_type,
+                media_type: info.media_type.clone(),
                 extents,
             });
         }
@@ -287,15 +344,15 @@ pub(super) fn find(meta: &[u8], meta_at: u64) -> Result<Vec<Found>> {
         None => HashSet::new(),
     };
     let mut wanted = HashMap::new();
-    for (id, ty) in types {
-        let kind = if ty == EXIF_ITEM {
+    for (id, info) in types {
+        let kind = if info.item_type == EXIF_ITEM {
             Kind::Exif
         } else if thumbs.contains(&id) {
             Kind::Thumbnail
         } else {
             continue;
         };
-        wanted.entry(id).or_insert((kind, ty));
+        wanted.entry(id).or_insert((kind, info));
     }
     if wanted.is_empty() {
         return Ok(Vec::new());
@@ -339,6 +396,20 @@ pub(super) mod build {
         b.extend_from_slice(&[0, 0]);
         b.extend_from_slice(ty);
         b.push(0); // empty name
+        full(b"infe", 2, &b)
+    }
+
+    /// An `infe` for a `mime` item. `content_type` is written as given, with its
+    /// NUL unless it ends in one already.
+    pub fn infe_mime(id: u16, content_type: &[u8]) -> Vec<u8> {
+        let mut b = id.to_be_bytes().to_vec();
+        b.extend_from_slice(&[0, 0]);
+        b.extend_from_slice(b"mime");
+        b.push(0); // empty name
+        b.extend_from_slice(content_type);
+        if content_type.last() != Some(&0) {
+            b.push(0);
+        }
         full(b"infe", 2, &b)
     }
 
@@ -401,15 +472,67 @@ mod tests {
                 Found {
                     kind: Kind::Exif,
                     item_type: *b"Exif",
+                    media_type: None,
                     extents: vec![(100, 20), (200, 8)]
                 },
                 Found {
                     kind: Kind::Thumbnail,
                     item_type: *b"jpeg",
+                    media_type: Some("image/jpeg".into()),
                     extents: vec![(500, 40)]
                 },
             ]
         );
+    }
+
+    #[test]
+    fn a_mime_item_reports_its_content_type() {
+        let m = meta(&[
+            iinf(&[infe(1, b"hvc1"), infe_mime(3, b"image/png")]),
+            thmb(3, 1),
+            iloc0(&[(3, &[(500, 40)])]),
+        ]);
+        let found = find(&m, 0).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].item_type, *b"mime");
+        assert_eq!(found[0].media_type.as_deref(), Some("image/png"));
+    }
+
+    #[test]
+    fn a_content_type_that_is_not_one_leaves_the_item_found_but_untyped() {
+        let long = vec![b'a'; 300];
+        let long = [&long[..], b"/b"].concat();
+        let bad: [&[u8]; 7] = [
+            b"",
+            b"png",
+            b"image/",
+            b"/png",
+            b"a/b/c",
+            b"image/\x01png",
+            &long,
+        ];
+        for ct in bad {
+            let m = meta(&[
+                iinf(&[infe(1, b"hvc1"), infe_mime(3, ct)]),
+                thmb(3, 1),
+                iloc0(&[(3, &[(500, 40)])]),
+            ]);
+            let found = find(&m, 0).unwrap();
+            assert_eq!(found.len(), 1, "{ct:?}");
+            assert_eq!(found[0].media_type, None, "{ct:?}");
+        }
+
+        // A name and content type that run off the end of the entry.
+        let mut cut = infe_mime(3, b"image/png");
+        cut.truncate(cut.len() - 4);
+        let n = cut.len() as u32;
+        cut[..4].copy_from_slice(&n.to_be_bytes());
+        let m = meta(&[
+            iinf(&[infe(1, b"hvc1"), cut]),
+            thmb(3, 1),
+            iloc0(&[(3, &[(500, 40)])]),
+        ]);
+        assert_eq!(find(&m, 0).unwrap()[0].media_type, None);
     }
 
     #[test]

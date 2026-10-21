@@ -59,7 +59,7 @@ fn items_survive_a_write_and_stay_readable() {
         );
 
         // Writing a manifest moves the data; the items must move with it, in both
-        // the layout the write returns and a fresh parse of the output.
+        // the structure the write returns and a fresh parse of the output.
         let mut out = Cursor::new(Vec::new());
         let dest = s
             .write(
@@ -73,7 +73,7 @@ fn items_survive_a_write_and_stay_readable() {
         let again = HandlerRegistry::builtin()
             .parse_detect(&mut Cursor::new(&out))
             .unwrap();
-        assert_eq!(items(&dest, &out), before, "{path}: returned layout");
+        assert_eq!(items(&dest, &out), before, "{path}: returned structure");
         assert_eq!(items(&again, &out), before, "{path}: reparsed output");
 
         #[cfg(feature = "exif")]

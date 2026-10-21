@@ -66,7 +66,7 @@ fn store(uuid: u8, children: &[&[u8]]) -> Vec<u8> {
 /// (segment index, offset, length).
 type EntityShape = (SegmentKind, Option<String>, Vec<(usize, u64, u64)>);
 
-/// Everything about a layout a caller can observe.
+/// Everything about a structure a caller can observe.
 fn shape(s: &Structure) -> (u64, Vec<asset_io::Segment>, Vec<EntityShape>) {
     let mut entities = Vec::new();
     for kind in [

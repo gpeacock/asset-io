@@ -21,6 +21,7 @@
 //! on any structure without the caller knowing the format.
 
 use crate::error::{Error, Result};
+use crate::plan::WritePlan;
 use crate::segment::{Name, Segment, SegmentKind};
 use crate::sink::Sink;
 use crate::structure::{SegmentId, Structure};
@@ -47,6 +48,7 @@ pub const DETECT_LEN: usize = 64;
 /// declares one `FormatSpec` per media type. Format strings are matched ignoring
 /// case, surrounding whitespace and a leading dot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct FormatSpec {
     /// The media type, for example `image/jpeg`.
     pub media_type: &'static str,
@@ -117,15 +119,36 @@ pub trait ContainerHandler: std::fmt::Debug + Send + Sync {
         false
     }
 
-    /// Parse the whole layout of an asset.
+    /// Parse the whole structure of an asset.
     ///
     /// The result must tile the stream (see [`StructureBuilder`](crate::StructureBuilder))
     /// and must be built with `self` as its handler, which is why this takes the
     /// `Arc`: `StructureBuilder::new(self, ...)`.
     fn parse(self: Arc<Self>, src: &mut dyn ReadSeek) -> Result<Structure>;
 
+    /// Describe the write of the asset with `updates` applied: the structure of the
+    /// output and the steps that produce it. Nothing is written.
+    ///
+    /// This is the method most handlers implement for writing. The default
+    /// [`write`](Self::write) executes the plan, and the default
+    /// [`plan`](Self::plan) returns its structure. `src` must be the stream
+    /// `src_structure` was parsed from; a handler that needs nothing from it ignores
+    /// it. The default reports [`Error::UnsupportedFormat`].
+    fn write_plan<'a>(
+        &self,
+        _src_structure: &Structure,
+        _src: &mut dyn ReadSeek,
+        _updates: &'a Updates,
+    ) -> Result<WritePlan<'a>> {
+        Err(Error::UnsupportedFormat)
+    }
+
     /// Write the asset with `updates` applied, delivering every output byte to
-    /// `sink`, and return the layout of what was written.
+    /// `sink`, and return the structure of what was written.
+    ///
+    /// The default executes [`write_plan`](Self::write_plan). Override it only to
+    /// write some other way, such as a container whose output cannot be described
+    /// ahead of time.
     fn write(
         &self,
         src_structure: &Structure,
@@ -133,22 +156,28 @@ pub trait ContainerHandler: std::fmt::Debug + Send + Sync {
         out: &mut dyn ReadWriteSeek,
         updates: &Updates,
         sink: &mut dyn Sink,
-    ) -> Result<Structure>;
+    ) -> Result<Structure> {
+        let plan = self.write_plan(src_structure, src, updates)?;
+        plan.execute(src, out, sink)?;
+        Ok(plan.into_structure())
+    }
 
-    /// The layout [`write`](Self::write) would produce for `updates`, without
+    /// The structure [`write`](Self::write) would produce for `updates`, without
     /// writing anything. `src` must be the stream `src_structure` was parsed from;
     /// handlers that need nothing from it ignore it.
     ///
-    /// Called through [`Structure::plan`](crate::Structure::plan). The default
-    /// reports [`Error::UnsupportedFormat`], so handlers written before this method
-    /// existed keep compiling. Implementations must return exactly what `write` does.
+    /// Called through [`Structure::plan`](crate::Structure::plan). The default is
+    /// the structure of [`write_plan`](Self::write_plan). Implementations must return
+    /// exactly what `write` does.
     fn plan(
         &self,
-        _src_structure: &Structure,
-        _src: &mut dyn ReadSeek,
-        _updates: &Updates,
+        src_structure: &Structure,
+        src: &mut dyn ReadSeek,
+        updates: &Updates,
     ) -> Result<Structure> {
-        Err(Error::UnsupportedFormat)
+        Ok(self
+            .write_plan(src_structure, src, updates)?
+            .into_structure())
     }
 
     /// The asset's XMP packet, or `None` if it has none. Called through

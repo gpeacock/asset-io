@@ -16,7 +16,7 @@
 //! Multi-Picture Format: the fuzzer's bytes are the MPF index of an otherwise valid
 //! two-image JPEG, followed by the trailing data. Parsing and copying must always
 //! work; an edit may be refused, but one that is accepted must write a file that
-//! parses to the layout `write` reported.
+//! parses to the structure `write` reported.
 
 use asset_io::{HandlerRegistry, NullSink, Updates};
 use libfuzzer_sys::fuzz_target;

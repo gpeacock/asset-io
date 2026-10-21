@@ -11,7 +11,7 @@
 // specific language governing permissions and limitations under
 // each license.
 
-//! JPEG on the layout model.
+//! JPEG on the structure model.
 //!
 //! Every marker segment is one [`Segment`]. For a segment with a length field,
 //! the header is `FF xx len(2)` plus any signature or JPEG XT prefix, and the
@@ -52,10 +52,11 @@
 //! Not yet ported: EXIF thumbnail location.
 
 use crate::error::{Error, Result};
-use crate::handler::{ContainerHandler, FormatSpec, ReadSeek, ReadWriteSeek};
+use crate::handler::{ContainerHandler, FormatSpec, ReadSeek};
+use crate::plan::WritePlan;
 use crate::segment::SegmentKind;
 use crate::segment::{Name, Role, Segment};
-use crate::sink::{flush_run, write_buffer_len, Emitter, Piece, Sink, RUN_WINDOWS};
+use crate::sink::Sink;
 use crate::structure::{Part, SegmentId, Structure, StructureBuilder};
 use crate::ByteRange;
 use crate::{MetadataUpdate, Updates};
@@ -188,24 +189,13 @@ impl ContainerHandler for JpegHandler {
         parse_with(self, &mut src)
     }
 
-    fn write(
+    fn write_plan<'a>(
         &self,
         src_structure: &Structure,
         mut src: &mut dyn ReadSeek,
-        mut out: &mut dyn ReadWriteSeek,
-        updates: &Updates,
-        sink: &mut dyn Sink,
-    ) -> Result<Structure> {
-        write(src_structure, &mut src, &mut out, updates, sink)
-    }
-
-    fn plan(
-        &self,
-        src_structure: &Structure,
-        mut src: &mut dyn ReadSeek,
-        updates: &Updates,
-    ) -> Result<Structure> {
-        plan(src_structure, &mut src, updates).map(|(_, dest)| dest)
+        updates: &'a Updates,
+    ) -> Result<WritePlan<'a>> {
+        plan(src_structure, &mut src, updates)
     }
 
     fn compose(&self, kind: SegmentKind, data: &[u8]) -> Result<Vec<u8>> {
@@ -230,7 +220,7 @@ impl ContainerHandler for JpegHandler {
     }
 }
 
-/// Parse a JPEG into a validated layout.
+/// Parse a JPEG into a validated structure.
 pub fn parse<R: Read + Seek>(src: &mut R) -> Result<Structure> {
     parse_with(handler(), src)
 }
@@ -353,7 +343,7 @@ fn parse_with<R: Read + Seek>(
     // Another image directly after this one makes a multi-picture file. Later
     // images are listed as segments and left uninterpreted. Bytes that start like an
     // image but are not one are trailing data, as they are in a single-image file:
-    // the layout is rolled back to the end of the last good image.
+    // the structure is rolled back to the end of the last good image.
     let mut multi = false;
     while total - offset >= 4 && next_is_image(src, offset)? {
         b.begin_subasset(Some("image/jpeg".into()))?;
@@ -776,13 +766,13 @@ fn find_mpf<R: Read + Seek>(
     Ok(find_all_mpf(src, rd, primary_end)?.first().copied())
 }
 
-/// The MPF block rewritten for the output layout, or `None` if no image moved.
+/// The MPF block rewritten for the output structure, or `None` if no image moved.
 ///
 /// The block records the size and offset of every image, and the offsets count
 /// from the block itself, so anything that changes the size of the primary image
 /// or moves the block invalidates it. Each recorded value is shifted by how far
 /// the image or the block moved. The block has the same length as before, so the
-/// layout does not depend on it.
+/// structure does not depend on it.
 fn fix_mpf<R: Read + Seek>(
     src: &Structure,
     rd: &mut R,
@@ -1205,9 +1195,53 @@ fn is_insertion_point(seg: &Segment) -> bool {
         && matches!(seg.name(), Name::Marker(m) if !(0xE0..=0xEF).contains(&m) && m != 0xFE)
 }
 
-/// Decide what the output contains. Single source of truth for the destination
-/// layout and the bytes written.
+/// Decide what the output contains and describe how to write it.
 fn plan<'a, R: Read + Seek>(
+    src: &Structure,
+    rd: &mut R,
+    updates: &'a Updates,
+) -> Result<WritePlan<'a>> {
+    let (ops, dest) = plan_ops(src, rd, updates)?;
+    let mut plan = WritePlan::new(dest);
+    for (i, op) in ops.into_iter().enumerate() {
+        let dest = SegmentId::from_index(i)?;
+        match op {
+            Op::Copy(sid) => {
+                plan.copy_segment(dest, src.segment(sid)?);
+            }
+            Op::Patched { id, payload } => {
+                let mut payload = Some(payload);
+                for (role, range) in src.segment(id)?.regions() {
+                    if let (Role::Payload, Some(p)) = (role, payload.as_mut()) {
+                        plan.put(dest, role, std::mem::take(p));
+                    } else {
+                        plan.copy(dest, role, range);
+                    }
+                }
+            }
+            new => {
+                let mut hdr = [0u8; MAX_HEADER];
+                let (n, _) = encode_new(&new, &mut hdr)?;
+                let payload: Cow<'a, [u8]> = match new {
+                    Op::XmpStd { payload }
+                    | Op::XmpExt { payload, .. }
+                    | Op::Jumbf { payload, .. } => Cow::Borrowed(payload),
+                    Op::XmpMain { payload } => Cow::Owned(payload),
+                    Op::Copy(_) | Op::Patched { .. } => {
+                        return Err(Error::InvalidFormat("not a new segment".into()))
+                    }
+                };
+                plan.put(dest, Role::Header, hdr[..n].to_vec());
+                plan.put(dest, Role::Payload, payload);
+            }
+        }
+    }
+    Ok(plan)
+}
+
+/// Decide what the output contains. Single source of truth for the destination
+/// structure and the bytes written.
+fn plan_ops<'a, R: Read + Seek>(
     src: &Structure,
     rd: &mut R,
     updates: &'a Updates,
@@ -1292,7 +1326,7 @@ fn plan<'a, R: Read + Seek>(
         }
     }
 
-    // Destination size, then destination layout.
+    // Destination size, then destination structure.
     let mut total = 0u64;
     let mut dims = Vec::with_capacity(ops.len());
     for op in &ops {
@@ -1362,13 +1396,6 @@ fn put_marker_len(hdr: &mut [u8], marker: u8, header_len: u32, payload_len: u64)
     hdr[1] = marker;
     hdr[2..4].copy_from_slice(&v.to_be_bytes());
     Ok(())
-}
-
-fn emit_new<W: Write, S: Sink + ?Sized>(em: &mut Emitter<'_, W, S>, op: &Op<'_>) -> Result<()> {
-    let mut hdr = [0u8; MAX_HEADER];
-    let (n, payload) = encode_new(op, &mut hdr)?;
-    em.put(Role::Header, &hdr[..n])?;
-    em.put(Role::Payload, payload)
 }
 
 /// Build the header of a new segment in `hdr`; returns its length and the payload.
@@ -1449,7 +1476,7 @@ fn compose(kind: SegmentKind, data: &[u8]) -> Result<Vec<u8>> {
 ///
 /// Unchanged segments are copied byte for byte. `out` is written from its
 /// current start; offsets reported to the sink are relative to the first byte
-/// written. Returns the layout of the output.
+/// written. Returns the structure of the output.
 pub fn write<R, W, S>(
     src_structure: &Structure,
     src: &mut R,
@@ -1459,76 +1486,12 @@ pub fn write<R, W, S>(
 ) -> Result<Structure>
 where
     R: Read + Seek,
-    W: Write,
+    W: Write + ?Sized,
     S: Sink + ?Sized,
 {
-    let (ops, dest) = plan(src_structure, src, updates)?;
-    sink.begin(&dest)?;
-
-    let chunk = write_buffer_len(dest.total_size());
-    let mut buf = vec![0u8; chunk];
-    // Source regions of consecutive copied segments that are contiguous in `src` are
-    // read and written as one run; see `Emitter::copy_run`. A run is flushed at a
-    // gap, before any segment that is not a plain copy, and once it spans
-    // RUN_WINDOWS buffers.
-    let run_limit = (chunk as u64).saturating_mul(RUN_WINDOWS);
-    let mut pieces: Vec<Piece> = Vec::new();
-    let mut run_len = 0u64;
-    {
-        let mut em = Emitter::new(out, sink, &dest);
-        for (i, op) in ops.iter().enumerate() {
-            let id = SegmentId::from_index(i)?;
-            match op {
-                Op::Copy(sid) => {
-                    let s = src_structure.segment(*sid)?;
-                    for (role, range) in s.regions() {
-                        if pieces
-                            .last()
-                            .is_some_and(|p| p.range.end() != range.offset())
-                        {
-                            flush_run(&mut em, src, &mut pieces, &mut buf)?;
-                            run_len = 0;
-                        }
-                        run_len = run_len.saturating_add(range.len());
-                        pieces.push(Piece {
-                            dest: id,
-                            role,
-                            range,
-                        });
-                    }
-                    if run_len >= run_limit {
-                        flush_run(&mut em, src, &mut pieces, &mut buf)?;
-                        run_len = 0;
-                    }
-                }
-                Op::Patched {
-                    id: patched,
-                    payload,
-                } => {
-                    flush_run(&mut em, src, &mut pieces, &mut buf)?;
-                    run_len = 0;
-                    em.begin_segment(id)?;
-                    let s = src_structure.segment(*patched)?;
-                    for (role, range) in s.regions() {
-                        if role == Role::Payload {
-                            em.put(role, payload)?;
-                        } else {
-                            em.copy(src, role, range, &mut buf)?;
-                        }
-                    }
-                }
-                _ => {
-                    flush_run(&mut em, src, &mut pieces, &mut buf)?;
-                    run_len = 0;
-                    em.begin_segment(id)?;
-                    emit_new(&mut em, op)?;
-                }
-            }
-        }
-        flush_run(&mut em, src, &mut pieces, &mut buf)?;
-        em.finish()?;
-    }
-    Ok(dest)
+    let plan = plan(src_structure, src, updates)?;
+    plan.execute(src, out, sink)?;
+    Ok(plan.into_structure())
 }
 
 // ----------------------------------------------------------------------------
@@ -1916,7 +1879,7 @@ mod tests {
         }
         assert_eq!(next, j.len() as u64);
 
-        // Round trip preserves layout, including the subdivision flag.
+        // Round trip preserves structure, including the subdivision flag.
         let (out, dest) = do_write(&j, &Updates::new());
         assert_eq!(out, j);
         assert_eq!(dest.segments(), s.segments());
@@ -2246,7 +2209,7 @@ mod tests {
         let bytes = out.into_inner();
         let streamed = sink.0.finalize().to_vec();
 
-        // Route 2: walk the finished layout.
+        // Route 2: walk the finished structure.
         let mut walked = Sha256::new();
         let mut src = Cursor::new(bytes.clone());
         let mut buf = vec![0u8; 4096];
@@ -2473,7 +2436,7 @@ mod tests {
         (pairs, payload.offset())
     }
 
-    fn assert_index_matches_layout(file: &[u8]) {
+    fn assert_index_matches_structure(file: &[u8]) {
         let s = parse(&mut Cursor::new(file.to_vec())).unwrap();
         let (pairs, base) = recorded(file);
         let images: Vec<_> = s
@@ -2523,7 +2486,7 @@ mod tests {
             assert_eq!(names, ["SOI", "APP0", "DQT", "SOS", "EOI"]);
             assert_eq!(subs[1].relative(subs[1].range().offset() + 3), Some(3));
             assert_eq!(subs[1].relative(0), None);
-            assert_index_matches_layout(&f);
+            assert_index_matches_structure(&f);
         }
     }
 
@@ -2573,7 +2536,7 @@ mod tests {
 
             let re = parse(&mut Cursor::new(out.clone())).unwrap();
             assert_eq!(re.subassets().len(), 3);
-            assert_index_matches_layout(&out);
+            assert_index_matches_structure(&out);
             // Later images and trailing data are untouched.
             let subs = re.subassets();
             assert_eq!(
@@ -2581,7 +2544,7 @@ mod tests {
                 &second[..]
             );
             assert_eq!(&out[subs[2].range().offset() as usize..], b"tail");
-            // The planned layout is the written one, parts included.
+            // The planned structure is the written one, parts included.
             assert_eq!(dest.subassets(), re.subassets());
             let planned = parse(&mut Cursor::new(f.clone()))
                 .unwrap()
@@ -2593,7 +2556,7 @@ mod tests {
             let (again, _) = do_write(&out, &Updates::new());
             assert_eq!(again, out);
             let (back, _) = do_write(&out, &Updates::remove_all());
-            assert_index_matches_layout(&back);
+            assert_index_matches_structure(&back);
             assert_eq!(back.len(), f.len());
         }
     }
@@ -2717,7 +2680,7 @@ mod tests {
             assert_eq!(subs[2].media_type(), None);
             assert_eq!(&f[subs[2].range().offset() as usize..], t);
             let (out, _) = do_write(&f, &Updates::new().set_jumbf(fake_jumbf(64)));
-            assert_index_matches_layout(&out);
+            assert_index_matches_structure(&out);
         }
     }
 
@@ -2814,7 +2777,7 @@ mod tests {
             let (kept, _) = do_write(&f, &Updates::new());
             assert_eq!(kept, f, "copying never consults the index");
             let (out, _) = do_write(&f, &edit);
-            assert_index_matches_layout(&out);
+            assert_index_matches_structure(&out);
         }
 
         // Claiming more than the image is refused.
@@ -2946,7 +2909,7 @@ mod tests {
                         accepted += 1;
                         let re = parse(&mut Cursor::new(out.clone())).unwrap();
                         assert_eq!(re.subassets(), dest.subassets());
-                        assert_index_matches_layout(&out);
+                        assert_index_matches_structure(&out);
                     }
                 }
             }
