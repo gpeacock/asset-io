@@ -40,16 +40,13 @@
 //! it all. A manifest that is not in `svg > metadata` is not one; several are
 //! ambiguous, as in any container.
 
-use super::jumbf::superbox_type;
-use crate::error::{Error, Result};
-use crate::handler::{ContainerHandler, FormatSpec};
+use crate::jumbf::superbox_type;
 use crate::plan::WritePlan;
-use crate::plan_builder::PlanBuilder;
-use crate::range::ByteRange;
-use crate::segment::{Name, Role, SegmentKind, MAX_SEGMENT_SIZE};
-use crate::structure::{Entity, SegmentId, Structure, StructureBuilder};
-use crate::task::{BoxFuture, Io};
-use crate::{Existing, MetadataSlot, MetadataUpdate, Updates};
+use crate::{
+    BoxFuture, ByteRange, ContainerHandler, Entity, Error, Existing, FormatSpec, Io, MetadataSlot,
+    MetadataUpdate, Name, PlanBuilder, Result, Role, SegmentId, SegmentKind, Structure,
+    StructureBuilder, Updates, MAX_SEGMENT_SIZE,
+};
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::name::ResolveResult;
 use quick_xml::{NsReader, Reader};
@@ -799,7 +796,7 @@ fn check_packet(packet: &[u8]) -> Result<()> {
 
 /// Standard base64 with padding, which is how a manifest is written in SVG.
 mod base64 {
-    use crate::error::{Error, Result};
+    use crate::{Error, Result};
 
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 

@@ -236,7 +236,7 @@ impl Updates {
     ///     .set_jumbf(b"jumbf data".to_vec());
     /// ```
     pub fn set_jumbf(mut self, jumbf: Vec<u8>) -> Self {
-        self.jumbf_scope = crate::containers::jumbf::superbox_type(&jumbf);
+        self.jumbf_scope = crate::jumbf::superbox_type(&jumbf);
         self.jumbf = MetadataUpdate::Set(jumbf);
         self.jumbf_is_update = false;
         self

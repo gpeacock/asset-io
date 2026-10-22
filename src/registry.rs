@@ -68,20 +68,8 @@ impl HandlerRegistry {
         static BUILTIN: OnceLock<Arc<HandlerRegistry>> = OnceLock::new();
         BUILTIN
             .get_or_init(|| {
-                #[allow(unused_mut)]
                 let mut r = HandlerRegistry::new();
-                #[cfg(feature = "jpeg")]
-                r.add_arc(crate::containers::jpeg::handler());
-                #[cfg(feature = "png")]
-                r.add_arc(crate::containers::png::handler());
-                #[cfg(feature = "bmff")]
-                r.add_arc(crate::containers::bmff::handler());
-                #[cfg(feature = "riff")]
-                r.add_arc(crate::containers::riff::handler());
-                #[cfg(feature = "svg")]
-                r.add_arc(crate::containers::svg::handler());
-                #[cfg(feature = "pdf")]
-                r.add_arc(crate::containers::pdf::handler());
+                crate::containers::register_builtin(&mut r);
                 Arc::new(r)
             })
             .clone()

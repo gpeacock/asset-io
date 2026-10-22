@@ -65,6 +65,7 @@ mod crc;
 mod error;
 mod execute;
 mod handler;
+pub mod jumbf;
 #[cfg(feature = "memory-mapped")]
 mod mapped;
 pub mod plan;
@@ -94,7 +95,7 @@ pub use plan::{Step, WritePlan};
 pub use plan_builder::PlanBuilder;
 pub use range::ByteRange;
 pub use registry::HandlerRegistry;
-pub use segment::{labels, Name, Role, Segment, SegmentKind, AFTER_BOX};
+pub use segment::{labels, Name, Role, Segment, SegmentKind, AFTER_BOX, MAX_SEGMENT_SIZE};
 pub use sink::{Chunk, NullSink, Sink};
 pub use structure::{
     Entity, Part, Region, SegmentId, Structure, StructureBuilder, SubAsset, MAX_SEGMENTS,

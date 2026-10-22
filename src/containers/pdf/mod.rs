@@ -32,16 +32,12 @@ mod flate;
 mod lexer;
 mod write;
 
-use crate::error::{Error, Result};
-use crate::handler::{ContainerHandler, FormatSpec};
 use crate::plan::WritePlan;
-use crate::plan_builder::PlanBuilder;
-use crate::range::ByteRange;
-use crate::segment::Role;
-use crate::segment::{Name, SegmentKind, MAX_SEGMENT_SIZE};
-use crate::structure::{Entity, SegmentId, Structure, StructureBuilder};
-use crate::task::{BoxFuture, Io};
-use crate::{MetadataUpdate, Updates};
+use crate::{
+    BoxFuture, ByteRange, ContainerHandler, Entity, Error, FormatSpec, Io, MetadataUpdate, Name,
+    PlanBuilder, Result, Role, SegmentId, SegmentKind, Structure, StructureBuilder, Updates,
+    MAX_SEGMENT_SIZE,
+};
 use flate::{inflate, Decode};
 use lexer::{
     invalid, required, unsigned, whitespace, Dictionary, Lex, Lexer, Reference, Stop, Value,

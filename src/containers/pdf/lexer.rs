@@ -19,7 +19,7 @@
 //! (and of `async` recursion), and the limits below apply to what is consumed, not to
 //! how many attempts it took.
 
-use crate::error::Error;
+use crate::Error;
 use std::collections::BTreeMap;
 
 pub(super) const MAX_DEPTH: usize = 32;

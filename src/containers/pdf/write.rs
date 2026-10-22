@@ -24,10 +24,7 @@ use super::lexer::{
     MAX_SYNTAX_BYTES,
 };
 use super::{Parser, Xrefs, MAX_CLASSIC_ENTRIES, MAX_ENTRIES, MAX_OBJECTS, MAX_REVISIONS};
-use crate::error::{Error, Result};
-use crate::segment::{SegmentKind, MAX_SEGMENT_SIZE};
-use crate::task::BoxFuture;
-use crate::{MetadataUpdate, Updates};
+use crate::{BoxFuture, Error, MetadataUpdate, Result, SegmentKind, Updates, MAX_SEGMENT_SIZE};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::sync::Arc;

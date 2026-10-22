@@ -16,16 +16,12 @@
 //! Each chunk is one segment: `length(4) type(4) [iTXt prefix]` is the header,
 //! the chunk data is the payload, and the CRC is the trailer.
 
-use crate::crc::Crc32;
-use crate::error::{Error, Result};
-use crate::handler::{ContainerHandler, FormatSpec, ReadWriteSeek};
 use crate::plan::WritePlan;
-use crate::plan_builder::PlanBuilder;
-use crate::segment::SegmentKind;
-use crate::segment::{Name, Segment};
-use crate::structure::{SegmentId, Structure, StructureBuilder};
-use crate::task::{BoxFuture, Io};
-use crate::{Existing, MetadataSlot, Updates};
+use crate::{
+    BoxFuture, ContainerHandler, Crc32, Error, Existing, FormatSpec, Io, MetadataSlot, Name,
+    PlanBuilder, ReadWriteSeek, Result, Segment, SegmentId, SegmentKind, Structure,
+    StructureBuilder, Updates,
+};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::sync::Arc;
 
@@ -557,7 +553,7 @@ mod tests {
             &mut Cursor::new(png.clone()),
             &mut out,
             &updates,
-            &mut crate::sink::NullSink,
+            &mut crate::NullSink,
         )
         .unwrap();
         let out = out.into_inner();
@@ -599,7 +595,7 @@ mod tests {
             &mut Cursor::new(png),
             &mut out,
             &updates,
-            &mut crate::sink::NullSink,
+            &mut crate::NullSink,
         )
         .unwrap();
 
@@ -627,7 +623,7 @@ mod tests {
             &mut Cursor::new(png),
             &mut out,
             &updates,
-            &mut crate::sink::NullSink,
+            &mut crate::NullSink,
         )
         .unwrap();
         let e = dest.require_entity(SegmentKind::Jumbf).unwrap().clone();
@@ -645,7 +641,7 @@ mod tests {
             &mut Cursor::new(png),
             &mut out,
             &updates,
-            &mut crate::sink::NullSink,
+            &mut crate::NullSink,
         )
         .unwrap();
         let bytes = out.into_inner();

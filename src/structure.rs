@@ -386,7 +386,7 @@ impl Structure {
     }
 
     /// Every entity with its kind, in declaration order.
-    pub(crate) fn entity_list(&self) -> impl Iterator<Item = (SegmentKind, &Entity)> + '_ {
+    pub fn entity_list(&self) -> impl Iterator<Item = (SegmentKind, &Entity)> + '_ {
         self.entities.iter().map(|e| (e.kind, e))
     }
 
@@ -514,7 +514,7 @@ impl Structure {
         if let (Some(o), Some(u)) = (original, update) {
             let o = self.read_decoded(src, o)?;
             let u = self.read_decoded(src, u)?;
-            return crate::containers::jumbf::extend(&o, &u).map(Some);
+            return crate::jumbf::extend(&o, &u).map(Some);
         }
         match self.entity(SegmentKind::Jumbf)? {
             Some(e) => self.read_decoded(src, e).map(Some),

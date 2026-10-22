@@ -14,7 +14,7 @@
 //! Stream filters: FlateDecode with the PNG predictors, the only encoding supported.
 
 use super::lexer::{invalid, Dictionary, Value};
-use crate::error::{Error, Result};
+use crate::{Error, Result};
 use flate2::{Decompress, FlushDecompress, Status};
 
 /// How a stream is encoded: Flate, then optionally a PNG predictor over rows of

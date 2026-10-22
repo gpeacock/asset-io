@@ -33,7 +33,7 @@
 //! `idat` (1). A zero extent length means "to the end of the file" and is not
 //! supported either.
 
-use crate::error::{Error, Result};
+use crate::{Error, Result};
 use std::collections::{HashMap, HashSet};
 
 const IINF: [u8; 4] = *b"iinf";

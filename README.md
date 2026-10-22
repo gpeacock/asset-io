@@ -53,7 +53,7 @@ structure.write(&mut src, &mut out, &updates, &mut NullSink)?;
 
 `Structure::plan(src, &updates)` returns the structure `write` would produce, without writing: where each entity would land and the output size.
 
-`Structure::store(src)` reads the JUMBF store as a reader sees it. For ISO BMFF that combines an original store and its update; `containers::jumbf::{addition_to, extend}` convert between the two forms.
+`Structure::store(src)` reads the JUMBF store as a reader sees it. For ISO BMFF that combines an original store and its update; `jumbf::{addition_to, extend}` convert between the two forms.
 
 `HandlerRegistry::compose(format, kind, data)` returns the container's own encoding of an item (JPEG APP11 segments, a PNG `caBX` chunk, a BMFF C2PA box), for callers that insert it into an asset themselves. Callers that use `write` don't need it.
 
