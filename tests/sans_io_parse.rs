@@ -14,7 +14,7 @@
 //! Parsing through a `Task`, with the I/O done by the test: the same structure as
 //! the blocking parse, from a few small requests.
 
-#![cfg(all(feature = "png", feature = "riff"))]
+#![cfg(all(feature = "png", feature = "riff", feature = "jpeg"))]
 
 use asset_io::{Error, HandlerRegistry, NullSink, Progress, Result, Structure, Task, Updates};
 use std::io::Cursor;
@@ -227,4 +227,75 @@ fn a_write_plan_task_reads_what_it_needs_and_gives_the_same_plan() {
     let u = Updates::new().set_xmp(b"<x/>".to_vec());
     assert!(s.write_plan(&mut Cursor::new(&none), &u).is_err());
     assert!(drive(s.write_plan_task(&u), &none).0.is_err());
+}
+
+#[test]
+fn jpeg_parses_through_a_task_in_large_windows_for_the_scan_data() {
+    let reg = HandlerRegistry::builtin();
+    let mut checked = 0;
+    for name in ["P1000708.jpg", "FireflyTrain.jpg", "Designer.jpeg"] {
+        let Some(bytes) = fixture(name) else { continue };
+        let want = reg.parse("jpg", &mut Cursor::new(&bytes)).unwrap();
+        let (got, requests) = drive(reg.parse_task("jpg", bytes.len() as u64).unwrap(), &bytes);
+        let got = got.unwrap();
+        assert_eq!(shape(&got), shape(&want), "{name}");
+        // The marker headers come from small windows; the entropy-coded data in 32
+        // KiB ones, and no more of them than that takes.
+        assert!(
+            requests <= bytes.len() / (32 * 1024) + 40,
+            "{name}: {requests} requests for {} bytes",
+            bytes.len()
+        );
+        let (got, _) = drive(reg.parse_detect_task(bytes.len() as u64), &bytes);
+        assert_eq!(shape(&got.unwrap()), shape(&want), "{name} (detected)");
+
+        // Damaged files fail, or parse, the same way.
+        for cut in (0..bytes.len().min(300)).chain(bytes.len() - 30..bytes.len()) {
+            let part = &bytes[..cut];
+            let a = reg.parse("jpg", &mut Cursor::new(part));
+            let (b, _) = drive(reg.parse_task("jpg", part.len() as u64).unwrap(), part);
+            match (&a, &b) {
+                (Ok(x), Ok(y)) => assert_eq!(shape(x), shape(y), "{name} cut {cut}"),
+                (Err(x), Err(y)) => assert_eq!(x.to_string(), y.to_string(), "{name} cut {cut}"),
+                _ => panic!("{name} cut {cut}: {a:?} vs {b:?}"),
+            }
+        }
+        checked += 1;
+    }
+    assert!(checked > 0, "no fixtures found");
+}
+
+#[test]
+fn a_jpeg_write_plan_task_gives_the_same_plan() {
+    let reg = HandlerRegistry::builtin();
+    let jumbf = {
+        let mut v = 70_000u32.to_be_bytes().to_vec();
+        v.extend(b"jumb");
+        v.extend(vec![7u8; 69_992]);
+        v
+    };
+    let updates = [
+        Updates::new(),
+        Updates::new().set_jumbf(jumbf.clone()),
+        Updates::new().set_xmp(b"<x/>".to_vec()).set_jumbf(jumbf),
+        Updates::new().remove_xmp().remove_jumbf(),
+    ];
+    let mut checked = 0;
+    for name in ["FireflyTrain.jpg", "P1000708.jpg"] {
+        let Some(bytes) = fixture(name) else { continue };
+        let s = reg.parse("jpg", &mut Cursor::new(&bytes)).unwrap();
+        for (j, u) in updates.iter().enumerate() {
+            let want = s.write_plan(&mut Cursor::new(&bytes), u).unwrap();
+            let (got, requests) = drive(s.write_plan_task(u), &bytes);
+            assert_eq!(
+                execute(&got.unwrap(), &bytes),
+                execute(&want, &bytes),
+                "{name} updates {j}"
+            );
+            // A single-image file has no index to rewrite, so nothing is read.
+            assert_eq!(requests, 0, "{name} updates {j}");
+        }
+        checked += 1;
+    }
+    assert!(checked > 0, "no fixtures found");
 }

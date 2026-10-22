@@ -54,11 +54,11 @@
 use crate::error::{Error, Result};
 use crate::handler::{ContainerHandler, FormatSpec, ReadSeek};
 use crate::plan::WritePlan;
-use crate::readahead::{ReadAhead, PARSE_WINDOW};
 use crate::segment::SegmentKind;
 use crate::segment::{Name, Role, Segment};
 use crate::sink::Sink;
 use crate::structure::{Part, SegmentId, Structure, StructureBuilder};
+use crate::task::{BoxFuture, Io, Task};
 use crate::ByteRange;
 use crate::{MetadataUpdate, Updates};
 use std::borrow::Cow;
@@ -186,17 +186,17 @@ impl ContainerHandler for JpegHandler {
         header.starts_with(&[0xFF, SOI, 0xFF])
     }
 
-    fn parse(self: Arc<Self>, mut src: &mut dyn ReadSeek) -> Result<Structure> {
-        parse_with(self, &mut src)
+    fn parse_async(self: Arc<Self>, io: Io) -> BoxFuture<'static, Result<Structure>> {
+        Box::pin(parse_with(self, io))
     }
 
-    fn write_plan<'a>(
-        &self,
-        src_structure: &Structure,
-        mut src: &mut dyn ReadSeek,
+    fn write_plan_async<'f, 'a: 'f>(
+        &'f self,
+        src_structure: &'f Structure,
+        mut io: Io,
         updates: &'a Updates,
-    ) -> Result<WritePlan<'a>> {
-        plan(src_structure, &mut src, updates)
+    ) -> BoxFuture<'f, Result<WritePlan<'a>>> {
+        Box::pin(async move { plan(src_structure, &mut io, updates).await })
     }
 
     fn compose(&self, kind: SegmentKind, data: &[u8]) -> Result<Vec<u8>> {
@@ -223,24 +223,16 @@ impl ContainerHandler for JpegHandler {
 
 /// Parse a JPEG into a validated structure.
 pub fn parse<R: Read + Seek>(src: &mut R) -> Result<Structure> {
-    parse_with(handler(), src)
+    handler().parse(src)
 }
 
-fn parse_with<R: Read + Seek>(
-    handler: Arc<dyn ContainerHandler>,
-    src: &mut R,
-) -> Result<Structure> {
-    // A parse is a long run of reads of one to a few bytes, each preceded by a seek.
-    // From a `File` that is a syscall apiece; the window makes it a copy.
-    let mut ahead = ReadAhead::new(src, PARSE_WINDOW);
-    let src = &mut ahead;
-    let total = src.seek(SeekFrom::End(0))?;
-    src.seek(SeekFrom::Start(0))?;
+async fn parse_with(handler: Arc<dyn ContainerHandler>, mut io: Io) -> Result<Structure> {
+    let total = io.len();
     if total < 4 {
         return Err(Error::InvalidFormat("JPEG too small".into()));
     }
     let mut soi = [0u8; 2];
-    src.read_exact(&mut soi)?;
+    io.read_at(0, &mut soi).await?;
     if soi != [0xFF, SOI] {
         return Err(Error::InvalidFormat("Not a JPEG file".into()));
     }
@@ -250,7 +242,7 @@ fn parse_with<R: Read + Seek>(
 
     // Only the first image carries the asset's metadata.
     let mut meta = Meta::default();
-    let mut offset = scan_image(src, &mut b, total, 2, true, &mut meta)?;
+    let mut offset = scan_image(&mut io, &mut b, total, 2, true, &mut meta).await?;
     // The first image's markers are the structure. Everything after its EOI, later
     // images and trailing data alike, is data beyond the end of it.
     b.end_boxes()?;
@@ -266,9 +258,9 @@ fn parse_with<R: Read + Seek>(
     // image but are not one are trailing data, as they are in a single-image file:
     // the structure is rolled back to the end of the last good image.
     let mut multi = false;
-    while total - offset >= 4 && next_is_image(src, offset)? {
+    while total - offset >= 4 && next_is_image(&mut io, offset).await? {
         b.begin_subasset(Some("image/jpeg".into()))?;
-        match scan_image(src, &mut b, total, offset, false, &mut Meta::default()) {
+        match scan_image(&mut io, &mut b, total, offset, false, &mut Meta::default()).await {
             Ok(end) => {
                 offset = end;
                 multi = true;
@@ -314,8 +306,8 @@ struct Meta {
 
 /// List the markers of one image, from `offset` through its `EOI`, and return the
 /// offset after it. Only the primary image's metadata is interpreted.
-fn scan_image<R: Read + Seek>(
-    src: &mut R,
+async fn scan_image(
+    io: &mut Io,
     b: &mut StructureBuilder,
     total: u64,
     mut offset: u64,
@@ -331,25 +323,23 @@ fn scan_image<R: Read + Seek>(
         if total - offset < 2 {
             return Err(Error::InvalidFormat("JPEG truncated: missing EOI".into()));
         }
-        src.seek(SeekFrom::Start(offset))?;
+        let mut r = io.reader(offset);
 
         // A marker is FF xx, optionally preceded by FF fill bytes.
-        let mut first = [0u8; 1];
-        src.read_exact(&mut first)?;
-        if first[0] != 0xFF {
+        let first = r.u8().await?;
+        if first != 0xFF {
             return Err(Error::InvalidSegment {
                 offset,
-                reason: format!("expected marker prefix 0xFF, found 0x{:02X}", first[0]),
+                reason: format!("expected marker prefix 0xFF, found 0x{first:02X}"),
             });
         }
         let mut fill = 0u64;
         let marker = loop {
-            let mut m = [0u8; 1];
-            src.read_exact(&mut m)?;
-            if m[0] == 0xFF {
+            let m = r.u8().await?;
+            if m == 0xFF {
                 fill += 1;
             } else {
-                break m[0];
+                break m;
             }
         };
         if marker == 0x00 {
@@ -377,9 +367,7 @@ fn scan_image<R: Read + Seek>(
             _ => {}
         }
 
-        let mut lb = [0u8; 2];
-        src.read_exact(&mut lb)?;
-        let len = u16::from_be_bytes(lb) as u64;
+        let len = r.u16_be().await? as u64;
         if len < 2 {
             return Err(Error::InvalidSegment {
                 offset: mstart,
@@ -397,16 +385,26 @@ fn scan_image<R: Read + Seek>(
 
         if marker == SOS {
             let data_start = mstart + seg_total;
-            let mut scan = EntropyScan::new(data_start, total);
+            // The entropy-coded data is read in large windows, straight from the
+            // window of `io`, and scanned in place.
+            let mut entropy = Entropy::default();
             let mut has_restarts = false;
-            let stop = loop {
-                match scan.next(src)? {
-                    Event::Rst(..) => has_restarts = true,
-                    Event::Marker(at) => break at,
-                    Event::Eof => {
-                        return Err(Error::InvalidFormat("EOI marker not found".into()));
+            let mut at = data_start;
+            let stop = 'scan: loop {
+                if at >= total {
+                    return Err(Error::InvalidFormat("EOI marker not found".into()));
+                }
+                let held = io.fetch_with(at, 1, SCAN_BUF).await?;
+                let chunk = &held[..held.len().min((total - at) as usize)];
+                let mut idx = 0;
+                while let Some(event) = entropy.next_in(chunk, at, &mut idx) {
+                    match event {
+                        Event::Rst(..) => has_restarts = true,
+                        Event::Marker(found) => break 'scan found,
+                        Event::Eof => {}
                     }
                 }
+                at += chunk.len() as u64;
             };
             let id = b.push_span(
                 SegmentKind::ImageData,
@@ -431,9 +429,7 @@ fn scan_image<R: Read + Seek>(
 
         if primary && matches!(marker, APP1 | APP2 | APP11) {
             let n = data_len.min(PEEK as u64) as usize;
-            let mut buf = [0u8; PEEK];
-            src.read_exact(&mut buf[..n])?;
-            let peek = &buf[..n];
+            let peek = r.take(n).await?;
 
             if marker == APP2 {
                 if peek.starts_with(MPF_SIGNATURE) {
@@ -541,10 +537,9 @@ fn scan_image<R: Read + Seek>(
 }
 
 /// Whether another JPEG image starts at `offset` (`FF D8 FF`).
-fn next_is_image<R: Read + Seek>(src: &mut R, offset: u64) -> Result<bool> {
+async fn next_is_image(io: &mut Io, offset: u64) -> Result<bool> {
     let mut m = [0u8; 3];
-    src.seek(SeekFrom::Start(offset))?;
-    src.read_exact(&mut m)?;
+    io.read_at(offset, &mut m).await?;
     Ok(m == [0xFF, SOI, 0xFF])
 }
 
@@ -658,18 +653,16 @@ impl MpIndex {
 
 /// Every MPF block in the primary image, as the segments holding them. A valid
 /// file has at most one.
-fn find_all_mpf<R: Read + Seek>(
-    src: &Structure,
-    rd: &mut R,
-    primary_end: usize,
-) -> Result<Vec<SegmentId>> {
+async fn find_all_mpf(src: &Structure, io: &mut Io, primary_end: usize) -> Result<Vec<SegmentId>> {
     let mut found = Vec::new();
     for (i, seg) in src.segments()[..primary_end].iter().enumerate() {
         if seg.name() == Name::Marker(APP2) && seg.header().len() == 4 + MPF_SIGNATURE.len() as u64
         {
             let h = seg.header();
-            let tail = src.read_range(rd, h.sub(4, MPF_SIGNATURE.len() as u64)?)?;
-            if tail == MPF_SIGNATURE {
+            let mut tail = [0u8; MPF_SIGNATURE.len()];
+            io.read_at(h.sub(4, tail.len() as u64)?.offset(), &mut tail)
+                .await?;
+            if tail == *MPF_SIGNATURE {
                 found.push(SegmentId::from_index(i)?);
             }
         }
@@ -684,7 +677,11 @@ fn find_mpf<R: Read + Seek>(
     rd: &mut R,
     primary_end: usize,
 ) -> Result<Option<SegmentId>> {
-    Ok(find_all_mpf(src, rd, primary_end)?.first().copied())
+    let found = Task::new(src.total_size(), |mut io| async move {
+        find_all_mpf(src, &mut io, primary_end).await
+    })
+    .run(rd)?;
+    Ok(found.first().copied())
 }
 
 /// The MPF block rewritten for the output structure, or `None` if no image moved.
@@ -694,9 +691,9 @@ fn find_mpf<R: Read + Seek>(
 /// or moves the block invalidates it. Each recorded value is shifted by how far
 /// the image or the block moved. The block has the same length as before, so the
 /// structure does not depend on it.
-fn fix_mpf<R: Read + Seek>(
+async fn fix_mpf(
     src: &Structure,
-    rd: &mut R,
+    io: &mut Io,
     op_of_src: &[Option<usize>],
     dest: &Structure,
 ) -> Result<Option<(usize, Vec<u8>)>> {
@@ -705,7 +702,7 @@ fn fix_mpf<R: Read + Seek>(
     if subs.len() < 2 {
         return Ok(None);
     }
-    let blocks = find_all_mpf(src, rd, primary_end)?;
+    let blocks = find_all_mpf(src, io, primary_end).await?;
     let Some(&id) = blocks.first() else {
         return Ok(None);
     };
@@ -732,7 +729,8 @@ fn fix_mpf<R: Read + Seek>(
         });
     }
 
-    let mut payload = src.read_range(rd, src.segment(id)?.payload())?;
+    let block = src.segment(id)?.payload();
+    let mut payload = io.read_vec(block.offset(), block.len() as usize).await?;
     let bad = || Error::InvalidFormat("MPF index is not well formed".into());
     let mismatch = |what: String, recorded: u64, found: u64| {
         Error::InvalidFormat(format!(
@@ -811,8 +809,51 @@ enum Event {
     Eof,
 }
 
-/// Streaming scan of entropy-coded data. `FF 00` is stuffing and `FF FF` is fill;
-/// `FF D0..D7` is a restart marker; any other `FF xx` ends the scan. Fixed 8 KiB
+/// The state of a scan of entropy-coded data, which sees it in chunks. `FF 00` is
+/// stuffing and `FF FF` is fill; `FF D0..D7` is a restart marker; any other `FF xx`
+/// ends the scan.
+#[derive(Default)]
+struct Entropy {
+    /// The last byte of the previous chunk, or the previous byte, was `FF`.
+    prev_ff: bool,
+}
+
+impl Entropy {
+    /// The next event in `chunk`, which starts at stream offset `base`, looking from
+    /// `*idx` on and leaving it after what was found. `None` when the chunk is used
+    /// up.
+    fn next_in(&mut self, chunk: &[u8], base: u64, idx: &mut usize) -> Option<Event> {
+        while *idx < chunk.len() {
+            if !self.prev_ff {
+                // Entropy data is almost all non-0xFF: skip to the next 0xFF.
+                match memchr::memchr(0xFF, &chunk[*idx..]) {
+                    Some(p) => {
+                        *idx += p + 1;
+                        self.prev_ff = true;
+                    }
+                    None => *idx = chunk.len(),
+                }
+                continue;
+            }
+            // The previous byte was 0xFF; this one says what it was.
+            let byte = chunk[*idx];
+            let at = base + *idx as u64;
+            *idx += 1;
+            match byte {
+                0x00 => self.prev_ff = false,
+                0xFF => {} // fill: the last FF is the marker prefix
+                0xD0..=0xD7 => {
+                    self.prev_ff = false;
+                    return Some(Event::Rst(at - 1, byte));
+                }
+                _ => return Some(Event::Marker(at - 1)),
+            }
+        }
+        None
+    }
+}
+
+/// Blocking scan of a range of entropy-coded data, for [`subdivide`]. Fixed
 /// buffer, no allocation.
 struct EntropyScan {
     next_read: u64,
@@ -820,7 +861,7 @@ struct EntropyScan {
     base: u64,
     idx: usize,
     len: usize,
-    prev_ff: bool,
+    core: Entropy,
     buf: [u8; SCAN_BUF],
 }
 
@@ -832,52 +873,32 @@ impl EntropyScan {
             base: start,
             idx: 0,
             len: 0,
-            prev_ff: false,
+            core: Entropy::default(),
             buf: [0; SCAN_BUF],
         }
     }
 
     fn next<R: Read + Seek>(&mut self, src: &mut R) -> Result<Event> {
         loop {
-            if self.idx == self.len {
-                if self.next_read >= self.end {
-                    return Ok(Event::Eof);
-                }
-                src.seek(SeekFrom::Start(self.next_read))?;
-                let want = (self.end - self.next_read).min(self.buf.len() as u64) as usize;
-                let n = src.read(&mut self.buf[..want])?;
-                if n == 0 {
-                    return Ok(Event::Eof);
-                }
-                self.base = self.next_read;
-                self.next_read += n as u64;
-                self.idx = 0;
-                self.len = n;
+            if let Some(event) = self
+                .core
+                .next_in(&self.buf[..self.len], self.base, &mut self.idx)
+            {
+                return Ok(event);
             }
-            if !self.prev_ff {
-                // Entropy data is almost all non-0xFF: skip to the next 0xFF.
-                match memchr::memchr(0xFF, &self.buf[self.idx..self.len]) {
-                    Some(p) => {
-                        self.idx += p + 1;
-                        self.prev_ff = true;
-                    }
-                    None => self.idx = self.len,
-                }
-                continue;
+            if self.next_read >= self.end {
+                return Ok(Event::Eof);
             }
-            // The previous byte was 0xFF; this one says what it was.
-            let byte = self.buf[self.idx];
-            let at = self.base + self.idx as u64;
-            self.idx += 1;
-            match byte {
-                0x00 => self.prev_ff = false,
-                0xFF => {} // fill: the last FF is the marker prefix
-                0xD0..=0xD7 => {
-                    self.prev_ff = false;
-                    return Ok(Event::Rst(at - 1, byte));
-                }
-                _ => return Ok(Event::Marker(at - 1)),
+            src.seek(SeekFrom::Start(self.next_read))?;
+            let want = (self.end - self.next_read).min(self.buf.len() as u64) as usize;
+            let n = src.read(&mut self.buf[..want])?;
+            if n == 0 {
+                return Ok(Event::Eof);
             }
+            self.base = self.next_read;
+            self.next_read += n as u64;
+            self.idx = 0;
+            self.len = n;
         }
     }
 }
@@ -1117,12 +1138,8 @@ fn is_insertion_point(seg: &Segment) -> bool {
 }
 
 /// Decide what the output contains and describe how to write it.
-fn plan<'a, R: Read + Seek>(
-    src: &Structure,
-    rd: &mut R,
-    updates: &'a Updates,
-) -> Result<WritePlan<'a>> {
-    let (ops, dest) = plan_ops(src, rd, updates)?;
+async fn plan<'a>(src: &Structure, io: &mut Io, updates: &'a Updates) -> Result<WritePlan<'a>> {
+    let (ops, dest) = plan_ops(src, io, updates).await?;
     let mut plan = WritePlan::new(dest);
     for (i, op) in ops.into_iter().enumerate() {
         let dest = SegmentId::from_index(i)?;
@@ -1162,9 +1179,9 @@ fn plan<'a, R: Read + Seek>(
 
 /// Decide what the output contains. Single source of truth for the destination
 /// structure and the bytes written.
-fn plan_ops<'a, R: Read + Seek>(
+async fn plan_ops<'a>(
     src: &Structure,
-    rd: &mut R,
+    io: &mut Io,
     updates: &'a Updates,
 ) -> Result<(Vec<Op<'a>>, Structure)> {
     let n = src.segments().len();
@@ -1298,7 +1315,7 @@ fn plan_ops<'a, R: Read + Seek>(
         b.entity_of_segments_typed(*kind, *ty, &ids)?;
     }
     let dest = b.finish()?;
-    if let Some((op, payload)) = fix_mpf(src, rd, &op_of_src, &dest)? {
+    if let Some((op, payload)) = fix_mpf(src, io, &op_of_src, &dest).await? {
         let Op::Copy(id) = ops[op] else {
             return Err(Error::InvalidFormat("MPF block was not kept".into()));
         };
@@ -1410,7 +1427,10 @@ where
     W: Write + ?Sized,
     S: Sink + ?Sized,
 {
-    let plan = plan(src_structure, src, updates)?;
+    let plan = Task::new(src_structure.total_size(), |mut io| async move {
+        plan(src_structure, &mut io, updates).await
+    })
+    .run(&mut *src)?;
     plan.execute(src, out, sink)?;
     Ok(plan.into_structure())
 }

@@ -88,6 +88,9 @@ impl Io {
     /// error if they are not all inside the stream.
     pub async fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<()> {
         // Most reads are held by the window already.
+        if buf.is_empty() {
+            return Ok(());
+        }
         if self.covers(offset, buf.len()) {
             let from = (offset - self.start) as usize;
             buf.copy_from_slice(&self.win[from..from + buf.len()]);
@@ -109,6 +112,9 @@ impl Io {
     /// bytes when the data is not already held: a scan that will read on from here
     /// asks for more than the default.
     pub async fn fetch_with(&mut self, offset: u64, min: usize, window: usize) -> Result<&[u8]> {
+        if min == 0 {
+            return Ok(&[]);
+        }
         if self.covers(offset, min) {
             return Ok(&self.win[(offset - self.start) as usize..]);
         }
@@ -276,8 +282,13 @@ struct Fetch<'a> {
     asked: bool,
 }
 
+/// The error a short read gives: the same one `Read::read_exact` does, so that the
+/// message does not depend on how the bytes were read.
 fn eof() -> Error {
-    Error::Io(std::io::Error::from(std::io::ErrorKind::UnexpectedEof))
+    Error::Io(std::io::Error::new(
+        std::io::ErrorKind::UnexpectedEof,
+        "failed to fill whole buffer",
+    ))
 }
 
 impl Future for Fetch<'_> {
@@ -421,9 +432,12 @@ impl<'f, T> Task<'f, T> {
     /// Run to completion, reading from `src`, which must be the stream the task was
     /// made for.
     pub fn run<R: Read + Seek + ?Sized>(mut self, src: &mut R) -> Result<T> {
+        // Where the stream is, so that a request that continues the last one does
+        // not seek.
+        let mut pos = None;
         loop {
             match self.resume()? {
-                Progress::Read(req) => req.fill(src)?,
+                Progress::Read(req) => pos = Some(req.fill_from(src, pos)?),
                 Progress::Done(v) => return Ok(v),
             }
         }
@@ -490,15 +504,23 @@ impl ReadRequest<'_> {
 
     /// Fill the buffer from `src`, a seekable stream: seek to the offset and read up
     /// to `window_len` bytes. The buffer is not zeroed first.
-    pub fn fill<R: Read + Seek + ?Sized>(mut self, src: &mut R) -> Result<()> {
+    pub fn fill<R: Read + Seek + ?Sized>(self, src: &mut R) -> Result<()> {
+        self.fill_from(src, None).map(|_| ())
+    }
+
+    /// [`fill`](Self::fill), not seeking if `pos`, where the stream is now, is
+    /// already the offset. Returns where the stream is afterwards.
+    fn fill_from<R: Read + Seek + ?Sized>(mut self, src: &mut R, pos: Option<u64>) -> Result<u64> {
         let (offset, _, window) = self.request();
-        src.seek(SeekFrom::Start(offset))?;
+        if pos != Some(offset) {
+            src.seek(SeekFrom::Start(offset))?;
+        }
         let buf = self.buffer();
         buf.clear();
         // Room for the whole window, so that the read does not probe and grow.
         buf.reserve(window);
         Read::take(&mut *src, window as u64).read_to_end(buf)?;
-        Ok(())
+        Ok(offset + buf.len() as u64)
     }
 }
 
@@ -732,6 +754,21 @@ mod tests {
             t.run(&mut Cursor::new(vec![0u8; 6])),
             Err(Error::Io(_))
         ));
+    }
+
+    #[test]
+    fn empty_reads_need_nothing() {
+        let t = Task::new(4, |mut io| async move {
+            io.read_at(3, &mut []).await?;
+            assert!(io.fetch(2, 0).await?.is_empty());
+            Ok(io.reader(1).take(0).await?.len())
+        });
+        let mut n = 0;
+        let mut task = t;
+        while let Ok(Progress::Read(_)) = task.resume() {
+            n += 1;
+        }
+        assert_eq!(n, 0);
     }
 
     #[test]
