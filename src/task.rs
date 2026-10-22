@@ -26,6 +26,10 @@ use std::task::{Context, Poll, Waker};
 /// and 32 KiB, from memory and from a file.
 pub const DEFAULT_WINDOW: usize = 4 * 1024;
 
+/// A boxed future that can move between threads, as the `async` parts of a
+/// [`ContainerHandler`](crate::ContainerHandler) return.
+pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
 /// What a suspended task is waiting for, and the buffer it will be given.
 #[derive(Default)]
 struct Slot {
@@ -131,6 +135,135 @@ impl Io {
         v.truncate(len);
         self.start = 0;
         Ok(v)
+    }
+}
+
+impl Io {
+    /// A cursor over the stream, starting at `at`, for reading a run of fields one
+    /// after another. It borrows the `Io`, so its position is visible only where it
+    /// is used; the `Io` itself has no position.
+    pub fn reader(&mut self, at: u64) -> Reader<'_> {
+        Reader { io: self, pos: at }
+    }
+}
+
+/// A position in the stream and the reads that move it; see [`Io::reader`].
+pub struct Reader<'a> {
+    io: &'a mut Io,
+    pos: u64,
+}
+
+impl Reader<'_> {
+    /// Where the next read starts.
+    pub fn pos(&self) -> u64 {
+        self.pos
+    }
+
+    /// Move to `to`.
+    pub fn seek(&mut self, to: u64) {
+        self.pos = to;
+    }
+
+    /// Move `n` bytes on, without reading them.
+    pub fn skip(&mut self, n: u64) {
+        self.pos = self.pos.saturating_add(n);
+    }
+
+    /// Bytes from the position to the end of the stream.
+    pub fn remaining(&self) -> u64 {
+        self.io.total.saturating_sub(self.pos)
+    }
+
+    /// The next `n` bytes, borrowed from the window, and move past them.
+    pub async fn take(&mut self, n: usize) -> Result<&[u8]> {
+        let at = self.pos;
+        self.pos = at.saturating_add(n as u64);
+        let bytes = self.io.fetch(at, n).await?;
+        Ok(&bytes[..n])
+    }
+
+    /// Fill `buf` from the next bytes, and move past them.
+    pub async fn read_exact(&mut self, buf: &mut [u8]) -> Result<()> {
+        let at = self.pos;
+        self.pos = at.saturating_add(buf.len() as u64);
+        self.io.read_at(at, buf).await
+    }
+
+    /// The next `N` bytes, if the window holds them: no suspension, so no future to
+    /// build. Most reads of a field are this.
+    fn held<const N: usize>(&mut self) -> Option<[u8; N]> {
+        if !self.io.covers(self.pos, N) {
+            return None;
+        }
+        let from = (self.pos - self.io.start) as usize;
+        self.pos += N as u64;
+        self.io.win[from..from + N].try_into().ok()
+    }
+
+    /// The next `N` bytes.
+    pub async fn array<const N: usize>(&mut self) -> Result<[u8; N]> {
+        if let Some(a) = self.held::<N>() {
+            return Ok(a);
+        }
+        let mut a = [0u8; N];
+        self.read_exact(&mut a).await?;
+        Ok(a)
+    }
+
+    /// One byte.
+    pub async fn u8(&mut self) -> Result<u8> {
+        if let Some([b]) = self.held::<1>() {
+            return Ok(b);
+        }
+        Ok(self.array::<1>().await?[0])
+    }
+
+    /// A big-endian `u16`.
+    pub async fn u16_be(&mut self) -> Result<u16> {
+        if let Some(a) = self.held() {
+            return Ok(u16::from_be_bytes(a));
+        }
+        Ok(u16::from_be_bytes(self.array().await?))
+    }
+
+    /// A little-endian `u16`.
+    pub async fn u16_le(&mut self) -> Result<u16> {
+        if let Some(a) = self.held() {
+            return Ok(u16::from_le_bytes(a));
+        }
+        Ok(u16::from_le_bytes(self.array().await?))
+    }
+
+    /// A big-endian `u32`.
+    pub async fn u32_be(&mut self) -> Result<u32> {
+        if let Some(a) = self.held() {
+            return Ok(u32::from_be_bytes(a));
+        }
+        Ok(u32::from_be_bytes(self.array().await?))
+    }
+
+    /// A little-endian `u32`.
+    pub async fn u32_le(&mut self) -> Result<u32> {
+        if let Some(a) = self.held() {
+            return Ok(u32::from_le_bytes(a));
+        }
+        Ok(u32::from_le_bytes(self.array().await?))
+    }
+
+    /// A big-endian `u64`.
+    pub async fn u64_be(&mut self) -> Result<u64> {
+        if let Some(a) = self.held() {
+            return Ok(u64::from_be_bytes(a));
+        }
+        Ok(u64::from_be_bytes(self.array().await?))
+    }
+
+    /// A little-endian `u64`.
+    pub async fn u64_le(&mut self) -> Result<u64> {
+        if let Some(a) = self.held() {
+            return Ok(u64::from_le_bytes(a));
+        }
+        Ok(u64::from_le_bytes(self.array().await?))
     }
 }
 
@@ -550,6 +683,55 @@ mod tests {
             req.fill(&mut Cursor::new(&data)).unwrap();
         }
         assert_eq!(n, 1); // offsets 0..4095 held by the first window
+    }
+
+    #[test]
+    fn a_reader_reads_fields_in_order_and_tracks_its_position() {
+        let data: Vec<u8> = (0u8..64).collect();
+        let t = Task::new(64, |mut io| async move {
+            let mut r = io.reader(4);
+            let a = r.u8().await?;
+            let b = r.u16_be().await?;
+            let c = r.u16_le().await?;
+            let d = r.u32_be().await?;
+            let e = r.u32_le().await?;
+            let f = r.u64_be().await?;
+            let g = r.u64_le().await?;
+            let arr = r.array::<2>().await?;
+            let pos = r.pos();
+            r.skip(3);
+            let taken = r.take(2).await?.to_vec();
+            let after = r.pos();
+            r.seek(0);
+            let rem = r.remaining();
+            Ok((a, b, c, d, e, f, g, arr, pos, taken, after, rem))
+        });
+        let (a, b, c, d, e, f, g, arr, pos, taken, after, rem) =
+            t.run(&mut Cursor::new(&data)).unwrap();
+        assert_eq!(a, 4);
+        assert_eq!(b, 0x0506);
+        assert_eq!(c, 0x0807);
+        assert_eq!(d, 0x090A_0B0C);
+        assert_eq!(e, 0x100F_0E0D);
+        assert_eq!(f, 0x1112_1314_1516_1718);
+        assert_eq!(g, 0x201F_1E1D_1C1B_1A19);
+        assert_eq!(arr, [0x21, 0x22]);
+        assert_eq!(pos, 4 + 1 + 2 + 2 + 4 + 4 + 8 + 8 + 2);
+        assert_eq!(taken, vec![pos as u8 + 3, pos as u8 + 4]);
+        assert_eq!(after, pos + 3 + 2);
+        assert_eq!(rem, 64);
+    }
+
+    #[test]
+    fn a_reader_past_the_end_fails() {
+        let t = Task::new(6, |mut io| async move {
+            let mut r = io.reader(4);
+            r.u32_be().await
+        });
+        assert!(matches!(
+            t.run(&mut Cursor::new(vec![0u8; 6])),
+            Err(Error::Io(_))
+        ));
     }
 
     #[test]

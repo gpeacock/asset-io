@@ -21,6 +21,7 @@
 use crate::error::{Error, Result};
 use crate::handler::{ContainerHandler, FormatSpec, ReadSeek, DETECT_LEN};
 use crate::structure::Structure;
+use crate::task::Task;
 use std::collections::HashMap;
 use std::io::SeekFrom;
 use std::sync::{Arc, OnceLock};
@@ -168,6 +169,26 @@ impl HandlerRegistry {
     pub fn parse(&self, format: &str, src: &mut dyn ReadSeek) -> Result<Structure> {
         let h = self.handler(format).ok_or(Error::UnsupportedFormat)?;
         Arc::clone(h).parse(src)
+    }
+
+    /// A task that parses a stream of `total` bytes as `format`, for a caller that
+    /// does its own I/O; see [`Task`]. Reports [`Error::UnsupportedFormat`] (when
+    /// first resumed, if the handler does not implement
+    /// [`parse_async`](ContainerHandler::parse_async)) for a format nobody claims.
+    pub fn parse_task(&self, format: &str, total: u64) -> Result<Task<'static, Structure>> {
+        let h = Arc::clone(self.handler(format).ok_or(Error::UnsupportedFormat)?);
+        Ok(Task::new(total, move |io| h.parse_async(io)))
+    }
+
+    /// Like [`parse_task`](Self::parse_task), identifying the container from the
+    /// leading bytes of the stream, which the task asks for first.
+    pub fn parse_detect_task(&self, total: u64) -> Task<'_, Structure> {
+        Task::new(total, move |mut io| async move {
+            let n = (DETECT_LEN as u64).min(total) as usize;
+            let head = io.fetch(0, n).await?.to_vec();
+            let h = Arc::clone(self.detect(&head).ok_or(Error::UnsupportedFormat)?);
+            h.parse_async(io).await
+        })
     }
 
     /// Parse a stream, identifying the container from its leading bytes. The stream

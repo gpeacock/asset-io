@@ -25,10 +25,11 @@ use crate::plan::WritePlan;
 use crate::segment::{Name, Segment, SegmentKind};
 use crate::sink::Sink;
 use crate::structure::{SegmentId, Structure};
+use crate::task::{BoxFuture, Io, Task};
 use crate::walk::Node;
 use crate::Updates;
 use std::borrow::Cow;
-use std::io::{Read, Seek, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::sync::Arc;
 
 /// A readable, seekable stream. Blanket-implemented, so any `Read + Seek` works.
@@ -119,12 +120,30 @@ pub trait ContainerHandler: std::fmt::Debug + Send + Sync {
         false
     }
 
-    /// Parse the whole structure of an asset.
+    /// Parse the whole structure of an asset, reading it through `io`.
+    ///
+    /// This is the method to implement. It is `async` so that the same code can be
+    /// run by any I/O: see [`Task`](crate::Task). Read with [`Io`]; everything else
+    /// is ordinary code. The default reports [`Error::UnsupportedFormat`], so a
+    /// handler that implements the blocking [`parse`](Self::parse) instead keeps
+    /// working, but cannot be run by [`HandlerRegistry::parse_task`](crate::HandlerRegistry::parse_task).
     ///
     /// The result must tile the stream (see [`StructureBuilder`](crate::StructureBuilder))
     /// and must be built with `self` as its handler, which is why this takes the
     /// `Arc`: `StructureBuilder::new(self, ...)`.
-    fn parse(self: Arc<Self>, src: &mut dyn ReadSeek) -> Result<Structure>;
+    fn parse_async(self: Arc<Self>, _io: Io) -> BoxFuture<'static, Result<Structure>> {
+        Box::pin(async { Err(Error::UnsupportedFormat) })
+    }
+
+    /// Parse the whole structure of an asset from a stream.
+    ///
+    /// The default runs [`parse_async`](Self::parse_async) with blocking reads. A
+    /// handler written before that method existed can implement this instead.
+    fn parse(self: Arc<Self>, src: &mut dyn ReadSeek) -> Result<Structure> {
+        let total = src.seek(SeekFrom::End(0))?;
+        src.seek(SeekFrom::Start(0))?;
+        Task::new(total, |io| self.parse_async(io)).run(src)
+    }
 
     /// Describe the write of the asset with `updates` applied: the structure of the
     /// output and the steps that produce it. Nothing is written.

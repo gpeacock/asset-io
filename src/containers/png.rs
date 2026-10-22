@@ -20,11 +20,11 @@ use crate::crc::Crc32;
 use crate::error::{Error, Result};
 use crate::handler::{ContainerHandler, FormatSpec, ReadSeek, ReadWriteSeek};
 use crate::plan::WritePlan;
-use crate::readahead::{ReadAhead, PARSE_WINDOW};
 use crate::segment::SegmentKind;
 use crate::segment::{Name, Role, Segment};
 use crate::sink::Sink;
 use crate::structure::{SegmentId, Structure, StructureBuilder};
+use crate::task::{BoxFuture, Io, Task};
 use crate::{MetadataUpdate, Updates};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::sync::{Arc, OnceLock};
@@ -92,8 +92,8 @@ impl ContainerHandler for PngHandler {
         header.starts_with(SIGNATURE)
     }
 
-    fn parse(self: Arc<Self>, mut src: &mut dyn ReadSeek) -> Result<Structure> {
-        parse_with(self, &mut src)
+    fn parse_async(self: Arc<Self>, io: Io) -> BoxFuture<'static, Result<Structure>> {
+        Box::pin(parse_with(self, io))
     }
 
     fn write_plan<'a>(
@@ -140,23 +140,18 @@ impl ContainerHandler for PngHandler {
 
 /// Parse a PNG into a validated structure.
 pub fn parse<R: Read + Seek>(src: &mut R) -> Result<Structure> {
-    parse_with(handler(), src)
-}
-
-fn parse_with<R: Read + Seek>(
-    handler: Arc<dyn ContainerHandler>,
-    src: &mut R,
-) -> Result<Structure> {
-    let mut ahead = ReadAhead::new(src, PARSE_WINDOW);
-    let src = &mut ahead;
     let total = src.seek(SeekFrom::End(0))?;
     src.seek(SeekFrom::Start(0))?;
+    Task::new(total, |io| parse_with(handler(), io)).run(src)
+}
+
+async fn parse_with(handler: Arc<dyn ContainerHandler>, mut io: Io) -> Result<Structure> {
+    let total = io.len();
     if total < SIGNATURE.len() as u64 + 12 {
         return Err(Error::InvalidFormat("PNG too small".into()));
     }
-    let mut sig = [0u8; 8];
-    src.read_exact(&mut sig)?;
-    if &sig != SIGNATURE {
+    let mut r = io.reader(0);
+    if &r.array::<8>().await? != SIGNATURE {
         return Err(Error::InvalidFormat("Not a PNG file".into()));
     }
 
@@ -171,8 +166,8 @@ fn parse_with<R: Read + Seek>(
         if remaining < 12 {
             return Err(Error::InvalidFormat("PNG truncated: missing IEND".into()));
         }
-        let mut hdr = [0u8; 8];
-        src.read_exact(&mut hdr)?;
+        r.seek(offset);
+        let hdr = r.array::<8>().await?;
         let len = u32::from_be_bytes([hdr[0], hdr[1], hdr[2], hdr[3]]) as u64;
         let ty = [hdr[4], hdr[5], hdr[6], hdr[7]];
         if len > MAX_CHUNK_LEN {
@@ -196,9 +191,7 @@ fn parse_with<R: Read + Seek>(
             EXIF => SegmentKind::Exif,
             ITXT => {
                 let n = len.min(PEEK as u64) as usize;
-                let mut peek = [0u8; PEEK];
-                src.read_exact(&mut peek[..n])?;
-                match xmp_prefix_len(&peek[..n]) {
+                match xmp_prefix_len(r.take(n).await?) {
                     Some(p) => {
                         prefix = p as u64;
                         SegmentKind::Xmp
@@ -218,7 +211,6 @@ fn parse_with<R: Read + Seek>(
         }
 
         offset += chunk_len;
-        src.seek(SeekFrom::Start(offset))?;
         found_iend = ty == IEND;
     }
 
