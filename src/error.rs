@@ -1,40 +1,34 @@
-//! Error types for jumbf-io
+// Copyright 2026 Adobe. All rights reserved.
+// This file is licensed to you under the Apache License,
+// Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
+// or the MIT license (http://opensource.org/licenses/MIT),
+// at your option.
 
-use std::cell::RefCell;
+// Unless required by applicable law or agreed to in writing,
+// this software is distributed on an "AS IS" BASIS, WITHOUT
+// WARRANTIES OR REPRESENTATIONS OF ANY KIND, either express or
+// implied. See the LICENSE-MIT and LICENSE-APACHE files for the
+// specific language governing permissions and limitations under
+// each license.
+
+//! Error types
+
 use std::io;
 
-/// Result type for jumbf-io operations
+/// Result type for container operations
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// Message carried by synthetic [`io::Error`] values from [`crate::processing_writer::ProcessingWriter`]
-/// when a processor callback fails. Used so [`From<io::Error>`] can recover the real [`Error`] safely.
-pub(crate) const PROCESSOR_IO_SENTINEL: &str = "asset-io processor error";
-
-thread_local! {
-    static PENDING_PROCESSOR_ERROR: RefCell<Option<Error>> = const { RefCell::new(None) };
-}
-
-/// Stash a processor callback error so it can be recovered when converting the
-/// synthetic [`io::Error`] from [`crate::processing_writer::ProcessingWriter`] via [`From`].
-pub(crate) fn set_pending_processor_error(e: Error) {
-    PENDING_PROCESSOR_ERROR.with(|c| {
-        *c.borrow_mut() = Some(e);
-    });
-}
-
-pub(crate) fn take_pending_processor_error() -> Option<Error> {
-    PENDING_PROCESSOR_ERROR.with(|c| c.borrow_mut().take())
-}
-
-/// Errors that can occur during JUMBF I/O operations
+/// Errors that can occur while reading or writing a container
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum Error {
     /// I/O error
     #[error("I/O error: {0}")]
-    Io(io::Error),
+    Io(#[from] io::Error),
 
-    /// Returned when a read/write processor callback stops the operation (e.g. user cancel).
-    #[error("operation canceled by processor")]
+    /// A caller-supplied callback (for example a [`Sink`](crate::Sink))
+    /// stopped the operation, such as on user cancel.
+    #[error("operation canceled by a callback")]
     UserCanceled,
 
     /// Invalid file format
@@ -53,19 +47,31 @@ pub enum Error {
     #[error("Invalid segment at offset {offset}: {reason}")]
     InvalidSegment { offset: u64, reason: String },
 
+    /// A required item is absent.
+    #[error("{what} not found")]
+    NotFound { what: &'static str },
+
+    /// More than one candidate where exactly one is required.
+    #[error("{what} is ambiguous ({count} candidates)")]
+    Ambiguous { what: &'static str, count: usize },
+
+    /// A resource limit was exceeded.
+    #[error("limit exceeded: {what} (limit {limit})")]
+    LimitExceeded { what: &'static str, limit: u64 },
+
     /// XML parsing error (from quick-xml)
     #[cfg(feature = "xmp")]
     #[error("XML error: {0}")]
     Xml(#[from] quick_xml::Error),
 }
 
-impl From<io::Error> for Error {
-    fn from(e: io::Error) -> Self {
-        if e.kind() == io::ErrorKind::Other && e.to_string() == PROCESSOR_IO_SENTINEL {
-            if let Some(pending) = take_pending_processor_error() {
-                return pending;
-            }
+impl Error {
+    /// [`Error::InvalidSegment`]: the data at `offset` is not a valid element of the
+    /// container, for the given `reason`.
+    pub fn invalid_segment(offset: u64, reason: impl Into<String>) -> Self {
+        Error::InvalidSegment {
+            offset,
+            reason: reason.into(),
         }
-        Error::Io(e)
     }
 }

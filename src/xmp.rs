@@ -1,3 +1,16 @@
+// Copyright 2026 Adobe. All rights reserved.
+// This file is licensed to you under the Apache License,
+// Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
+// or the MIT license (http://opensource.org/licenses/MIT),
+// at your option.
+
+// Unless required by applicable law or agreed to in writing,
+// this software is distributed on an "AS IS" BASIS, WITHOUT
+// WARRANTIES OR REPRESENTATIONS OF ANY KIND, either express or
+// implied. See the LICENSE-MIT and LICENSE-APACHE files for the
+// specific language governing permissions and limitations under
+// each license.
+
 //! Minimal XMP parser
 //!
 //! This module provides a lightweight XMP implementation for extracting and modifying
@@ -338,8 +351,7 @@ fn adjust_packet_padding(xmp: String, target_size: usize) -> String {
         None => return xmp,
     };
     // Find where non-whitespace content ends before the end marker
-    let content_end = xmp[..end_pos]
-        .as_bytes()
+    let content_end = xmp.as_bytes()[..end_pos]
         .iter()
         .rposition(|&b| !b.is_ascii_whitespace())
         .map(|i| i + 1)

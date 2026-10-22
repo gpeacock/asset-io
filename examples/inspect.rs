@@ -1,125 +1,99 @@
-//! Example: Parse and inspect a media file
-//!
-//! This example shows how to parse any supported media file (JPEG, PNG, HEIC, AVIF, MP4, etc.)
-//! and inspect its structure without loading the entire file into memory.
+// Copyright 2026 Adobe. All rights reserved.
+// This file is licensed to you under the Apache License,
+// Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
+// or the MIT license (http://opensource.org/licenses/MIT),
+// at your option.
+
+// Unless required by applicable law or agreed to in writing,
+// this software is distributed on an "AS IS" BASIS, WITHOUT
+// WARRANTIES OR REPRESENTATIONS OF ANY KIND, either express or
+// implied. See the LICENSE-MIT and LICENSE-APACHE files for the
+// specific language governing permissions and limitations under
+// each license.
+
+//! Parse a media file and print its structure and metadata.
 //!
 //! Run: `cargo run --example inspect --features all-formats,xmp,exif -- <file>`
 
-use asset_io::Asset;
-use std::env;
+use asset_io::{HandlerRegistry, Role, SegmentKind};
+use std::{env, fs::File};
 
 fn main() -> asset_io::Result<()> {
-    let args: Vec<String> = env::args().collect();
-
-    if args.len() < 2 {
-        eprintln!("Usage: {} <image_file>", args[0]);
+    let Some(path) = env::args().nth(1) else {
+        eprintln!("Usage: inspect <file>");
         std::process::exit(1);
-    }
+    };
 
-    let filename = &args[1];
-    println!("Parsing: {}", filename);
+    let mut src = File::open(&path)?;
+    let structure = HandlerRegistry::builtin().parse_detect(&mut src)?;
 
-    // Auto-detect format and parse
-    let mut asset = Asset::open(filename)?;
+    println!("File: {path}");
+    println!("  Container: {}", structure.container_id());
+    println!("  Media type: {}", structure.media_type());
+    println!("  Size: {} bytes", structure.total_size());
+    println!("  Segments: {}", structure.segments().len());
 
-    println!("\nFile structure:");
-    println!("  ContainerKind: {:?}", asset.container());
-    println!("  Media type: {:?}", asset.media_type());
-    println!("  Total size: {} bytes", asset.structure().total_size);
-    println!("  Segments: {}", asset.structure().segments.len());
-
-    // Check for XMP (loads lazily only if present)
-    match asset.xmp()? {
-        Some(xmp) => {
-            println!("\n✓ Found XMP metadata ({} bytes)", xmp.len());
-            // Print first 100 chars
-            let preview =
-                std::str::from_utf8(&xmp[..xmp.len().min(100)]).unwrap_or("<binary data>");
-            println!("  Preview: {}...", preview);
-        }
-        None => println!("\nNo XMP metadata found."),
-    }
-
-    // Check for JUMBF (loads and assembles only if present)
-    match asset.jumbf()? {
-        Some(jumbf) => {
-            println!("\n✓ Found JUMBF data ({} bytes)", jumbf.len());
-        }
-        None => println!("\nNo document-level JUMBF/C2PA data found."),
-    }
-
-    // Check for EXIF metadata
-    match asset.exif_info()? {
-        Some(info) => {
-            println!("\n✓ Found EXIF metadata");
-            println!("  Preview: {}", info);
-            // Show individual fields if present
-            if let Some(ref make) = info.make {
-                println!("  Make: {}", make);
-            }
-            if let Some(ref model) = info.model {
-                println!("  Model: {}", model);
-            }
-            if let Some(ref dt) = info.date_time_original.or(info.date_time) {
-                println!("  DateTime: {}", dt);
-            }
-            if let Some(ref software) = info.software {
-                println!("  Software: {}", software);
-            }
-            if let Some(orientation) = info.orientation {
-                println!("  Orientation: {}", orientation);
-            }
-        }
-        None => {}
-    }
-
-    // Check for embedded thumbnail (from EXIF)
-    match asset.read_embedded_thumbnail()? {
-        Some(thumb) => {
-            let dims = match (thumb.width, thumb.height) {
-                (Some(w), Some(h)) => format!("{}x{}", w, h),
-                _ => "unknown dimensions".to_string(),
-            };
+    for kind in [SegmentKind::Xmp, SegmentKind::Jumbf] {
+        for e in structure.entities(kind) {
+            let label = e.label().map(|l| format!(" [{l}]")).unwrap_or_default();
             println!(
-                "\n✓ Found embedded thumbnail ({:?}, {}, {} bytes)",
-                thumb.format,
-                dims,
-                thumb.data.len()
+                "\n{kind}{label}: {} bytes, {} part(s)",
+                e.len(),
+                e.part_count()
             );
+            if kind == SegmentKind::Xmp {
+                let data = structure.read_entity(&mut src, e)?;
+                let head = &data[..data.len().min(100)];
+                println!("  Preview: {}...", String::from_utf8_lossy(head));
+            }
         }
-        None => {}
     }
 
-    // Show segment breakdown
-    println!("\nSegment breakdown:");
-    for (i, segment) in asset.structure().segments.iter().enumerate() {
-        let location = segment.location();
-        let seg_type = if segment.is_header() {
-            "Header".to_string()
-        } else if segment.is_xmp() {
-            if segment.ranges.len() > 1 {
-                format!("XMP ({} parts)", segment.ranges.len())
-            } else {
-                "XMP".to_string()
-            }
-        } else if segment.is_jumbf() {
-            if segment.ranges.len() > 1 {
-                format!("JUMBF ({} parts)", segment.ranges.len())
-            } else {
-                "JUMBF".to_string()
-            }
-        } else if segment.is_image_data() {
-            "ImageData".to_string()
-        } else if segment.is_exif() {
-            "EXIF".to_string()
-        } else {
-            segment.path.as_deref().unwrap_or("Other").to_string()
+    if let Some(info) = structure.exif_info(&mut src)? {
+        println!("\nEXIF: {info}");
+        if let Some(v) = &info.software {
+            println!("  Software: {v}");
+        }
+        if let Some(v) = info.orientation {
+            println!("  Orientation: {v}");
+        }
+    }
+
+    if let Some(t) = structure.embedded_thumbnail(&mut src)? {
+        let dims = match (t.width, t.height) {
+            (Some(w), Some(h)) => format!("{w}x{h}"),
+            _ => "unknown size".into(),
         };
         println!(
-            "  [{:3}] {:20} at offset {:8}, size {:8}",
-            i, seg_type, location.offset, location.size
+            "\nThumbnail: {}, {dims}, {} bytes",
+            t.media_type().unwrap_or("unknown type"),
+            t.data.len()
         );
     }
 
+    println!("\nSegments:");
+    for (i, seg) in structure.segments().iter().enumerate() {
+        let name = structure
+            .box_name(seg.name())
+            .map(|n| n.into_owned())
+            .unwrap_or_default();
+        println!(
+            "  [{i:4}] {name:8} {:10} offset {:10} size {:10} (header {}, payload {}, trailer {})",
+            seg.kind().to_string(),
+            seg.extent().offset(),
+            seg.extent().len(),
+            seg.header().len(),
+            seg.payload().len(),
+            seg.trailer().len(),
+        );
+    }
+
+    // Region view: the roles a hasher would see.
+    let payload: u64 = structure
+        .regions()
+        .filter(|r| r.role == Role::Payload)
+        .map(|r| r.range.len())
+        .sum();
+    println!("\nPayload bytes: {payload} of {}", structure.total_size());
     Ok(())
 }

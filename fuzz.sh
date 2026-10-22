@@ -17,6 +17,13 @@ run_fuzz() {
     local target=$1
     local duration=${2:-60}  # Default 60 seconds
     
+    # The corpus is not tracked; start it from the committed seeds, keeping what
+    # earlier runs found.
+    if [ -d "fuzz/seeds/$target" ]; then
+        mkdir -p "fuzz/corpus/$target"
+        cp -n "fuzz/seeds/$target"/* "fuzz/corpus/$target"/
+    fi
+
     echo "Running $target for ${duration} seconds..."
     cargo +nightly fuzz run $target -- -max_total_time=$duration
 }
@@ -28,18 +35,28 @@ case "${1:-help}" in
         echo "  - fuzz_parse   : General file parsing (all formats)"
         echo "  - fuzz_write   : Write operations with updates"
         echo "  - fuzz_xmp     : XMP metadata parsing and modification"
+        echo "  - fuzz_mpf     : Multi-Picture Format index parsing and rewriting"
+        echo "  - fuzz_conform : What parses must keep the promises of every handler"
         ;;
-    
+
     parse)
         run_fuzz fuzz_parse ${2:-60}
         ;;
-    
+
     write)
         run_fuzz fuzz_write ${2:-60}
         ;;
-    
+
+    mpf)
+        run_fuzz fuzz_mpf ${2:-60}
+        ;;
+
     xmp)
         run_fuzz fuzz_xmp ${2:-60}
+        ;;
+
+    conform)
+        run_fuzz fuzz_conform ${2:-60}
         ;;
     
     all)
@@ -47,6 +64,8 @@ case "${1:-help}" in
         run_fuzz fuzz_parse ${2:-60}
         run_fuzz fuzz_write ${2:-60}
         run_fuzz fuzz_xmp ${2:-60}
+        run_fuzz fuzz_mpf ${2:-60}
+        run_fuzz fuzz_conform ${2:-60}
         ;;
     
     build)
@@ -54,6 +73,8 @@ case "${1:-help}" in
         cargo +nightly fuzz build fuzz_parse
         cargo +nightly fuzz build fuzz_write
         cargo +nightly fuzz build fuzz_xmp
+        cargo +nightly fuzz build fuzz_mpf
+        cargo +nightly fuzz build fuzz_conform
         echo "✅ All fuzz targets built successfully"
         ;;
     
@@ -71,6 +92,7 @@ case "${1:-help}" in
         echo "  parse     - Fuzz file parsing (default: 60s)"
         echo "  write     - Fuzz write operations (default: 60s)"
         echo "  xmp       - Fuzz XMP handling (default: 60s)"
+        echo "  mpf       - Fuzz the Multi-Picture Format index (default: 60s)"
         echo "  all       - Run all fuzz targets (default: 60s each)"
         echo "  build     - Build all fuzz targets"
         echo "  clean     - Remove fuzz artifacts"

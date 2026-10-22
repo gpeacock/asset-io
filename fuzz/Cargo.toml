@@ -30,8 +30,22 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_mpf"
+path = "fuzz_targets/fuzz_mpf.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_xmp"
 path = "fuzz_targets/fuzz_xmp.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_conform"
+path = "fuzz_targets/fuzz_conform.rs"
 test = false
 doc = false
 bench = false

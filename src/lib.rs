@@ -1,129 +1,109 @@
-//! High-performance, media type-agnostic streaming I/O for media asset metadata.
+// Copyright 2026 Adobe. All rights reserved.
+// This file is licensed to you under the Apache License,
+// Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
+// or the MIT license (http://opensource.org/licenses/MIT),
+// at your option.
+
+// Unless required by applicable law or agreed to in writing,
+// this software is distributed on an "AS IS" BASIS, WITHOUT
+// WARRANTIES OR REPRESENTATIONS OF ANY KIND, either express or
+// implied. See the LICENSE-MIT and LICENSE-APACHE files for the
+// specific language governing permissions and limitations under
+// each license.
+
+//! Streaming, container-agnostic access to the structure and metadata of media
+//! files (JPEG, PNG, ISO BMFF, ...).
 //!
-//! This crate provides efficient, single-pass parsing and writing of media files
-//! with JUMBF (JPEG Universal Metadata Box Format) and XMP metadata.
+//! A [`Structure`] describes a file as an ordered tiling of [`Segment`]s, each
+//! split into header, payload and trailer, plus [`Entity`]s that group the parts
+//! of logical items such as XMP or JUMBF. It carries geometry only: no data, and
+//! no hashing or signing rules. Callers decide what each byte range means.
 //!
-//! # Design Principles
+//! # Design principles
 //!
-//! - **Streaming**: Process files without loading them entirely into memory
-//! - **Lazy loading**: Only read data when explicitly accessed
-//! - **Zero-copy**: Use memory-mapped files when beneficial
-//! - **Media type agnostic**: Unified API across JPEG, PNG, MP4, and more
+//! - **Container agnostic**: one API for every format. Format knowledge lives in a
+//!   [`ContainerHandler`]; callers never test which format they have.
+//! - **Streaming**: a file is parsed and written in one pass, in bounded memory.
+//! - **Safe on hostile input**: every length is checked, resources are capped,
+//!   and errors are returned rather than guessed around.
+//! - **Pluggable**: [`HandlerRegistry`] finds handlers by format string or by
+//!   content, and callers can register their own.
 //!
-//! # Quick Start (Media Type-Agnostic API)
-//!
-//! The simplest way to use this library is with the [`Asset`] API,
-//! which automatically detects the media type:
-//!
-//! ```no_run
-//! use asset_io::{Asset, Updates};
-//!
-//! # fn main() -> asset_io::Result<()> {
-//! // Open any supported file - media type is auto-detected
-//! let mut asset = Asset::open("image.jpg")?;
-//!
-//! // Read metadata
-//! if let Some(xmp) = asset.xmp()? {
-//!     println!("XMP: {} bytes", xmp.len());
-//! }
-//! if let Some(jumbf) = asset.jumbf()? {
-//!     println!("JUMBF: {} bytes", jumbf.len());
-//! }
-//!
-//! // Modify and write using builder pattern
-//! let updates = Updates::new()
-//!     .set_xmp(b"<new>metadata</new>".to_vec())
-//!     .remove_jumbf();
-//! asset.write_to("output.jpg", &updates)?;
-//! # Ok(())
-//! # }
-//! ```
-//!
-//!
-//! # Processing During Read/Write
-//!
-//! For C2PA workflows and similar use cases, you can process data (e.g., hash it)
-//! while reading or writing:
+//! # Example
 //!
 //! ```no_run
-//! use asset_io::{Asset, Updates, SegmentKind, ExclusionMode};
-//! use sha2::{Sha256, Digest};
+//! use asset_io::{HandlerRegistry, NullSink, SegmentKind, Updates};
+//! use std::fs::OpenOptions;
 //!
 //! # fn main() -> asset_io::Result<()> {
-//! let mut asset = Asset::open("signed.jpg")?;
+//! let registry = HandlerRegistry::builtin();
+//! let mut src = std::fs::File::open("image.jpg")?;
+//! let structure = registry.parse("jpg", &mut src)?;
 //!
-//! // Hash while reading, excluding specific segments
-//! let updates = Updates::new()
-//!     .exclude_from_processing(vec![SegmentKind::Jumbf], ExclusionMode::DataOnly);
+//! // Read a metadata item, which may span several segments.
+//! if let Some(jumbf) = structure.entity(SegmentKind::Jumbf)? {
+//!     let bytes = structure.read_entity(&mut src, jumbf)?;
+//!     println!("JUMBF: {} bytes", bytes.len());
+//! }
 //!
-//! let mut hasher = Sha256::new();
-//! asset.read_with_processing(&updates, &mut |chunk| {
-//!     hasher.update(chunk);
-//!     Ok(())
-//! })?;
-//! let hash = hasher.finalize();
-//! println!("Asset hash: {:x}", hash);
-//!
-//! // Or hash while writing (single-pass workflow)
-//! let mut output = std::fs::File::create("output.jpg")?;
-//! let updates = Updates::new()
-//!     .set_jumbf(b"placeholder".to_vec())
-//!     .exclude_from_processing(vec![SegmentKind::Jumbf], ExclusionMode::DataOnly);
-//!
-//! let mut hasher = Sha256::new();
-//! let dest_structure = asset.write_with_processing(
-//!     &mut output,
-//!     &updates,
-//!     &mut |chunk: &dyn asset_io::ProcessChunk| {
-//!         hasher.update(chunk.data());
-//!         Ok(())
-//!     },
-//! )?;
-//! // Now you have the hash and can update the JUMBF in-place
+//! // Write a copy with changes. Every output byte also goes to a sink, tagged
+//! // with its segment and role, so it can be hashed without a second pass.
+//! let mut out = OpenOptions::new()
+//!     .read(true)
+//!     .write(true)
+//!     .create(true)
+//!     .truncate(true)
+//!     .open("out.jpg")?;
+//! let updates = Updates::new().set_xmp(b"<x:xmpmeta/>".to_vec()).remove_jumbf();
+//! structure.write(&mut src, &mut out, &updates, &mut NullSink)?;
 //! # Ok(())
 //! # }
 //! ```
 
-mod asset;
-mod containers;
+pub mod containers;
+mod crc;
 mod error;
-mod media_type;
-mod processing_writer;
+mod execute;
+mod handler;
+#[cfg(feature = "memory-mapped")]
+mod mapped;
+pub mod plan;
+mod plan_builder;
+mod range;
+mod registry;
 mod segment;
+mod sink;
 mod structure;
+mod task;
+pub mod testing;
 mod thumbnail;
 #[cfg(feature = "exif")]
 mod tiff;
 mod updates;
+mod walk;
 #[cfg(feature = "xmp")]
 mod xmp;
 
-// Public exports
-pub use asset::{Asset, AssetBuilder};
-#[cfg(feature = "bmff")]
-pub use containers::bmff_io::{bmff_adjust_chunk_offsets, BmffFragment, BmffIO};
-pub use containers::ContainerKind;
+pub use crc::Crc32;
 pub use error::{Error, Result};
-pub use processing_writer::{MdatChunk, ProcessChunk, ProcessChunkFn, ReadChunkFn, SimpleChunk};
-#[cfg(feature = "parallel")]
-pub use segment::merkle_root;
-pub use segment::{
-    ByteRange, ChunkSpec, ExclusionMode, ProcessingChunk, Segment, SegmentKind, SegmentMetadata,
+pub use execute::{Action, Execution};
+pub use handler::{ContainerHandler, FormatSpec, ReadSeek, ReadWriteSeek, DETECT_LEN};
+#[cfg(feature = "memory-mapped")]
+pub use mapped::MappedFile;
+pub use plan::{Step, WritePlan};
+pub use plan_builder::PlanBuilder;
+pub use range::ByteRange;
+pub use registry::HandlerRegistry;
+pub use segment::{labels, Name, Role, Segment, SegmentKind, AFTER_BOX};
+pub use sink::{Chunk, NullSink, Sink};
+pub use structure::{
+    Entity, Part, Region, SegmentId, Structure, StructureBuilder, SubAsset, MAX_SEGMENTS,
 };
-pub use structure::Structure;
-pub use thumbnail::{Thumbnail, ThumbnailKind};
+pub use task::{block_on, BoxFuture, Io, Progress, ReadRequest, Reader, Task, DEFAULT_WINDOW};
+pub use thumbnail::Thumbnail;
 #[cfg(feature = "exif")]
 pub use tiff::ExifInfo;
-pub use updates::Updates;
+pub use updates::{Existing, MetadataSlot, MetadataUpdate, Updates};
+pub use walk::Node;
 #[cfg(feature = "xmp")]
 pub use xmp::MiniXmp;
-
-// Internal re-exports
-pub(crate) use containers::{detect_container, get_handler, Handler};
-pub(crate) use media_type::MediaType;
-pub(crate) use segment::ChunkedSegmentReader;
-pub(crate) use updates::MetadataUpdate;
-
-// Test utilities - only compiled for tests or when explicitly enabled
-#[cfg(any(test, feature = "test-utils"))]
-pub mod test_utils;

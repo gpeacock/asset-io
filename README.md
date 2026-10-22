@@ -1,277 +1,105 @@
 # asset-io
 
-High-performance, format-agnostic streaming I/O for media asset metadata (JUMBF, XMP, C2PA, EXIF, thumbnails).
+Streaming, container-agnostic access to the structure and metadata of media files.
 
-## Features
+A parsed file is a `Structure`: a gapless tiling of `Segment`s (header, payload, trailer) plus `Entity`s that group the parts of logical items such as XMP and JUMBF. It holds geometry only. It does not hash, sign or interpret C2PA; callers decide what each byte range means.
 
-- **Fast** - Single-pass parsing, optimized seeks, streaming writes
-- **Memory Efficient** - Lazy loading, processes files larger than RAM
-- **Format Agnostic** - Auto-detects JPEG, PNG, HEIC, AVIF, MP4, and more
-- **Type Safe** - Full Rust type safety and error handling
-- **Minimal Dependencies** - Core functionality with optional features
-- **C2PA Ready** - Built-in support for streaming hash computation with exclusions
+## Upgrading from 0.1
 
-## Quick Start
+0.2 is a redesign, not a drop-in update. The 0.1 `Asset` type and its per-format `*_io` modules are gone. Parsing, reading and writing now go through `HandlerRegistry` and `Structure`, and hashing or other byte-level work goes through a `Sink`. The `parallel`, `c2pa`, `embed-fixtures` and `test-utils` features and the `rayon`, `c2pa`, `atree`, `fs2`, `byteorder` and `log` dependencies were removed. The default features are `jpeg` and `png`; enable `bmff`, `riff` and `svg` (or `all-formats`) for the rest. The 0.1 examples (`parallel_hash`, `progress_cancel`, `c2pa_embeddable`) do not exist in 0.2.
 
-Add to your `Cargo.toml`:
+## Containers
 
-```toml
-[dependencies]
-asset-io = { version = "0.1", features = ["jpeg"] }
-```
+| Feature | Container | Read | Write |
+|---------|-----------|------|-------|
+| `jpeg`  | JPEG      | yes  | yes   |
+| `png`   | PNG       | yes  | yes   |
+| `bmff`  | ISO BMFF (MP4, HEIC, AVIF, ...) | yes | yes, with streaming chunk-offset rewrite and merkle boxes |
+| `riff`  | RIFF (WebP, WAV, AVI) | yes | yes; WebP XMP maintains the `VP8X` flag |
 
-### Basic Usage
+Containers implement `ContainerHandler` and are found through `HandlerRegistry`, by format string or by content. Callers can register their own handlers.
+
+## Use
 
 ```rust
-use asset_io::{Asset, Updates};
+use asset_io::{HandlerRegistry, NullSink, SegmentKind, Updates};
 
-fn main() -> asset_io::Result<()> {
-    // Open any supported file - format is auto-detected
-    let mut asset = Asset::open("image.jpg")?;
-    
-    // Read metadata
-    if let Some(xmp) = asset.xmp()? {
-        println!("XMP: {} bytes", xmp.len());
-    }
-    
-    if let Some(jumbf) = asset.jumbf()? {
-        println!("JUMBF/C2PA: {} bytes", jumbf.len());
-    }
-    
-    // Modify and write - supports ANY combination of add/remove/replace
-    let updates = Updates::new()
-        .set_xmp(b"<new>metadata</new>".to_vec())
-        .remove_jumbf();
-    asset.write_to("output.jpg", &updates)?;
-    
-    Ok(())
+let registry = HandlerRegistry::builtin();
+let mut src = std::fs::File::open("image.jpg")?;
+let structure = registry.parse_detect(&mut src)?;
+
+if let Some(jumbf) = structure.entity(SegmentKind::Jumbf)? {
+    let bytes = structure.read_entity(&mut src, jumbf)?;
 }
+
+let mut out = std::fs::File::create("out.jpg")?; // BMFF also needs Read
+let updates = Updates::new().set_xmp(xmp_bytes).remove_jumbf();
+structure.write(&mut src, &mut out, &updates, &mut NullSink)?;
 ```
 
-### XMP Parsing with MiniXmp
+## Sinks
 
-```rust
-use asset_io::{Asset, MiniXmp};
+`write(src, out, updates, sink)` and `read(src, sink)` both end with a `Sink`. It receives every byte, in order, tagged with its segment and role, so a caller can hash while reading or writing. Runs the sink doesn't `want` are not read.
 
-fn main() -> asset_io::Result<()> {
-    let mut asset = Asset::open("photo.jpg")?;
-    
-    if let Some(xmp_bytes) = asset.xmp()? {
-        let xmp = MiniXmp::new(String::from_utf8_lossy(&xmp_bytes).into_owned());
-        
-        // Read values
-        if let Some(title) = xmp.get("dc:title") {
-            println!("Title: {}", title);
-        }
-        
-        // Modify values (returns new MiniXmp)
-        let updated = xmp.set("dc:creator", "John Doe")?;
-        
-        // Get multiple values efficiently
-        let values = updated.get_many(&["dc:title", "dc:creator", "dc:description"]);
-    }
-    Ok(())
-}
-```
+## Updates
 
-### Streaming Processing (C2PA Hashing)
+`set_jumbf(store).as_update()` marks the JUMBF as an update to the existing store. ISO BMFF uses it to keep the original manifests untouched and store only the addition. Other containers ignore it.
 
-Process data during read or write with callbacks - ideal for computing hashes:
+`Structure::patch_exact` fills a placeholder in place; the replacement must be the same length.
 
-```rust
-use asset_io::{Asset, Updates, SegmentKind, ExclusionMode, ProcessingOptions};
+`set_jumbf` replaces the JUMBF of the same type (the type in its description box) and leaves JUMBF of other types alone; `remove_jumbf_of(type)` removes one type, and `remove_jumbf()` removes all. This applies to JPEG, which carries JUMBF of any type. `Entity::jumbf_type()` gives each entity's type. PNG, RIFF and ISO BMFF reserve an element for the manifest store, and the type does not select anything there.
 
-fn main() -> asset_io::Result<()> {
-    let mut asset = Asset::open("image.jpg")?;
-    
-    // Configure processing to exclude JUMBF from hash (C2PA requirement)
-    let updates = Updates::new()
-        .set_jumbf(placeholder_jumbf)
-        .exclude_from_processing(SegmentKind::Jumbf)
-        .with_exclusion_mode(ExclusionMode::DataOnly);  // C2PA compliant
-    
-    // Write while computing hash in single pass
-    let mut hasher = Sha256::new();
-    asset.write_with_processing(
-        output_file,
-        &updates,
-        |bytes| hasher.update(bytes),
-    )?;
-    
-    let hash = hasher.finalize();
-    Ok(())
-}
-```
+`Structure::plan(src, &updates)` returns the structure `write` would produce, without writing: where each entity would land and the output size.
 
-### Embedded Thumbnails
+`Structure::store(src)` reads the JUMBF store as a reader sees it. For ISO BMFF that combines an original store and its update; `containers::jumbf::{addition_to, extend}` convert between the two forms.
 
-```rust
-use asset_io::Asset;
+`HandlerRegistry::compose(format, kind, data)` returns the container's own encoding of an item (JPEG APP11 segments, a PNG `caBX` chunk, a BMFF C2PA box), for callers that insert it into an asset themselves. Callers that use `write` don't need it.
 
-fn main() -> asset_io::Result<()> {
-    let mut asset = Asset::open("photo.jpg")?;
-    
-    // Extract embedded thumbnail (from EXIF)
-    if let Some(thumbnail) = asset.read_embedded_thumbnail()? {
-        println!("Thumbnail: {} bytes, format: {:?}", 
-                 thumbnail.data.len(), 
-                 thumbnail.format);
-        std::fs::write("thumb.jpg", &thumbnail.data)?;
-    }
-    Ok(())
-}
-```
+Each handler has an `id()` (`"jpeg"`, `"png"`, `"bmff"`, `"riff"`) and declares the formats it serves as `FormatSpec`s: a media type, a preferred extension, and any other accepted media types and extensions. `HandlerRegistry::media_type_for("heic")` gives `image/heic` and `extension_for("image/jpeg")` gives `jpg`; aliases resolve to the preferred values (`image/x-webp` gives `image/webp`).
 
-## Feature Flags
+## Multi-part assets
 
-```toml
-[dependencies]
-asset-io = { version = "0.1", features = ["jpeg", "png", "xmp"] }
-```
+`Structure::subassets()` lists the parts of an asset: contiguous, in file order, covering every byte, each with its absolute `range()`, media type, segments, and a `relative(offset)` helper for part-relative hash ranges. A file that embeds nothing else has one part. A JPEG that holds several images (Multi-Picture Format, Ultra HDR) has one per image, plus one for any data after the last image; their markers are listed in order, so each part can be hashed on its own for a C2PA multi-asset hash. asset-io reports the geometry; the caller decides how to hash it.
 
-| Feature | Description |
-|---------|-------------|
-| `jpeg` | JPEG format support (default) |
-| `png` | PNG format support |
-| `bmff` | HEIC/HEIF/AVIF/MP4/MOV support |
-| `pdf` | PDF XMP/C2PA extraction and incremental metadata updates, with pure-Rust Flate support |
-| `xmp` | XMP parsing with MiniXmp |
-| `exif` | EXIF/thumbnail extraction |
-| `all-formats` | All format handlers |
-| `test-utils` | Test fixtures and utilities |
+`Structure::trailing()` is the range of bytes beyond the end of the container's own structure: data after the last chunk, or everything after the first image of a multi-image JPEG. A box hash of the whole asset lists the structure's boxes and then these bytes as one last box named `AFTER_BOX` (`c2pa.after`, C2PA 18.7.2); the hash of a single part never includes it. JPEG and PNG report it; the other containers do not yet, so bytes after their last box are not covered by a box hash.
 
-### PDF
+Edits to a multi-picture JPEG add metadata to the first image and shift the sizes and offsets recorded in its MPF index to match. The edit fails instead of writing a stale or ambiguous index: the index must be well formed, appear once, and record the offset of every image and the size of every image but the first exactly. The first image's size may be recorded short of the image, as in Pixel Ultra HDR files, and is corrected on an edit. Parsing and copying unchanged never consult it. Bytes after an image that start like another image but do not parse as one are trailing data.
 
-Enable `pdf` (also included in `all-formats`) for bounded XMP/C2PA extraction
-and incremental metadata updates. See [PDF implementation notes](PDF.md) for
-supported structures, resource limits, writing behavior, and safety restrictions.
+## Writing a handler
 
-### Segment Metadata
+A handler implements `ContainerHandler`:
 
-Segment metadata is an opaque `SegmentMetadata` typed attachment rather than a
-cross-format enum. Containers own their metadata types; `new`, `get::<T>`, and
-`get_mut::<T>` provide safe access with independent cloning, `Send`/`Sync`, and
-no new dependencies. Adding a container-specific type does not change JPEG or
-the shared segment model. Each attachment uses one small allocation, not a copy
-of the segment payload.
+- `parse_async(self: Arc<Self>, io: Io)` builds a `Structure` with `StructureBuilder`, reading the stream through `io` (`io.read_at(offset, &mut buf).await?`, `io.reader(at)` for a run of fields, `io.fetch(..)` for a borrowed slice). Everything but the reads is ordinary code. Return `Box::pin(async move { ... })`.
+- `write_plan_async(&self, structure, io, updates)` describes a write as a `WritePlan`: the structure of the output plus ordered `Step`s that copy source bytes or supply new ones. It reads the source only for what it must know (`io`), and does no writing. A handler that cannot write leaves the default. Decide what the output holds from `Updates` (`xmp()`, `jumbf()`, ...; a `MetadataSlot` says whether each existing XMP or JUMBF item is kept, replaced or dropped, and what is left to insert), then describe it in order with a `PlanBuilder`: `copy_segment(id)` for a source segment kept, `put_segment(kind, name, header, payload, trailer)` for a new one, `entity_for(id)` for the metadata it holds, `carry_entities(..)` for the entities of the kept segments, and `finish()`. The builder works out sizes, offsets and the output structure. When a segment is part copied and part changed, `shape_like`/`shape` add it and `copy`, `put` and `relocate` supply its bytes.
 
-## Performance
+The blocking `parse`, `write_plan` and `write` are provided: they run those methods against a `Read + Seek`. The default `write` runs the plan with `WritePlan::execute`, which coalesces reads, feeds the sink and checks the bytes against the structure and role. `plan::validate` checks a plan without any I/O, for a handler's tests. A container with absolute file offsets (ISO BMFF chunk tables) uses `Step::Relocate`, which copies a table of offsets and rewrites them from an `OffsetMap`. Read what to change from `Updates` (`xmp()`, `jumbf()`, ...). Options only one container has live outside `Updates`: attach them with `Updates::set_extension` and read them with `Updates::extension` (ISO BMFF's merkle boxes are `containers::bmff::BmffUpdates`). `tests/external_handler.rs` is a complete handler written with only the public API. Test it with `testing::Conformance::new(handler).check(name, &sample_bytes)`: it checks the promises every handler makes (the structure tiles the stream, a no-op write is byte-identical, plan, write and stepper agree, the sink sees every byte once and in order, set and remove read back, damaged input never panics), so a handler's own tests cover only what is particular to its format.
 
-Designed for high-throughput applications:
+Register a handler with `HandlerRegistry::with_handler`; the last handler registered for a format wins. Enums and structs a handler touches are `#[non_exhaustive]`, so new variants and fields are not breaking changes.
 
-- **Parse**: ~10ms for a 22MB JPEG with C2PA data
-- **Write**: Single sequential pass with optimized seeks
-- **Memory**: Streams data directly, O(1) memory usage
+## Running with your own I/O
 
-### Streaming Architecture
+Parsing and planning are `async` code that does no I/O: a `Task` runs it, and when it needs bytes it does not hold (`Io` keeps a 4 KiB window, so a run of tiny reads is one request) `Task::resume` returns a `ReadRequest` with the offset, how much, and the buffer to fill. Fill it however you like (blocking, `async`, from a buffer you already have) and resume. No runtime is involved, and a task is `Send`. Get one from `HandlerRegistry::parse_task(format, total)` or `parse_detect_task(total)` for a parse, or `Structure::write_plan_task(&updates)` for a plan.
 
-```
-Read:   [===Sequential Read===]  → callback(bytes)
-                                     ↓
-Write:  [===Sequential Write===] → callback(bytes) → hash/process
-                                     ↓
-Update: [Seek→][Patch]           → in-place JUMBF update
-```
+A `WritePlan` runs the same way: `WritePlan::start` gives an `Execution` whose `step` returns `Action::Read { offset, buf }`, `Action::Write(bytes)` or `Action::Done`, and does the sink calls, the checking and the read coalescing itself, so every way of running a plan behaves like `execute`. The blocking calls (`HandlerRegistry::parse`, `Structure::write`) are these drivers over a `Read + Seek` and a `Write`.
 
-## Supported Formats
+`examples/tokio_client.rs` drives parsing, planning and writing with `tokio::fs`, one spawned task per file, hashing the output as it is written; `tests/tokio_driver.rs` checks that what it writes matches the blocking API byte for byte.
 
-| Format | Parse | Write | XMP | JUMBF | EXIF | Thumbnail |
-|--------|-------|-------|-----|-------|------|-----------|
-| JPEG | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| PNG | ✅ | ✅ | ✅ | ✅ | - | - |
-| HEIC/HEIF | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| AVIF | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| MP4/MOV | ✅ | ✅ | ✅ | ✅ | - | - |
+## Zero-copy
 
-## Examples
+With the bytes in memory, `Structure::slice`, `slice_entity` and `read_slice` borrow instead of copying. The `memory-mapped` feature adds `MappedFile` for that. Mapping is `unsafe`: the file must not change while mapped, so don't map files untrusted parties can write.
 
-```bash
-# Inspect file structure and metadata
-cargo run --example inspect --features all-formats,xmp,exif -- image.jpg
+## Other modules
 
-# Test all metadata operation combinations
-cargo run --example test_all_combinations --features jpeg,png,test-utils
+- `MiniXmp` (feature `xmp`): minimal XMP read/modify.
+- `Structure::exif_info` (feature `exif`): basic EXIF fields, for containers that report EXIF entities: JPEG, PNG, WebP, and HEIF/AVIF (the `Exif` item).
+- `Structure::embedded_thumbnail`: a thumbnail the container stores as its own element (a HEIF `thmb` item, entity kind `Thumbnail`; its data is the coded item unless the item is a `jpeg` or a `mime` item), or with the `exif` feature the JPEG thumbnail inside EXIF data. `Thumbnail::media_type()` says what the data is, or `None` when the container cannot tell (a coded `hvc1`/`av01` item); `Entity::media_type()` and `SubAsset::media_type()` report media types the same way.
 
-# C2PA signing with new embeddable API (0.77.0+)
-cargo run --example c2pa_embeddable --features all-formats,xmp -- input.jpg output.jpg
+Run `cargo run --example inspect --features all-formats,xmp,exif -- <file>` to print a file's structure.
 
-# Update XMP field in-place
-cargo run --example update_xmp_field --features jpeg,xmp -- photo.jpg dc:title "New Title"
+## Safety
 
-# Update JUMBF in-place
-cargo run --example update_jumbf --features jpeg -- photo.jpg
-
-# Hash performance benchmark
-cargo run --release --example hash_benchmark --features jpeg
-```
-
-## API Overview
-
-### Core Types
-
-| Type | Description |
-|------|-------------|
-| `Asset` | Main entry point - open, read, write assets |
-| `Updates` | Builder for metadata modifications |
-| `Structure` | Parsed file structure with segment info |
-| `MiniXmp` | Lightweight XMP parser/modifier (requires `xmp` feature) |
-| `ExifInfo` | Parsed EXIF metadata (requires `exif` feature) |
-| `Thumbnail` | Embedded thumbnail data |
-
-### Key Methods
-
-```rust
-// Opening assets
-Asset::open(path)?                    // From file path
-Asset::from_source(reader)?           // From any Read+Seek
-
-// Reading metadata
-asset.xmp()?                          // Option<Vec<u8>>
-asset.jumbf()?                        // Option<Vec<u8>>
-asset.exif_info()?                    // Option<ExifInfo>
-asset.read_embedded_thumbnail()?      // Option<Thumbnail>
-
-// Writing
-asset.write_to(path, &updates)?       // To new file
-asset.write(&mut writer, &updates)?   // To any Read+Write+Seek (e.g. File or Cursor<Vec<u8>>)
-
-// Streaming processing
-asset.read_with_processing(callback, &options)?
-asset.write_with_processing(&mut writer, &updates, callback)?   // writer: Read+Write+Seek
-
-// In-place updates (when size permits)
-asset.update_segment_in_place(asset_io::SegmentKind::Xmp, new_xmp)?
-asset.update_segment_in_place(asset_io::SegmentKind::Jumbf, new_jumbf)?
-```
-
-## Use Cases
-
-- **C2PA/Content Credentials** - Stream-hash-sign workflow in single pass
-- **Photo Management** - Extract and modify EXIF/XMP metadata
-- **Media Processing Pipelines** - High-throughput metadata handling
-- **Forensics** - Inspect file structure and embedded data
-- **Thumbnail Extraction** - Extract embedded previews
-
-## Roadmap
-
-- [x] JPEG format support
-- [x] PNG format support  
-- [x] BMFF format support (HEIC/HEIF/AVIF/MP4)
-- [x] Format auto-detection
-- [x] Streaming writes with seek optimization
-- [x] Metadata add/remove/replace (all combinations)
-- [x] MiniXmp parser
-- [x] EXIF parsing (JPEG, HEIC/HEIF, AVIF)
-- [x] Thumbnail extraction (JPEG, HEIC/HEIF, AVIF)
-- [x] Streaming processing callbacks
-- [x] BMFF thumbnail extraction
-- [ ] Memory-mapped I/O option
-- [ ] Async I/O support
+Lengths are checked, segment counts and nesting are capped, and malformed input returns an error. Fuzz targets are in `fuzz/` (see `FUZZING_SETUP.md`).
 
 ## License
 
 MIT OR Apache-2.0
-
-## Contributing
-
-Contributions welcome! Please open an issue or PR.

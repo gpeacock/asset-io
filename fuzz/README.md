@@ -18,12 +18,7 @@ This directory contains fuzzing infrastructure for `asset-io` using `cargo-fuzz`
 ## Fuzz Targets
 
 ### `fuzz_parse` - General File Parsing
-Tests the core parsing logic across all supported formats (JPEG, PNG, BMFF, RIFF,
-and PDF containers). PDF is enabled through `all-formats`; seed inputs
-should include classic tables, Flate cross-reference streams (with PNG
-predictors), compressed object streams, and compressed XMP/C2PA payloads.
-The synthetic `tests/fixtures/pdf_metadata.pdf` fixture is a suitable seed:
-`cp tests/fixtures/pdf_metadata.pdf fuzz/corpus/fuzz_parse/` from the repository root.
+Tests the core parsing logic across all supported formats (JPEG, PNG, BMFF containers).
 This is the most important target as it exercises the attack surface of untrusted file input.
 
 **What it tests:**
@@ -33,7 +28,6 @@ This is the most important target as it exercises the attack surface of untruste
 - XMP/JUMBF location detection
 - Thumbnail extraction
 - Metadata access
-- Bounded Flate decompression and lazy compressed-object resolution
 
 **Corpus location:** `fuzz/corpus/fuzz_parse/`
 
@@ -46,8 +40,6 @@ Tests file writing with various update configurations.
 - XMP modifications
 - JUMBF modifications
 - Structure preservation
-- PDF incremental writes preserve the original prefix, reparse successfully,
-  and exactly match the predicted physical segment layout
 
 **Corpus location:** `fuzz/corpus/fuzz_write/`
 
