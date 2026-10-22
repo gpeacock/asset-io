@@ -95,7 +95,7 @@ pub(super) fn whitespace(byte: u8) -> bool {
     matches!(byte, 0 | b'\t' | b'\n' | 12 | b'\r' | b' ')
 }
 
-fn delimiter(byte: u8) -> bool {
+pub(super) fn delimiter(byte: u8) -> bool {
     whitespace(byte) || b"()<>[]{}/%".contains(&byte)
 }
 

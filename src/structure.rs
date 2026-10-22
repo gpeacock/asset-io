@@ -708,6 +708,7 @@ impl Structure {
         entity: &Entity,
         data: &[u8],
     ) -> Result<()> {
+        self.handler.check_patch(self, entity, data.len())?;
         let capacity = entity.len();
         if data.len() as u64 > capacity {
             return Err(Error::LimitExceeded {
@@ -783,6 +784,8 @@ impl Structure {
         data: &[u8],
     ) -> Result<()> {
         let stored = self.handler.encode_entity(self, entity, data)?;
+        // The container's refusal comes before a complaint about the length.
+        self.handler.check_patch(self, entity, stored.len())?;
         if stored.len() as u64 != entity.len() {
             return Err(Error::InvalidFormat(format!(
                 "replacement is {} bytes, the placeholder is {}",

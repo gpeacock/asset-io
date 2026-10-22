@@ -30,18 +30,24 @@
 
 mod flate;
 mod lexer;
+mod write;
 
 use crate::error::{Error, Result};
 use crate::handler::{ContainerHandler, FormatSpec};
+use crate::plan::WritePlan;
+use crate::plan_builder::PlanBuilder;
 use crate::range::ByteRange;
+use crate::segment::Role;
 use crate::segment::{Name, SegmentKind, MAX_SEGMENT_SIZE};
-use crate::structure::{Entity, Structure, StructureBuilder};
+use crate::structure::{Entity, SegmentId, Structure, StructureBuilder};
 use crate::task::{BoxFuture, Io};
+use crate::{MetadataUpdate, Updates};
 use flate::{inflate, Decode};
 use lexer::{
     invalid, required, unsigned, whitespace, Dictionary, Lex, Lexer, Reference, Stop, Value,
     MAX_DEPTH, MAX_SYNTAX_BYTES,
 };
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -72,22 +78,30 @@ pub fn handler() -> Arc<dyn ContainerHandler> {
 pub const ID: &str = "pdf";
 
 /// What a structure keeps for this handler.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug)]
 struct PdfState {
     /// How each compressed metadata stream is encoded, by segment index.
     decodes: BTreeMap<usize, Decode>,
+    /// Whether the document can be edited, and what an edit needs to know.
+    edit: write::State,
 }
 
 impl PdfState {
+    fn of(structure: &Structure) -> Result<&PdfState> {
+        structure
+            .attachment::<PdfState>()
+            .ok_or_else(|| invalid("structure was not parsed by the PDF handler"))
+    }
+
     fn decode_of(structure: &Structure, entity: &Entity) -> Result<Option<Decode>> {
-        let Some(state) = structure.attachment::<PdfState>() else {
-            return Err(invalid("structure was not parsed by the PDF handler"));
-        };
         let part = entity
             .parts()
             .next()
             .ok_or_else(|| invalid("entity has no parts"))?;
-        Ok(state.decodes.get(&part.segment().index()).copied())
+        Ok(Self::of(structure)?
+            .decodes
+            .get(&part.segment().index())
+            .copied())
     }
 }
 
@@ -111,6 +125,33 @@ impl ContainerHandler for PdfHandler {
 
     fn parse_async(self: Arc<Self>, io: Io) -> BoxFuture<'static, Result<Structure>> {
         Box::pin(parse_with(self, io))
+    }
+
+    fn write_plan_async<'f, 'a: 'f>(
+        &'f self,
+        src_structure: &'f Structure,
+        io: Io,
+        updates: &'a Updates,
+    ) -> BoxFuture<'f, Result<WritePlan<'a>>> {
+        Box::pin(async move { plan(src_structure, io.len(), updates) })
+    }
+
+    fn check_patch(&self, structure: &Structure, entity: &Entity, len: usize) -> Result<()> {
+        let state = PdfState::of(structure)?;
+        if let Some(refusal) = state.edit.refusal() {
+            return Err(refusal);
+        }
+        if PdfState::decode_of(structure, entity)?.is_some() {
+            return Err(Error::UnsupportedFeature(
+                "cannot patch compressed PDF metadata in place",
+            ));
+        }
+        if len as u64 != entity.len() {
+            return Err(invalid(
+                "PDF in-place updates require exact-length payloads",
+            ));
+        }
+        Ok(())
     }
 
     fn decode_entity(
@@ -216,11 +257,8 @@ struct ObjectStream {
 
 /// What the catalog's metadata entries say.
 struct CatalogMetadata {
-    #[allow(dead_code)]
     catalog: Dictionary,
-    #[allow(dead_code)]
     associated: Vec<Value>,
-    #[allow(dead_code)]
     active: Option<BTreeSet<Reference>>,
     ranges: Vec<(ByteRange, SegmentKind, Option<Decode>)>,
 }
@@ -916,13 +954,25 @@ async fn parse_with(handler: Arc<dyn ContainerHandler>, mut io: Io) -> Result<St
     let mut parser = Parser::new(&mut io, size);
     let root = parser.xrefs(offset).await?;
     let found = parser.metadata(root).await?;
+    let edit = write::context(
+        &mut parser,
+        root,
+        offset,
+        found.catalog,
+        found.associated,
+        found.active,
+    )
+    .await?;
     let mut ranges = found.ranges;
     ranges.sort_by_key(|(range, _, _)| range.offset());
 
     let mut b = StructureBuilder::new(handler, "application/pdf", size);
     b.push_span(SegmentKind::Header, Name::None, HEADER_LEN as u32, 0, 0)?;
     let mut end = HEADER_LEN;
-    let mut state = PdfState::default();
+    let mut state = PdfState {
+        decodes: BTreeMap::new(),
+        edit,
+    };
     for (range, kind, decode) in ranges {
         // An empty stream holds nothing to expose.
         if range.is_empty() {
@@ -944,6 +994,131 @@ async fn parse_with(handler: Arc<dyn ContainerHandler>, mut io: Io) -> Result<St
         b.push_span(SegmentKind::Other, Name::None, 0, size - end, 0)?;
     }
     b.attach(state);
+    b.finish()
+}
+
+// ---------------------------------------------------------------------------
+// Writing
+// ---------------------------------------------------------------------------
+
+/// Part of a run of text between the segments: kept source bytes or new ones.
+enum Text<'a> {
+    Copy(ByteRange),
+    Put(Cow<'a, [u8]>),
+}
+
+/// Emit the run as one segment of other bytes, which is how parsing the output sees
+/// them: whatever lies between the metadata streams.
+fn flush<'a>(b: &mut PlanBuilder<'_, 'a>, run: &mut Vec<Text<'a>>) -> Result<()> {
+    let len: u64 = run
+        .iter()
+        .map(|t| match t {
+            Text::Copy(r) => r.len(),
+            Text::Put(d) => d.len() as u64,
+        })
+        .sum();
+    if len == 0 {
+        run.clear();
+        return Ok(());
+    }
+    let id = b.shape(SegmentKind::Other, Name::None, 0, len, 0)?;
+    for piece in run.drain(..) {
+        match piece {
+            Text::Copy(r) if !r.is_empty() => {
+                b.copy(id, Role::Payload, r);
+            }
+            Text::Put(d) if !d.is_empty() => {
+                b.put(id, Role::Payload, d);
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// A write is the whole source, unchanged, then an appended revision. In the output,
+/// a metadata stream the catalog no longer points at is just bytes, so those are
+/// merged into the text around them, as parsing the output sees it.
+fn plan<'a>(src: &Structure, source_len: u64, updates: &'a Updates) -> Result<WritePlan<'a>> {
+    if source_len != src.total_size() {
+        return Err(invalid("source size changed since parsing"));
+    }
+    let state = PdfState::of(src)?;
+    let segments = src.segments();
+    let mut b = PlanBuilder::new(src);
+    let noop = matches!(updates.xmp(), MetadataUpdate::Keep)
+        && matches!(updates.jumbf(), MetadataUpdate::Keep);
+    if noop {
+        for i in 0..segments.len() {
+            b.copy_segment(SegmentId::from_index(i)?)?;
+        }
+        b.carry_entities(|_| true);
+        b.attach(state.clone());
+        return b.finish();
+    }
+    if let Some(refusal) = state.edit.refusal() {
+        return Err(refusal);
+    }
+    let write::State::Ready(context) = &state.edit else {
+        return Err(invalid("missing editable PDF context"));
+    };
+    let revision = write::revision(context, src.total_size(), updates)?;
+
+    let keeps = |kind: SegmentKind| {
+        matches!(
+            if kind == SegmentKind::Xmp {
+                updates.xmp()
+            } else {
+                updates.jumbf()
+            },
+            MetadataUpdate::Keep
+        )
+    };
+    let mut run: Vec<Text<'a>> = Vec::new();
+    let mut decodes = BTreeMap::new();
+    for (i, seg) in segments.iter().enumerate() {
+        let id = SegmentId::from_index(i)?;
+        match seg.kind() {
+            SegmentKind::Header => {
+                b.copy_segment(id)?;
+            }
+            kind @ (SegmentKind::Xmp | SegmentKind::Jumbf) if keeps(kind) => {
+                flush(&mut b, &mut run)?;
+                let dest = b.copy_segment(id)?;
+                if let Some(decode) = state.decodes.get(&i) {
+                    decodes.insert(dest.index(), *decode);
+                }
+            }
+            _ => run.push(Text::Copy(seg.extent())),
+        }
+    }
+    for piece in revision.pieces {
+        match piece {
+            write::Piece::Syntax(bytes) => run.push(Text::Put(Cow::Owned(bytes))),
+            write::Piece::Stream(kind) => {
+                let data = match if kind == SegmentKind::Xmp {
+                    updates.xmp()
+                } else {
+                    updates.jumbf()
+                } {
+                    MetadataUpdate::Set(data) => data.as_slice(),
+                    _ => return Err(invalid("write plan payload missing")),
+                };
+                // An empty stream holds nothing to expose.
+                if !data.is_empty() {
+                    flush(&mut b, &mut run)?;
+                    let id = b.put_segment(kind, Name::None, &[][..], data, &[][..])?;
+                    b.entity_for(id)?;
+                }
+            }
+        }
+    }
+    flush(&mut b, &mut run)?;
+    b.carry_entities(|_| true);
+    b.attach(PdfState {
+        decodes,
+        edit: write::State::Ready(Arc::new(revision.context)),
+    });
     b.finish()
 }
 

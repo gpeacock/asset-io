@@ -277,6 +277,14 @@ pub trait ContainerHandler: std::fmt::Debug + Send + Sync {
         Ok(Cow::Borrowed(data))
     }
 
+    /// Whether `entity`'s payload may be overwritten in place with `len` bytes (see
+    /// [`Structure::patch`](crate::Structure::patch)). The default allows it, as long as
+    /// the bytes fit. A container that cannot take a short payload, or an edit at all
+    /// (a compressed stream, a signed document), refuses here.
+    fn check_patch(&self, _structure: &Structure, _entity: &Entity, _len: usize) -> Result<()> {
+        Ok(())
+    }
+
     /// Split a segment flagged [`Segment::subdivides`] into its finer elements, in
     /// order, tiling the segment. Called through
     /// [`Structure::elements`](crate::Structure::elements); never needed unless the
