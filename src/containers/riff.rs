@@ -50,7 +50,7 @@ use crate::structure::{SegmentId, Structure, StructureBuilder};
 use crate::task::{BoxFuture, Io, Task};
 use crate::{MetadataUpdate, Updates};
 use std::borrow::Cow;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Read, Seek, Write};
 use std::sync::{Arc, OnceLock};
 
 const RIFF: [u8; 4] = *b"RIFF";
@@ -141,9 +141,7 @@ impl ContainerHandler for RiffHandler {
 
 /// Parse a RIFF file into a validated structure.
 pub fn parse<R: Read + Seek>(src: &mut R) -> Result<Structure> {
-    let total = src.seek(SeekFrom::End(0))?;
-    src.seek(SeekFrom::Start(0))?;
-    Task::new(total, |io| parse_with(handler(), io)).run(src)
+    handler().parse(src)
 }
 
 fn bad(offset: u64, reason: &str) -> Error {

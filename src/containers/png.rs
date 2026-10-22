@@ -24,7 +24,7 @@ use crate::segment::SegmentKind;
 use crate::segment::{Name, Role, Segment};
 use crate::sink::Sink;
 use crate::structure::{SegmentId, Structure, StructureBuilder};
-use crate::task::{BoxFuture, Io, Task};
+use crate::task::{BoxFuture, Io};
 use crate::{MetadataUpdate, Updates};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::sync::{Arc, OnceLock};
@@ -140,9 +140,7 @@ impl ContainerHandler for PngHandler {
 
 /// Parse a PNG into a validated structure.
 pub fn parse<R: Read + Seek>(src: &mut R) -> Result<Structure> {
-    let total = src.seek(SeekFrom::End(0))?;
-    src.seek(SeekFrom::Start(0))?;
-    Task::new(total, |io| parse_with(handler(), io)).run(src)
+    handler().parse(src)
 }
 
 async fn parse_with(handler: Arc<dyn ContainerHandler>, mut io: Io) -> Result<Structure> {
