@@ -47,7 +47,7 @@ use crate::plan::WritePlan;
 use crate::plan_builder::PlanBuilder;
 use crate::range::ByteRange;
 use crate::segment::{Name, Role, SegmentKind, MAX_SEGMENT_SIZE};
-use crate::structure::{SegmentId, Structure, StructureBuilder};
+use crate::structure::{Entity, SegmentId, Structure, StructureBuilder};
 use crate::task::{BoxFuture, Io};
 use crate::{Existing, MetadataSlot, MetadataUpdate, Updates};
 use quick_xml::events::{BytesStart, Event};
@@ -129,15 +129,25 @@ impl ContainerHandler for SvgHandler {
         }
     }
 
-    fn decode_entity(&self, kind: SegmentKind, stored: Vec<u8>) -> Result<Vec<u8>> {
-        match kind {
+    fn decode_entity(
+        &self,
+        _structure: &Structure,
+        entity: &Entity,
+        stored: Vec<u8>,
+    ) -> Result<Vec<u8>> {
+        match entity.kind() {
             SegmentKind::Jumbf => base64::decode(&stored),
             _ => Ok(stored),
         }
     }
 
-    fn encode_entity<'a>(&self, kind: SegmentKind, data: &'a [u8]) -> Result<Cow<'a, [u8]>> {
-        match kind {
+    fn encode_entity<'a>(
+        &self,
+        _structure: &Structure,
+        entity: &Entity,
+        data: &'a [u8],
+    ) -> Result<Cow<'a, [u8]>> {
+        match entity.kind() {
             SegmentKind::Jumbf => Ok(Cow::Owned(base64::encode(data))),
             _ => Ok(Cow::Borrowed(data)),
         }

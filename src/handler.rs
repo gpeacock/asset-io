@@ -24,7 +24,7 @@ use crate::error::{Error, Result};
 use crate::plan::WritePlan;
 use crate::segment::{Name, Segment, SegmentKind};
 use crate::sink::Sink;
-use crate::structure::{SegmentId, Structure};
+use crate::structure::{Entity, SegmentId, Structure};
 use crate::task::{BoxFuture, Io, Task};
 use crate::walk::Node;
 use crate::Updates;
@@ -243,26 +243,37 @@ pub trait ContainerHandler: std::fmt::Debug + Send + Sync {
         Err(Error::UnsupportedFormat)
     }
 
-    /// The item an entity of `kind` holds, from the bytes the container stores for
-    /// it. The default returns them as they are; a container that stores an item
+    /// The item `entity` holds, from the bytes the container stores for it. The default returns them as they are; a container that stores an item
     /// in another form overrides this and [`encode_entity`](Self::encode_entity):
-    /// SVG holds JUMBF as base64 text.
+    /// SVG holds JUMBF as base64 text, and a PDF stream may be compressed. The
+    /// structure is given so that the handler can look up how this entity is stored
+    /// (see [`Structure::attachment`]).
     ///
     /// [`Structure::store`](crate::Structure::store) and
     /// [`Structure::xmp`](crate::Structure::xmp) decode, so callers get the item
     /// whatever the container. [`Structure::read_entity`](crate::Structure::read_entity)
     /// does not: it reads what is in the file, which is what a hash covers.
-    fn decode_entity(&self, _kind: SegmentKind, stored: Vec<u8>) -> Result<Vec<u8>> {
+    fn decode_entity(
+        &self,
+        _structure: &Structure,
+        _entity: &Entity,
+        stored: Vec<u8>,
+    ) -> Result<Vec<u8>> {
         Ok(stored)
     }
 
-    /// The bytes the container stores for `data` of `kind`: the inverse of
+    /// The bytes the container stores for `data` as `entity`: the inverse of
     /// [`decode_entity`](Self::decode_entity), without any framing (that is
     /// [`compose`](Self::compose)). The default returns `data` as it is.
     ///
     /// [`Structure::patch_exact`](crate::Structure::patch_exact) uses it to size and
     /// write a replacement.
-    fn encode_entity<'a>(&self, _kind: SegmentKind, data: &'a [u8]) -> Result<Cow<'a, [u8]>> {
+    fn encode_entity<'a>(
+        &self,
+        _structure: &Structure,
+        _entity: &Entity,
+        data: &'a [u8],
+    ) -> Result<Cow<'a, [u8]>> {
         Ok(Cow::Borrowed(data))
     }
 

@@ -17,9 +17,10 @@ use crate::error::{Error, Result};
 use crate::plan::{Relocate, Step, WritePlan};
 use crate::range::ByteRange;
 use crate::segment::{Name, Role, SegmentKind};
-use crate::structure::{SegmentId, Structure, StructureBuilder, MAX_SEGMENTS};
+use crate::structure::{Attached, SegmentId, Structure, StructureBuilder, MAX_SEGMENTS};
 use std::borrow::Cow;
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 /// A segment of the output: its shape, and the source segment it is made from.
 struct Shape {
@@ -101,6 +102,7 @@ pub struct PlanBuilder<'s, 'a> {
     /// For each source segment, the output segment it became.
     dest_of: Vec<Option<SegmentId>>,
     len: u64,
+    attachment: Option<Arc<dyn Attached>>,
 }
 
 impl<'s, 'a> PlanBuilder<'s, 'a> {
@@ -113,7 +115,19 @@ impl<'s, 'a> PlanBuilder<'s, 'a> {
             entities: Vec::new(),
             dest_of: vec![None; src.segments().len()],
             len: 0,
+            attachment: None,
         }
+    }
+
+    /// Attach `value` to the output structure, as
+    /// [`StructureBuilder::attach`](crate::StructureBuilder::attach) does to a parsed one,
+    /// so a write's result can be read and written again without parsing it.
+    pub fn attach<T: std::any::Any + std::fmt::Debug + Send + Sync>(
+        &mut self,
+        value: T,
+    ) -> &mut Self {
+        self.attachment = Some(Arc::new(value));
+        self
     }
 
     /// The source structure.
@@ -413,6 +427,7 @@ impl<'s, 'a> PlanBuilder<'s, 'a> {
 
         let mut b =
             StructureBuilder::new(src.handler().clone(), src.media_type().to_owned(), self.len);
+        b.attach_shared(self.attachment.clone());
         for (i, s) in self.shapes.iter().enumerate() {
             if trailing == Some(i) {
                 b.end_boxes()?;
