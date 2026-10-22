@@ -220,12 +220,12 @@ pub trait ContainerHandler: std::fmt::Debug + Send + Sync {
     /// The asset's XMP packet, or `None` if it has none. Called through
     /// [`Structure::xmp`](crate::Structure::xmp).
     ///
-    /// The default reads the single XMP entity. Containers that split XMP over
+    /// The default reads the single XMP entity, decoded. Containers that split XMP over
     /// several elements and must reassemble it (JPEG extended XMP) override this.
     fn read_xmp(&self, structure: &Structure, src: &mut dyn ReadSeek) -> Result<Option<Vec<u8>>> {
         let mut src = src;
         match structure.entity(SegmentKind::Xmp)? {
-            Some(e) => structure.read_entity(&mut src, e).map(Some),
+            Some(e) => structure.read_decoded(&mut src, e).map(Some),
             None => Ok(None),
         }
     }
@@ -241,6 +241,29 @@ pub trait ContainerHandler: std::fmt::Debug + Send + Sync {
     /// which the item is stored as it is returns `data` unchanged.
     fn compose(&self, _kind: SegmentKind, _data: &[u8]) -> Result<Vec<u8>> {
         Err(Error::UnsupportedFormat)
+    }
+
+    /// The item an entity of `kind` holds, from the bytes the container stores for
+    /// it. The default returns them as they are; a container that stores an item
+    /// in another form overrides this and [`encode_entity`](Self::encode_entity):
+    /// SVG holds JUMBF as base64 text.
+    ///
+    /// [`Structure::store`](crate::Structure::store) and
+    /// [`Structure::xmp`](crate::Structure::xmp) decode, so callers get the item
+    /// whatever the container. [`Structure::read_entity`](crate::Structure::read_entity)
+    /// does not: it reads what is in the file, which is what a hash covers.
+    fn decode_entity(&self, _kind: SegmentKind, stored: Vec<u8>) -> Result<Vec<u8>> {
+        Ok(stored)
+    }
+
+    /// The bytes the container stores for `data` of `kind`: the inverse of
+    /// [`decode_entity`](Self::decode_entity), without any framing (that is
+    /// [`compose`](Self::compose)). The default returns `data` as it is.
+    ///
+    /// [`Structure::patch_exact`](crate::Structure::patch_exact) uses it to size and
+    /// write a replacement.
+    fn encode_entity<'a>(&self, _kind: SegmentKind, data: &'a [u8]) -> Result<Cow<'a, [u8]>> {
+        Ok(Cow::Borrowed(data))
     }
 
     /// Split a segment flagged [`Segment::subdivides`] into its finer elements, in

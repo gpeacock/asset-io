@@ -491,12 +491,12 @@ impl Structure {
         let original = self.entities_labelled(SegmentKind::Jumbf, ORIGINAL).next();
         let update = self.entities_labelled(SegmentKind::Jumbf, UPDATE).next();
         if let (Some(o), Some(u)) = (original, update) {
-            let o = self.read_entity(src, o)?;
-            let u = self.read_entity(src, u)?;
+            let o = self.read_decoded(src, o)?;
+            let u = self.read_decoded(src, u)?;
             return crate::containers::jumbf::extend(&o, &u).map(Some);
         }
         match self.entity(SegmentKind::Jumbf)? {
-            Some(e) => self.read_entity(src, e).map(Some),
+            Some(e) => self.read_decoded(src, e).map(Some),
             None => Ok(None),
         }
     }
@@ -518,6 +518,18 @@ impl Structure {
             self.read_into(src, part.range, &mut out)?;
         }
         Ok(out)
+    }
+
+    /// Read an entity's item: [`read_entity`](Self::read_entity), then the
+    /// container's [decoding](ContainerHandler::decode_entity) of what is stored.
+    /// For most containers the two are the same.
+    pub fn read_decoded<R: Read + Seek + ?Sized>(
+        &self,
+        src: &mut R,
+        entity: &Entity,
+    ) -> Result<Vec<u8>> {
+        let stored = self.read_entity(src, entity)?;
+        self.handler.decode_entity(entity.kind(), stored)
     }
 
     /// Stream a range through a caller-owned buffer; no allocation.
@@ -739,20 +751,25 @@ impl Structure {
     ///
     /// Writing the store again with `set_jumbf` is not a substitute: that is free
     /// to change the size.
+    ///
+    /// `data` is the item, not what is stored: a container that
+    /// [encodes](ContainerHandler::encode_entity) it (SVG, as base64) has `data`
+    /// encoded first, and it is the encoded length that must match.
     pub fn patch_exact<W: Read + Write + Seek>(
         &self,
         out: &mut W,
         entity: &Entity,
         data: &[u8],
     ) -> Result<()> {
-        if data.len() as u64 != entity.len() {
+        let stored = self.handler.encode_entity(entity.kind(), data)?;
+        if stored.len() as u64 != entity.len() {
             return Err(Error::InvalidFormat(format!(
                 "replacement is {} bytes, the placeholder is {}",
-                data.len(),
+                stored.len(),
                 entity.len()
             )));
         }
-        self.patch(out, entity, data)
+        self.patch(out, entity, &stored)
     }
 
     fn fix_trailer<W: Read + Write + Seek>(&self, out: &mut W, id: SegmentId) -> Result<()> {

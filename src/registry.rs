@@ -78,6 +78,8 @@ impl HandlerRegistry {
                 r.add_arc(crate::containers::bmff::handler());
                 #[cfg(feature = "riff")]
                 r.add_arc(crate::containers::riff::handler());
+                #[cfg(feature = "svg")]
+                r.add_arc(crate::containers::svg::handler());
                 Arc::new(r)
             })
             .clone()

@@ -30,10 +30,11 @@ jpeg = ["md5", "memchr"]
 png = []
 bmff = []
 riff = []
+svg = ["quick-xml"]
 exif = []
 xmp = ["quick-xml", "md5"]
 memory-mapped = ["memmap2"]
-all-formats = ["jpeg", "png", "bmff", "riff"]
+all-formats = ["jpeg", "png", "bmff", "riff", "svg"]
 
 [[example]]
 name = "inspect"

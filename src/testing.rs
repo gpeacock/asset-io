@@ -45,6 +45,12 @@ use std::io::Cursor;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::Arc;
 
+/// The XMP the checks write unless told otherwise: an xpacket, which every format
+/// that holds XMP accepts.
+const DEFAULT_XMP: &[u8] = b"<?xpacket begin=\"\" id=\"W5M0MpCehiHzreSzNTczkc9d\"?>\
+<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"><!-- conformance --></x:xmpmeta>\
+<?xpacket end=\"w\"?>";
+
 /// A set of checks for one handler. Build it with [`new`](Self::new), say what the
 /// format can hold, and run it on samples with [`check`](Self::check).
 #[derive(Clone)]
@@ -63,9 +69,7 @@ impl Conformance {
     pub fn new(handler: Arc<dyn ContainerHandler>) -> Self {
         Self {
             handler,
-            xmp: Some(
-                b"<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"><!-- conformance --></x:xmpmeta>".to_vec(),
-            ),
+            xmp: Some(DEFAULT_XMP.to_vec()),
             jumbf: None,
             extra: Vec::new(),
             mutations: true,
