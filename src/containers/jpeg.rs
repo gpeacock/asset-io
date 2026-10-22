@@ -51,16 +51,12 @@
 //!
 //! Not yet ported: EXIF thumbnail location.
 
-use crate::error::{Error, Result};
-use crate::handler::{ContainerHandler, FormatSpec, ReadSeek};
 use crate::plan::WritePlan;
-use crate::plan_builder::PlanBuilder;
-use crate::segment::SegmentKind;
-use crate::segment::{Name, Role, Segment};
-use crate::structure::{Part, SegmentId, Structure, StructureBuilder};
-use crate::task::{BoxFuture, Io};
-use crate::ByteRange;
-use crate::{Existing, MetadataSlot, Updates};
+use crate::{
+    BoxFuture, ByteRange, ContainerHandler, Error, Existing, FormatSpec, Io, MetadataSlot, Name,
+    Part, PlanBuilder, ReadSeek, Result, Role, Segment, SegmentId, SegmentKind, Structure,
+    StructureBuilder, Updates,
+};
 use std::borrow::Cow;
 use std::io::{Read, Seek, SeekFrom};
 use std::sync::Arc;
@@ -468,13 +464,13 @@ async fn scan_image(
                     // The type is in the first packet: after the 8 bytes of the XT
                     // header (CI, En, Z) come the superbox and its description box.
                     if first {
-                        jtype = crate::containers::jumbf::superbox_type(&peek[8..]);
+                        jtype = crate::jumbf::superbox_type(&peek[8..]);
                     }
                 }
             } else if n >= 8 && peek[4..8] == JUMB[..] {
                 kind = SegmentKind::Jumbf;
                 class = Class::JumbfRaw;
-                jtype = crate::containers::jumbf::superbox_type(peek);
+                jtype = crate::jumbf::superbox_type(peek);
             }
         }
 
@@ -673,7 +669,7 @@ fn find_mpf<R: Read + Seek>(
     rd: &mut R,
     primary_end: usize,
 ) -> Result<Option<SegmentId>> {
-    let found = crate::task::Task::new(src.total_size(), |mut io| async move {
+    let found = crate::Task::new(src.total_size(), |mut io| async move {
         find_all_mpf(src, &mut io, primary_end).await
     })
     .run(rd)?;
@@ -1048,7 +1044,7 @@ fn push_new_jumbf<'a>(ops: &mut Vec<Op<'a>>, groups: &mut Groups, jumbf: &'a [u8
             payload: chunk,
         });
     }
-    let ty = crate::containers::jumbf::superbox_type(jumbf);
+    let ty = crate::jumbf::superbox_type(jumbf);
     groups.push((SegmentKind::Jumbf, ty, (first..ops.len()).collect()));
     Ok(())
 }
@@ -1326,9 +1322,8 @@ pub fn read_xmp<R: Read + Seek>(s: &Structure, src: &mut R) -> Result<Option<Vec
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sink::Sink;
-    use crate::sink::{Chunk, NullSink};
     use crate::testing::{write, Conformance};
+    use crate::{Chunk, NullSink, Sink};
     use sha2::{Digest, Sha256};
     use std::io::Cursor;
 

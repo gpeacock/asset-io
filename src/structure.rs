@@ -201,8 +201,21 @@ pub struct Region {
 /// - no segment is empty and each fits `header + trailer <= extent`;
 /// - every entity part lies inside the segment it names.
 ///
-/// A `Structure` holds geometry only. It is `Send + Sync` and can be shared
-/// across threads for parallel reads.
+/// Something a container keeps with a structure for its own use; see
+/// [`StructureBuilder::attach`].
+pub(crate) trait Attached: std::any::Any + std::fmt::Debug + Send + Sync {
+    fn as_any(&self) -> &dyn std::any::Any;
+}
+
+impl<T: std::any::Any + std::fmt::Debug + Send + Sync> Attached for T {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+/// A `Structure` holds geometry, and whatever opaque state its container attached
+/// to it (see [`attachment`](Structure::attachment)). It is `Send + Sync` and can be
+/// shared across threads for parallel reads.
 #[derive(Debug)]
 pub struct Structure {
     handler: Arc<dyn ContainerHandler>,
@@ -214,9 +227,17 @@ pub struct Structure {
     /// How many leading segments are the container's own structure. Segments from
     /// here on are data beyond the end of it.
     boxes: usize,
+    attachment: Option<Arc<dyn Attached>>,
 }
 
 impl Structure {
+    /// What the container [attached](StructureBuilder::attach) to this structure, if
+    /// it is a `T`. Handlers use it for state that is not geometry: how a payload is
+    /// encoded, or what a later write needs to know.
+    pub fn attachment<T: std::any::Any>(&self) -> Option<&T> {
+        self.attachment.as_deref()?.as_any().downcast_ref()
+    }
+
     /// The bytes beyond the end of the container's own structure, up to the end of
     /// the file: data after the last chunk or box, and, in a multi-image file,
     /// everything after the primary image. `None` when there are none, and for
@@ -365,7 +386,7 @@ impl Structure {
     }
 
     /// Every entity with its kind, in declaration order.
-    pub(crate) fn entity_list(&self) -> impl Iterator<Item = (SegmentKind, &Entity)> + '_ {
+    pub fn entity_list(&self) -> impl Iterator<Item = (SegmentKind, &Entity)> + '_ {
         self.entities.iter().map(|e| (e.kind, e))
     }
 
@@ -493,7 +514,7 @@ impl Structure {
         if let (Some(o), Some(u)) = (original, update) {
             let o = self.read_decoded(src, o)?;
             let u = self.read_decoded(src, u)?;
-            return crate::containers::jumbf::extend(&o, &u).map(Some);
+            return crate::jumbf::extend(&o, &u).map(Some);
         }
         match self.entity(SegmentKind::Jumbf)? {
             Some(e) => self.read_decoded(src, e).map(Some),
@@ -529,7 +550,7 @@ impl Structure {
         entity: &Entity,
     ) -> Result<Vec<u8>> {
         let stored = self.read_entity(src, entity)?;
-        self.handler.decode_entity(entity.kind(), stored)
+        self.handler.decode_entity(self, entity, stored)
     }
 
     /// Stream a range through a caller-owned buffer; no allocation.
@@ -687,6 +708,7 @@ impl Structure {
         entity: &Entity,
         data: &[u8],
     ) -> Result<()> {
+        self.handler.check_patch(self, entity, data.len())?;
         let capacity = entity.len();
         if data.len() as u64 > capacity {
             return Err(Error::LimitExceeded {
@@ -761,7 +783,9 @@ impl Structure {
         entity: &Entity,
         data: &[u8],
     ) -> Result<()> {
-        let stored = self.handler.encode_entity(entity.kind(), data)?;
+        let stored = self.handler.encode_entity(self, entity, data)?;
+        // The container's refusal comes before a complaint about the length.
+        self.handler.check_patch(self, entity, stored.len())?;
         if stored.len() as u64 != entity.len() {
             return Err(Error::InvalidFormat(format!(
                 "replacement is {} bytes, the placeholder is {}",
@@ -801,6 +825,7 @@ pub struct StructureBuilder {
     sub_starts: Vec<(usize, Option<Cow<'static, str>>)>,
     /// Segment index where data beyond the container's structure starts, if declared.
     boxes: Option<usize>,
+    attachment: Option<Arc<dyn Attached>>,
 }
 
 impl StructureBuilder {
@@ -819,7 +844,23 @@ impl StructureBuilder {
             entities: Vec::new(),
             sub_starts: Vec::new(),
             boxes: None,
+            attachment: None,
         }
+    }
+
+    /// Keep `value` with the structure, for the container's own use later (read it
+    /// back with [`Structure::attachment`]). It is opaque to everything else. One
+    /// value is kept; a second replaces the first.
+    pub fn attach<T: std::any::Any + std::fmt::Debug + Send + Sync>(
+        &mut self,
+        value: T,
+    ) -> &mut Self {
+        self.attachment = Some(Arc::new(value));
+        self
+    }
+
+    pub(crate) fn attach_shared(&mut self, value: Option<Arc<dyn Attached>>) {
+        self.attachment = value;
     }
 
     /// Declare that the container's own structure ends here: segments pushed from
@@ -1135,6 +1176,7 @@ impl StructureBuilder {
             entities: self.entities,
             subassets,
             boxes,
+            attachment: self.attachment,
         })
     }
 }
@@ -1207,6 +1249,24 @@ mod tests {
             .unwrap();
         b.begin_subasset(None).unwrap();
         assert!(b.finish().is_err(), "trailing empty sub-asset");
+    }
+
+    #[test]
+    fn an_attachment_is_kept_by_type_and_replaced_by_another() {
+        #[derive(Debug, PartialEq)]
+        struct State(u32);
+        let mut b = builder(4);
+        b.push_span(SegmentKind::Header, Name::None, 4, 0, 0)
+            .unwrap();
+        b.attach(State(1)).attach(State(2));
+        let s = b.finish().unwrap();
+        assert_eq!(s.attachment::<State>(), Some(&State(2)));
+        assert!(s.attachment::<String>().is_none());
+
+        let mut b = builder(4);
+        b.push_span(SegmentKind::Header, Name::None, 4, 0, 0)
+            .unwrap();
+        assert!(b.finish().unwrap().attachment::<State>().is_none());
     }
 
     #[test]

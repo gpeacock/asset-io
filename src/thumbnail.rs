@@ -18,7 +18,7 @@
 //!
 //! 1. A [`SegmentKind::Thumbnail`] entity: a pre-rendered preview the container
 //!    stores as its own element. Today that is a HEIF `thmb` item, which the BMFF
-//!    handler finds (see `containers::heif_items`).
+//!    handler finds (see `containers::bmff`).
 //! 2. Otherwise, with the `exif` feature, the JPEG thumbnail in the EXIF data
 //!    (IFD1) of the first [`SegmentKind::Exif`] entity. JPEG, PNG, WebP and
 //!    HEIF/AVIF all report EXIF, and the TIFF parsing lives in the `tiff` module.

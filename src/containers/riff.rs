@@ -40,15 +40,12 @@
 //! `VP8X` chunk: it is set (or cleared when the XMP is removed), and a `VP8X` chunk
 //! is created from the `VP8` or `VP8L` image size if the file has none.
 
-use crate::error::{Error, Result};
-use crate::handler::{ContainerHandler, FormatSpec};
 use crate::plan::WritePlan;
-use crate::plan_builder::PlanBuilder;
-use crate::segment::SegmentKind;
-use crate::segment::{Name, Role, Segment};
-use crate::structure::{SegmentId, Structure, StructureBuilder};
-use crate::task::{BoxFuture, Io};
-use crate::{Existing, MetadataSlot, MetadataUpdate, Updates};
+use crate::{
+    BoxFuture, ContainerHandler, Error, Existing, FormatSpec, Io, MetadataSlot, MetadataUpdate,
+    Name, PlanBuilder, Result, Role, Segment, SegmentId, SegmentKind, Structure, StructureBuilder,
+    Updates,
+};
 use std::borrow::Cow;
 use std::io::{Read, Seek};
 use std::sync::Arc;
@@ -396,7 +393,7 @@ async fn plan<'a>(src: &Structure, io: &mut Io, updates: &'a Updates) -> Result<
             },
             _ if webp && seg.name() == Name::FourCC(VP8X) => {
                 saw_vp8x = true;
-                let want = match &updates.xmp {
+                let want = match updates.xmp() {
                     MetadataUpdate::Keep => None,
                     MetadataUpdate::Set(_) => Some(true),
                     MetadataUpdate::Remove => Some(false),
@@ -438,7 +435,7 @@ async fn plan<'a>(src: &Structure, io: &mut Io, updates: &'a Updates) -> Result<
     }
 
     // WebP needs VP8X to say the file has XMP.
-    if webp && matches!(updates.xmp, MetadataUpdate::Set(_)) && !saw_vp8x {
+    if webp && matches!(updates.xmp(), MetadataUpdate::Set(_)) && !saw_vp8x {
         let (w, h) = webp_size(io, &segs[1..kids_end]).await?;
         ops.insert(0, new_vp8x(w, h, VP8X_XMP_FLAG)?);
     }

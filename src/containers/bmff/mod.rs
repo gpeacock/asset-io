@@ -67,18 +67,14 @@
 //! size, nothing is rewritten and `moov` is copied verbatim. `mfro` and `sidx`
 //! hold sizes and relative offsets, which these edits do not change.
 
-use super::heif_items;
-use crate::error::{Error, Result};
-use crate::handler::{ContainerHandler, FormatSpec, ReadSeek};
+mod heif_items;
+
 use crate::plan::{OffsetMap, Relocate, WritePlan};
-use crate::plan_builder::PlanBuilder;
-use crate::range::ByteRange;
-use crate::segment::SegmentKind;
-use crate::segment::{Name, Role, Segment, MAX_SEGMENT_SIZE};
-use crate::structure::{Entity, SegmentId, Structure, StructureBuilder};
-use crate::task::{block_on, BoxFuture, Io, Task};
-use crate::walk::Node;
-use crate::{Existing, MetadataSlot, MetadataUpdate, Updates};
+use crate::{
+    block_on, BoxFuture, ByteRange, ContainerHandler, Entity, Error, Existing, FormatSpec, Io,
+    MetadataSlot, MetadataUpdate, Name, Node, PlanBuilder, ReadSeek, Result, Role, Segment,
+    SegmentId, SegmentKind, Structure, StructureBuilder, Task, Updates, MAX_SEGMENT_SIZE,
+};
 use std::borrow::Cow;
 use std::io::{Read, Seek, SeekFrom};
 use std::sync::Arc;
@@ -96,7 +92,7 @@ pub const XMP_UUID: [u8; 16] = [
 pub const MAX_BOX_DEPTH: u32 = 32;
 
 /// Purpose labels of C2PA boxes (see [`labels`](crate::labels)).
-pub use crate::segment::labels::{MANIFEST, MERKLE, ORIGINAL, UPDATE};
+pub use crate::labels::{MANIFEST, MERKLE, ORIGINAL, UPDATE};
 
 /// What to do with the `merkle` boxes of a file; see [`BmffUpdates`].
 #[derive(Debug, Clone, Default)]
@@ -1235,10 +1231,10 @@ async fn plan<'a>(
         .entities_labelled(SegmentKind::Jumbf, MANIFEST)
         .next()
         .or_else(|| src.entities_labelled(SegmentKind::Jumbf, ORIGINAL).next());
-    let mut addition: Option<Vec<u8>> = match (&updates.jumbf, updates.jumbf_is_update, frozen) {
+    let mut addition: Option<Vec<u8>> = match (updates.jumbf(), updates.is_jumbf_update(), frozen) {
         (MetadataUpdate::Set(full), true, Some(e)) => {
             let existing = read_entity(src, io, e).await?;
-            super::jumbf::addition_to(&existing, full)?
+            crate::jumbf::addition_to(&existing, full)?
         }
         _ => None,
     };
@@ -1250,7 +1246,7 @@ async fn plan<'a>(
             "an update manifest cannot change merkle boxes".into(),
         ));
     }
-    if matches!(updates.jumbf, MetadataUpdate::Set(_))
+    if matches!(updates.jumbf(), MetadataUpdate::Set(_))
         && !update_mode
         && merkle_kept
         && labels.contains(&Some(MERKLE))
@@ -1309,7 +1305,7 @@ async fn plan<'a>(
                 _ => note(&mut map, total, end, 0, old_len)?,
             },
             // An update box does not survive a new manifest.
-            Some(UPDATE) => match &updates.jumbf {
+            Some(UPDATE) => match updates.jumbf() {
                 MetadataUpdate::Keep => ops.push(Op::Copy(id)),
                 _ => note(&mut map, total, end, 0, old_len)?,
             },

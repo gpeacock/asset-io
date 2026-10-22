@@ -39,6 +39,10 @@ pub enum Error {
     #[error("Unsupported format")]
     UnsupportedFormat,
 
+    /// A recognized format uses a feature or operation this reader cannot support.
+    #[error("Unsupported feature: {0}")]
+    UnsupportedFeature(&'static str),
+
     /// Invalid segment
     #[error("Invalid segment at offset {offset}: {reason}")]
     InvalidSegment { offset: u64, reason: String },

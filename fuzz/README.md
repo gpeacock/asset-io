@@ -18,7 +18,7 @@ This directory contains fuzzing infrastructure for `asset-io` using `cargo-fuzz`
 ## Fuzz Targets
 
 ### `fuzz_parse` - General File Parsing
-Tests the core parsing logic across all supported formats (JPEG, PNG, BMFF containers).
+Tests the core parsing logic across all supported formats (JPEG, PNG, BMFF, RIFF, SVG, PDF).
 This is the most important target as it exercises the attack surface of untrusted file input.
 
 **What it tests:**
@@ -84,6 +84,10 @@ cp my_test.jpg fuzz/corpus/fuzz_parse/
 
 # Add HEIC files
 cp my_photo.heic fuzz/corpus/fuzz_parse/
+
+# Add PDFs (the tracked seeds in fuzz/seeds/ include editable, xref-stream,
+# compressed-metadata and signed-form documents)
+cp my_doc.pdf fuzz/corpus/fuzz_parse/
 
 # Add XMP samples
 cp my_xmp.xml fuzz/corpus/fuzz_xmp/

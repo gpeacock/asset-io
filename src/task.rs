@@ -134,6 +134,9 @@ impl Io {
     /// `len` bytes at `offset` in a new `Vec`. The bytes are read straight into it,
     /// so a large read is not copied. The caller bounds `len`.
     pub async fn read_vec(&mut self, offset: u64, len: usize) -> Result<Vec<u8>> {
+        if len == 0 {
+            return Ok(Vec::new());
+        }
         // A window of exactly the length wanted, taken whole.
         self.fetch_with(offset, len, len).await?;
         let from = (offset - self.start) as usize;
@@ -748,6 +751,20 @@ mod tests {
         assert_eq!(head, [10, 11]);
         assert_eq!(big, data[1_000..31_000]);
         assert_eq!(again, [(1_000 % 256) as u8, (1_001 % 256) as u8]);
+    }
+
+    #[test]
+    fn read_vec_of_nothing_is_empty_wherever_it_is() {
+        let data = vec![1u8; 100];
+        let t = Task::new(100, |mut io| async move {
+            let first = io.read_vec(10, 50).await?; // takes the window
+            let nothing = io.read_vec(100, 0).await?;
+            let also = io.read_vec(40, 0).await?;
+            Ok((first.len(), nothing, also))
+        });
+        let (n, nothing, also) = t.run(&mut Cursor::new(&data)).unwrap();
+        assert_eq!(n, 50);
+        assert!(nothing.is_empty() && also.is_empty());
     }
 
     #[test]
