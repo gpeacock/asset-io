@@ -41,13 +41,13 @@
 //! is created from the `VP8` or `VP8L` image size if the file has none.
 
 use crate::error::{Error, Result};
-use crate::handler::{ContainerHandler, FormatSpec, ReadSeek};
+use crate::handler::{ContainerHandler, FormatSpec};
 use crate::plan::WritePlan;
-use crate::readahead::{ReadAhead, PARSE_WINDOW};
 use crate::segment::SegmentKind;
 use crate::segment::{Name, Role, Segment};
 use crate::sink::Sink;
 use crate::structure::{SegmentId, Structure, StructureBuilder};
+use crate::task::{BoxFuture, Io, Task};
 use crate::{MetadataUpdate, Updates};
 use std::borrow::Cow;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -125,23 +125,25 @@ impl ContainerHandler for RiffHandler {
         header.len() >= 12 && header.starts_with(&RIFF) && media_type_of(&header[8..12]).is_some()
     }
 
-    fn parse(self: Arc<Self>, mut src: &mut dyn ReadSeek) -> Result<Structure> {
-        parse_with(self, &mut src)
+    fn parse_async(self: Arc<Self>, io: Io) -> BoxFuture<'static, Result<Structure>> {
+        Box::pin(parse_with(self, io))
     }
 
-    fn write_plan<'a>(
-        &self,
-        src_structure: &Structure,
-        src: &mut dyn ReadSeek,
+    fn write_plan_async<'f, 'a: 'f>(
+        &'f self,
+        src_structure: &'f Structure,
+        mut io: Io,
         updates: &'a Updates,
-    ) -> Result<WritePlan<'a>> {
-        plan(src_structure, src, updates)
+    ) -> BoxFuture<'f, Result<WritePlan<'a>>> {
+        Box::pin(async move { plan(src_structure, &mut io, updates).await })
     }
 }
 
 /// Parse a RIFF file into a validated structure.
 pub fn parse<R: Read + Seek>(src: &mut R) -> Result<Structure> {
-    parse_with(handler(), src)
+    let total = src.seek(SeekFrom::End(0))?;
+    src.seek(SeekFrom::Start(0))?;
+    Task::new(total, |io| parse_with(handler(), io)).run(src)
 }
 
 fn bad(offset: u64, reason: &str) -> Error {
@@ -151,28 +153,17 @@ fn bad(offset: u64, reason: &str) -> Error {
     }
 }
 
-fn read_at<R: Read + Seek + ?Sized>(src: &mut R, at: u64, buf: &mut [u8]) -> Result<()> {
-    src.seek(SeekFrom::Start(at))?;
-    src.read_exact(buf)?;
-    Ok(())
-}
-
 fn le32(b: &[u8]) -> u32 {
     u32::from_le_bytes([b[0], b[1], b[2], b[3]])
 }
 
-fn parse_with<R: Read + Seek>(
-    handler: Arc<dyn ContainerHandler>,
-    src: &mut R,
-) -> Result<Structure> {
-    let mut ahead = ReadAhead::new(src, PARSE_WINDOW);
-    let src = &mut ahead;
-    let total = src.seek(SeekFrom::End(0))?;
+async fn parse_with(handler: Arc<dyn ContainerHandler>, mut io: Io) -> Result<Structure> {
+    let total = io.len();
     if total < 12 {
         return Err(Error::InvalidFormat("RIFF too small".into()));
     }
     let mut head = [0u8; 12];
-    read_at(src, 0, &mut head)?;
+    io.read_at(0, &mut head).await?;
     if head[..4] != RIFF {
         return Err(Error::InvalidFormat("Not a RIFF file".into()));
     }
@@ -190,7 +181,7 @@ fn parse_with<R: Read + Seek>(
             break;
         }
         let mut h = [0u8; 8];
-        read_at(src, at, &mut h)?;
+        io.read_at(at, &mut h).await?;
         let id = [h[0], h[1], h[2], h[3]];
         let size = le32(&h[4..8]) as u64;
 
@@ -206,21 +197,21 @@ fn parse_with<R: Read + Seek>(
                 return Err(bad(at, "RIFF chunk declared size exceeds file size"));
             }
             b.push_span(SegmentKind::Header, Name::FourCC(RIFF), 12, 0, 0)?;
-            parse_children(&mut b, src, at + 12, end, first, webp)?;
+            parse_children(&mut b, &mut io, at + 12, end, first, webp).await?;
             at = end;
             first = false;
         } else {
             // Something other than a RIFF chunk at top level: one opaque chunk.
-            let next = parse_chunk(&mut b, src, at, total, false, false)?;
+            let next = parse_chunk(&mut b, &mut io, at, total, false, false).await?;
             at = next;
         }
     }
     b.finish()
 }
 
-fn parse_children<R: Read + Seek>(
+async fn parse_children(
     b: &mut StructureBuilder,
-    src: &mut R,
+    io: &mut Io,
     start: u64,
     end: u64,
     first: bool,
@@ -228,16 +219,16 @@ fn parse_children<R: Read + Seek>(
 ) -> Result<()> {
     let mut at = start;
     while at < end {
-        at = parse_chunk(b, src, at, end, first, webp)?;
+        at = parse_chunk(b, io, at, end, first, webp).await?;
     }
     Ok(())
 }
 
 /// One chunk starting at `at` inside a region ending at `end`. Returns the offset
 /// after it (and its pad byte, when present).
-fn parse_chunk<R: Read + Seek>(
+async fn parse_chunk(
     b: &mut StructureBuilder,
-    src: &mut R,
+    io: &mut Io,
     at: u64,
     end: u64,
     classify: bool,
@@ -247,7 +238,7 @@ fn parse_chunk<R: Read + Seek>(
         return Err(bad(at, "truncated chunk header"));
     }
     let mut h = [0u8; 8];
-    read_at(src, at, &mut h)?;
+    io.read_at(at, &mut h).await?;
     let id = [h[0], h[1], h[2], h[3]];
     let size = le32(&h[4..8]) as u64;
     let data_end = at + 8 + size;
@@ -267,7 +258,7 @@ fn parse_chunk<R: Read + Seek>(
             DATA | VP8 | VP8L | ALPH | ANMF => SegmentKind::ImageData,
             LIST if size >= 4 => {
                 let mut t = [0u8; 4];
-                read_at(src, at + 8, &mut t)?;
+                io.read_at(at + 8, &mut t).await?;
                 if t == MOVI {
                     SegmentKind::ImageData
                 } else {
@@ -367,14 +358,14 @@ fn new_chunk(kind: SegmentKind, id: [u8; 4], payload: Cow<'_, [u8]>) -> Result<O
 }
 
 /// Canvas size of a WebP from its `VP8L` or `VP8 ` chunk.
-fn webp_size<R: Read + Seek + ?Sized>(src: &mut R, segs: &[Segment]) -> Result<(u32, u32)> {
+async fn webp_size(io: &mut Io, segs: &[Segment]) -> Result<(u32, u32)> {
     let find = |id: [u8; 4]| segs.iter().find(|s| s.name() == Name::FourCC(id));
     if let Some(s) = find(VP8L) {
         let mut d = [0u8; 5];
         if s.payload().len() < d.len() as u64 {
             return Err(bad(s.extent().offset(), "VP8L chunk too small"));
         }
-        read_at(src, s.payload().offset(), &mut d)?;
+        io.read_at(s.payload().offset(), &mut d).await?;
         let first = u16::from_le_bytes([d[1], d[2]]) as u32;
         let second = u16::from_le_bytes([d[3], d[4]]) as u32;
         let width = 1 + (first & 0x3fff);
@@ -386,7 +377,7 @@ fn webp_size<R: Read + Seek + ?Sized>(src: &mut R, segs: &[Segment]) -> Result<(
         if s.payload().len() < d.len() as u64 {
             return Err(bad(s.extent().offset(), "VP8 chunk too small"));
         }
-        read_at(src, s.payload().offset(), &mut d)?;
+        io.read_at(s.payload().offset(), &mut d).await?;
         let width = (u16::from_le_bytes([d[6], d[7]]) & 0x3fff) as u32;
         let height = (u16::from_le_bytes([d[8], d[9]]) & 0x3fff) as u32;
         return Ok((width, height));
@@ -421,14 +412,10 @@ fn lacks_pad(op: &Op<'_>, src: &Structure) -> Result<bool> {
 
 /// Decide what the output contains: the single source of truth for both the
 /// destination structure and the bytes written.
-fn plan<'a, R: Read + Seek + ?Sized>(
-    src: &Structure,
-    stream: &mut R,
-    updates: &'a Updates,
-) -> Result<WritePlan<'a>> {
+async fn plan<'a>(src: &Structure, io: &mut Io, updates: &'a Updates) -> Result<WritePlan<'a>> {
     let segs = src.segments();
     let mut head = [0u8; 12];
-    read_at(stream, 0, &mut head)?;
+    io.read_at(0, &mut head).await?;
     let riff_end = 8 + le32(&head[4..8]) as u64;
     let form = [head[8], head[9], head[10], head[11]];
     // Children of the first RIFF chunk are segments 1.. up to where it ends.
@@ -480,7 +467,7 @@ fn plan<'a, R: Read + Seek + ?Sized>(
                         return Err(bad(seg.extent().offset(), "VP8X chunk too small"));
                     }
                     let mut f = [0u8; 4];
-                    read_at(stream, seg.payload().offset(), &mut f)?;
+                    io.read_at(seg.payload().offset(), &mut f).await?;
                     let flags = u32::from_le_bytes(f);
                     let new = if want {
                         flags | VP8X_XMP_FLAG
@@ -523,7 +510,7 @@ fn plan<'a, R: Read + Seek + ?Sized>(
 
     // WebP needs VP8X to say the file has XMP.
     if webp && matches!(updates.xmp, MetadataUpdate::Set(_)) && !saw_vp8x {
-        let (w, h) = webp_size(stream, &segs[1..kids_end])?;
+        let (w, h) = webp_size(io, &segs[1..kids_end]).await?;
         ops.insert(1, new_vp8x(w, h, VP8X_XMP_FLAG)?);
     }
 
@@ -639,7 +626,10 @@ where
     W: Write + ?Sized,
     S: Sink + ?Sized,
 {
-    let plan = plan(src_structure, src, updates)?;
+    let plan = Task::new(src_structure.total_size(), |mut io| async move {
+        plan(src_structure, &mut io, updates).await
+    })
+    .run(&mut *src)?;
     plan.execute(src, out, sink)?;
     Ok(plan.into_structure())
 }

@@ -146,20 +146,37 @@ pub trait ContainerHandler: std::fmt::Debug + Send + Sync {
     }
 
     /// Describe the write of the asset with `updates` applied: the structure of the
-    /// output and the steps that produce it. Nothing is written.
+    /// output and the steps that produce it. Nothing is written. The source is
+    /// read through `io`, which holds the stream `src_structure` was parsed from.
     ///
-    /// This is the method most handlers implement for writing. The default
+    /// This is the method to implement for writing; it is `async` for the same
+    /// reason as [`parse_async`](Self::parse_async). The default
     /// [`write`](Self::write) executes the plan, and the default
-    /// [`plan`](Self::plan) returns its structure. `src` must be the stream
-    /// `src_structure` was parsed from; a handler that needs nothing from it ignores
-    /// it. The default reports [`Error::UnsupportedFormat`].
+    /// [`plan`](Self::plan) returns its structure. A handler that needs nothing
+    /// from the source ignores `io`. The default reports
+    /// [`Error::UnsupportedFormat`].
+    fn write_plan_async<'f, 'a: 'f>(
+        &'f self,
+        _src_structure: &'f Structure,
+        _io: Io,
+        _updates: &'a Updates,
+    ) -> BoxFuture<'f, Result<WritePlan<'a>>> {
+        Box::pin(async { Err(Error::UnsupportedFormat) })
+    }
+
+    /// Like [`write_plan_async`](Self::write_plan_async), reading the source from
+    /// `src`. The default runs that method with blocking reads; a handler written
+    /// before it existed can implement this instead.
     fn write_plan<'a>(
         &self,
-        _src_structure: &Structure,
-        _src: &mut dyn ReadSeek,
-        _updates: &'a Updates,
+        src_structure: &Structure,
+        src: &mut dyn ReadSeek,
+        updates: &'a Updates,
     ) -> Result<WritePlan<'a>> {
-        Err(Error::UnsupportedFormat)
+        Task::new(src_structure.total_size(), |io| {
+            self.write_plan_async(src_structure, io, updates)
+        })
+        .run(src)
     }
 
     /// Write the asset with `updates` applied, delivering every output byte to

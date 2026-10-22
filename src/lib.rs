@@ -70,7 +70,7 @@ mod mapped;
 pub mod plan;
 mod range;
 // Used by the handlers not yet parsing through `Io`.
-#[cfg(any(feature = "jpeg", feature = "bmff", feature = "riff"))]
+#[cfg(any(feature = "jpeg", feature = "bmff"))]
 mod readahead;
 mod registry;
 mod segment;

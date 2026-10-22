@@ -27,6 +27,7 @@ use crate::range::ByteRange;
 use crate::segment::{Role, Segment};
 use crate::sink::Sink;
 use crate::structure::{SegmentId, Structure};
+use crate::task::Task;
 use std::borrow::Cow;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::sync::Arc;
@@ -335,6 +336,21 @@ impl Structure {
         updates: &'a crate::Updates,
     ) -> Result<WritePlan<'a>> {
         self.handler().write_plan(self, src, updates)
+    }
+}
+
+impl Structure {
+    /// A task that builds the plan for writing this asset with `updates`, for a
+    /// caller that does its own I/O; see [`Task`]. The task reads the source (a
+    /// stream of [`total_size`](Self::total_size) bytes), which it asks for as it
+    /// needs it. The result is the plan [`write_plan`](Self::write_plan) returns.
+    pub fn write_plan_task<'f, 'a: 'f>(
+        &'f self,
+        updates: &'a crate::Updates,
+    ) -> Task<'f, WritePlan<'a>> {
+        Task::new(self.total_size(), move |io| {
+            self.handler().write_plan_async(self, io, updates)
+        })
     }
 }
 
