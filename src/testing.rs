@@ -109,6 +109,14 @@ impl Conformance {
         }
     }
 
+    /// Like [`check`](Self::check), but a sample the handler cannot parse passes:
+    /// there is nothing to hold it to. For feeding arbitrary bytes, as a fuzzer does.
+    pub fn check_if_parses(&self, name: &str, sample: &[u8]) {
+        if self.handler.clone().parse(&mut Cursor::new(sample)).is_ok() {
+            self.check(name, sample);
+        }
+    }
+
     /// Run every check on `sample`; the error says which failed and why.
     pub fn try_check(&self, name: &str, sample: &[u8]) -> std::result::Result<(), String> {
         self.run(sample).map_err(|why| format!("{name}: {why}"))
@@ -415,36 +423,46 @@ impl Expect {
         src: &Structure,
         source: &[u8],
     ) -> std::result::Result<(), String> {
-        let read = |s: &Structure, b: &[u8]| -> std::result::Result<_, String> {
-            let xmp = s
-                .xmp(&mut Cursor::new(b))
-                .map_err(|e| format!("reading XMP: {e}"))?;
-            let jumbf = s
-                .store(&mut Cursor::new(b))
-                .map_err(|e| format!("reading JUMBF: {e}"))?;
-            Ok((xmp, jumbf))
+        type Item = std::result::Result<Option<Vec<u8>>, String>;
+        let read = |s: &Structure, b: &[u8]| -> (Item, Item) {
+            (
+                s.xmp(&mut Cursor::new(b))
+                    .map_err(|e| format!("reading XMP: {e}")),
+                s.store(&mut Cursor::new(b))
+                    .map_err(|e| format!("reading JUMBF: {e}")),
+            )
         };
-        let (xmp, jumbf) = read(out, bytes)?;
-        let (xmp0, jumbf0) = read(src, source)?;
+        let (xmp, jumbf) = read(out, bytes);
+        let (xmp0, jumbf0) = read(src, source);
         for (what, want, got, before) in [
             ("XMP", &self.xmp, xmp, xmp0),
             ("JUMBF", &self.jumbf, jumbf, jumbf0),
         ] {
             match want {
                 Want::Any => {}
-                Want::Same if got != before => {
-                    return Err(format!("{what} changed but was not asked to"))
+                // A source whose item cannot be read (a corrupt or ambiguous one) has
+                // nothing to compare with.
+                Want::Same => {
+                    if let Ok(before) = before {
+                        if got? != before {
+                            return Err(format!("{what} changed but was not asked to"));
+                        }
+                    }
                 }
-                Want::Is(v) if got.as_deref() != Some(v.as_slice()) => {
-                    return Err(format!(
-                        "{what} is not what was set: read back {:?}",
-                        got.map(|g| g.len())
-                    ))
+                Want::Is(v) => {
+                    let got = got?;
+                    if got.as_deref() != Some(v.as_slice()) {
+                        return Err(format!(
+                            "{what} is not what was set: read back {:?}",
+                            got.map(|g| g.len())
+                        ));
+                    }
                 }
-                Want::Absent if got.is_some() => {
-                    return Err(format!("{what} is still there after it was removed"))
+                Want::Absent => {
+                    if got?.is_some() {
+                        return Err(format!("{what} is still there after it was removed"));
+                    }
                 }
-                _ => {}
             }
         }
         Ok(())

@@ -188,8 +188,8 @@ struct Scan {
     /// Where the start tag of the first `<metadata>` of the root ends.
     metadata_end: Option<u64>,
     manifests: Vec<Element>,
-    /// The first xpacket, from its begin to the end of its end.
-    xmp: Option<(u64, u64)>,
+    /// The xpackets, each from its begin to the end of its end.
+    xmps: Vec<(u64, u64)>,
 }
 
 /// The namespace an element is in, as far as it matters.
@@ -237,10 +237,15 @@ fn scan(data: &[u8]) -> Result<Scan> {
     let mut path = [Kind::Other; 3];
     let mut root_end = None;
     let mut metadata_end = None;
-    let mut manifests = Vec::new();
+    let mut manifests: Vec<Element> = Vec::new();
     let mut open: Option<(u64, u64)> = None;
-    let mut begin: Option<u64> = None;
-    let mut xmp = None;
+    let mut xmps = Vec::new();
+    // Where an xpacket began and how deep, and how shallow the document has been
+    // since. Until it ends we do not know whether it is an item, so the first
+    // `<metadata>` inside it waits in `pending_metadata`.
+    let mut begin: Option<(u64, usize)> = None;
+    let mut low = usize::MAX;
+    let mut pending_metadata = None;
 
     loop {
         let before = reader.buffer_position();
@@ -263,8 +268,12 @@ fn scan(data: &[u8]) -> Result<Scan> {
                     }
                     root_end = Some(after);
                 }
-                if depth == 1 && kind == Kind::Metadata && metadata_end.is_none() {
-                    metadata_end = Some(after);
+                if depth == 1 && kind == Kind::Metadata {
+                    if begin.is_some() {
+                        pending_metadata.get_or_insert(after);
+                    } else if metadata_end.is_none() {
+                        metadata_end = Some(after);
+                    }
                 }
                 if kind == Kind::Manifest {
                     open = Some((before, after));
@@ -296,6 +305,7 @@ fn scan(data: &[u8]) -> Result<Scan> {
                 depth = depth
                     .checked_sub(1)
                     .ok_or_else(|| xml_error("an end tag with nothing open"))?;
+                low = low.min(depth);
                 if depth == 2 {
                     if let Some((start, header_end)) = open.take() {
                         manifests.push(Element {
@@ -311,11 +321,25 @@ fn scan(data: &[u8]) -> Result<Scan> {
                 let content: &[u8] = pi.as_ref();
                 if contains(content, XPACKET) {
                     if contains(content, XMP_ID) {
-                        if begin.is_none() && xmp.is_none() {
-                            begin = Some(before);
+                        // Not inside a manifest, which would be the outer item, and
+                        // not before the root element, which would hold the document.
+                        if begin.is_none() && open.is_none() && root_end.is_some() {
+                            begin = Some((before, depth));
+                            low = depth;
+                            pending_metadata = None;
                         }
-                    } else if let (Some(b), None) = (begin, xmp) {
-                        xmp = Some((b, after));
+                    } else if let Some((b, at)) = begin.take() {
+                        // Only a packet that opens and closes at one depth and never
+                        // closes anything outside itself can be replaced without
+                        // changing how the rest of the document nests.
+                        if depth == at && low >= at {
+                            xmps.push((b, after));
+                            // What is inside an item is part of it, not an item.
+                            manifests.retain(|m| m.start < b);
+                        } else if metadata_end.is_none() {
+                            metadata_end = pending_metadata;
+                        }
+                        pending_metadata = None;
                     }
                 }
             }
@@ -328,11 +352,15 @@ fn scan(data: &[u8]) -> Result<Scan> {
             "SVG: a c2pa:manifest element is not closed".into(),
         ));
     }
+    // An xpacket that never ended is not an item.
+    if metadata_end.is_none() {
+        metadata_end = pending_metadata;
+    }
     Ok(Scan {
         root_end: root_end.ok_or_else(|| Error::InvalidFormat("SVG: no root element".into()))?,
         metadata_end,
         manifests,
-        xmp,
+        xmps,
     })
 }
 
@@ -395,26 +423,21 @@ async fn parse_with(handler: Arc<dyn ContainerHandler>, mut io: Io) -> Result<St
     let data = io.read_vec(0, total as usize).await?;
     let sc = scan(&data)?;
 
+    // Items do not overlap: what is inside one is part of it.
     let mut spans: Vec<Span> = sc
         .manifests
         .iter()
         .map(|&el| Span { xmp: false, el })
         .collect();
-    // An xpacket that is not wholly in the body, or that holds a manifest, is not
-    // an item of its own.
-    if let Some((s, e)) = sc.xmp {
-        if s >= sc.root_end && !spans.iter().any(|m| s < m.el.end() && m.el.start < e) {
-            spans.push(Span {
-                xmp: true,
-                el: Element {
-                    start: s,
-                    header: 0,
-                    payload: e - s,
-                    trailer: 0,
-                },
-            });
-        }
-    }
+    spans.extend(sc.xmps.iter().map(|&(s, e)| Span {
+        xmp: true,
+        el: Element {
+            start: s,
+            header: 0,
+            payload: e - s,
+            trailer: 0,
+        },
+    }));
     spans.sort_by_key(|s| s.el.start);
     // The cut after `<metadata>` must not fall inside a span.
     let cut = sc
@@ -1053,6 +1076,67 @@ mod tests {
             s.xmp(&mut Cursor::new(out.as_bytes())).unwrap().unwrap(),
             PACKET.as_bytes()
         );
+    }
+
+    #[test]
+    fn an_xpacket_that_would_change_the_nesting_is_not_xmp() {
+        // Found by fuzzing. Replacing a packet with unclosed elements in it would
+        // change what the rest of the document is nested in, so it is left as text.
+        let svg = format!(
+            r#"<svg xmlns="{NS}" xmlns:c2pa="http://c2pa.org/manifest"><metadata><?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?><x:xmpmeta><?xpacket end="w"?><c2pa:manifest>QUJD</c2pa:manifest>"#
+        );
+        let s = parsed(&svg);
+        assert!(s.entities(SegmentKind::Xmp).next().is_none());
+        let c = Conformance::new(handler()).jumbf(Some(jumbf(64)));
+        c.check("unbalanced xpacket", svg.as_bytes());
+
+        // A packet that closes more than it opens is the same.
+        let svg = format!(
+            r#"<svg xmlns="{NS}"><g><metadata/><?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?></g><g><?xpacket end="w"?></g></svg>"#
+        );
+        assert!(parsed(&svg).entities(SegmentKind::Xmp).next().is_none());
+        c.check("packet across elements", svg.as_bytes());
+    }
+
+    #[test]
+    fn every_xpacket_is_xmp_and_what_is_inside_an_item_is_not_one() {
+        // Found by fuzzing: removing the first xpacket must not reveal a second.
+        let p = r#"<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?><a/><?xpacket end="w"?>"#;
+        let svg = format!(r#"<svg xmlns="{NS}">{p}<g/>{p}</svg>"#);
+        let s = parsed(&svg);
+        assert_eq!(s.entities(SegmentKind::Xmp).count(), 2);
+        assert!(matches!(
+            s.xmp(&mut Cursor::new(svg.as_bytes())),
+            Err(Error::Ambiguous { count: 2, .. })
+        ));
+        let out = rewrite(&svg, &Updates::new().remove_xmp()).unwrap();
+        assert_eq!(out, format!(r#"<svg xmlns="{NS}"><g/></svg>"#));
+        assert_eq!(parsed(&out).entities(SegmentKind::Xmp).count(), 0);
+        Conformance::new(handler()).check("two packets", svg.as_bytes());
+
+        // A manifest inside a packet is part of the packet; a packet inside a
+        // manifest is part of the manifest. Removing the outer one takes the inner.
+        let svg = format!(
+            r#"<svg xmlns="{NS}" xmlns:c2pa="http://c2pa.org/manifest"><metadata><?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?><c2pa:manifest>QUJD</c2pa:manifest><?xpacket end="w"?></metadata></svg>"#
+        );
+        let s = parsed(&svg);
+        assert_eq!(s.entities(SegmentKind::Xmp).count(), 1);
+        assert_eq!(s.entities(SegmentKind::Jumbf).count(), 0);
+        let c = Conformance::new(handler()).jumbf(Some(jumbf(64)));
+        c.check("manifest inside a packet", svg.as_bytes());
+
+        let svg = format!(
+            r#"<svg xmlns="{NS}" xmlns:c2pa="http://c2pa.org/manifest"><metadata><c2pa:manifest><?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?><?xpacket end="w"?></c2pa:manifest></metadata></svg>"#
+        );
+        let s = parsed(&svg);
+        assert_eq!(s.entities(SegmentKind::Xmp).count(), 0);
+        c.check("packet inside a manifest", svg.as_bytes());
+
+        // A packet that holds the whole document, or the first metadata, hides them.
+        let svg = format!(
+            r#"<svg xmlns="{NS}"><?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?><metadata><x/></metadata><?xpacket end="w"?><metadata/></svg>"#
+        );
+        c.check("metadata inside a packet", svg.as_bytes());
     }
 
     #[test]

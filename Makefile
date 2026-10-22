@@ -1,4 +1,4 @@
-.PHONY: ci fmt clippy test fuzz-build fuzz fuzz-parse fuzz-write fuzz-xmp fuzz-mpf fuzz-regress
+.PHONY: ci fmt clippy test fuzz-build fuzz fuzz-parse fuzz-write fuzz-xmp fuzz-mpf fuzz-conform fuzz-regress
 
 # Run the full CI preflight locally (mirrors .github/workflows/ci.yml)
 ci: fmt clippy test
@@ -34,9 +34,12 @@ fuzz-xmp:
 fuzz-mpf:
 	./fuzz.sh mpf $(FUZZ_TIME)
 
+fuzz-conform:
+	./fuzz.sh conform $(FUZZ_TIME)
+
 # Replay the saved crash artifacts against the current code.
 fuzz-regress:
-	@set -e; for t in fuzz_parse fuzz_write fuzz_xmp fuzz_mpf; do \
+	@set -e; for t in fuzz_parse fuzz_write fuzz_xmp fuzz_mpf fuzz_conform; do \
 		for f in fuzz/artifacts/$$t/*; do \
 			if [ -f "$$f" ]; then cargo +nightly fuzz run $$t "$$f"; fi; \
 		done; \

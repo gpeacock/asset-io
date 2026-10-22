@@ -1385,6 +1385,45 @@ async fn plan<'a>(
     Ok((ops, labels, map))
 }
 
+/// A box whose size field is 0 runs to the end of the file, so only the last box of
+/// the source can be one. If the write puts anything after it, it needs a size of
+/// its own, or it would swallow what follows. Returns that box and its size.
+async fn open_ended_box(
+    src: &Structure,
+    io: &mut Io,
+    ops: &[Op<'_>],
+) -> Result<Option<(SegmentId, u32)>> {
+    let Some(last) = src.segments().len().checked_sub(1) else {
+        return Ok(None);
+    };
+    let at = ops.iter().position(|op| {
+        matches!(op, Op::Copy(id) | Op::Scan(id) | Op::Relabel { id, .. } if id.index() == last)
+    });
+    if !at.is_some_and(|at| at + 1 < ops.len()) {
+        return Ok(None);
+    }
+    let id = SegmentId::from_index(last)?;
+    let seg = src.segment(id)?;
+    let mut size = [0u8; 4];
+    io.read_at(seg.header().offset(), &mut size).await?;
+    if size != [0; 4] {
+        return Ok(None);
+    }
+    let size = u32::try_from(seg.extent().len()).map_err(|_| Error::LimitExceeded {
+        what: "size of a box that no longer runs to the end of the file",
+        limit: u32::MAX as u64,
+    })?;
+    Ok(Some((id, size)))
+}
+
+/// The header of `seg` with `size` as its size field.
+fn put_size(b: &mut PlanBuilder<'_, '_>, id: SegmentId, seg: &Segment, size: u32) -> Result<()> {
+    let header = seg.header();
+    b.put(id, Role::Header, size.to_be_bytes().to_vec());
+    b.copy(id, Role::Header, header.sub(4, header.len() - 4)?);
+    Ok(())
+}
+
 /// The plan that writes `ops`: the output structure and, unless `with_steps` is
 /// false, the steps. Reads the source for what the steps need to know: the offset
 /// tables to rewrite and the header of a relabelled box.
@@ -1398,11 +1437,25 @@ async fn assemble<'a>(
 ) -> Result<WritePlan<'a>> {
     let map = Arc::new(map);
     let mut b = PlanBuilder::new(src);
+    let open_ended = if with_steps {
+        open_ended_box(src, io, &ops).await?
+    } else {
+        None
+    };
     for op in ops {
         let (id, kind, label) = match op {
             Op::Copy(sid) => {
                 let s = src.segment(sid)?;
-                (b.copy_segment(sid)?, s.kind(), labels[sid.index()])
+                let id = match open_ended.filter(|(open, _)| *open == sid) {
+                    Some((_, size)) => {
+                        let id = b.shape_like(sid)?;
+                        put_size(&mut b, id, s, size)?;
+                        b.copy(id, Role::Payload, s.payload());
+                        id
+                    }
+                    None => b.copy_segment(sid)?,
+                };
+                (id, s.kind(), labels[sid.index()])
             }
             Op::Scan(sid) => {
                 let seg = src.segment(sid)?;
@@ -1410,7 +1463,12 @@ async fn assemble<'a>(
                 if with_steps {
                     let mut patches = collect_patches(io, seg, &map).await?;
                     for (role, range) in seg.regions() {
-                        patched_steps(&mut b, id, role, range, &mut patches, &map)?;
+                        match open_ended.filter(|(open, _)| *open == sid) {
+                            Some((_, size)) if role == Role::Header => {
+                                put_size(&mut b, id, seg, size)?
+                            }
+                            _ => patched_steps(&mut b, id, role, range, &mut patches, &map)?,
+                        }
                     }
                 }
                 (id, seg.kind(), labels[sid.index()])
@@ -1438,6 +1496,9 @@ async fn assemble<'a>(
                         ));
                     }
                     h[at..at + to.len()].copy_from_slice(to.as_bytes());
+                    if let Some((_, size)) = open_ended.filter(|(open, _)| *open == sid) {
+                        h[..4].copy_from_slice(&size.to_be_bytes());
+                    }
                     b.put(id, Role::Header, h);
                     b.copy(id, Role::Payload, seg.payload());
                 }
@@ -2027,6 +2088,39 @@ mod tests {
         let added = (8 + 16 + 4 + 9 + 8 + 5) as u32;
         assert_eq!(stco_entry(&out), e0 + added);
         assert!(media_at(&out, stco_entry(&out)));
+    }
+
+    #[test]
+    fn a_box_that_ran_to_the_end_gets_its_size_when_something_follows_it() {
+        // The last box, with a size of 0 (to the end of the file), then merkle boxes
+        // after it: without a size of its own it would swallow them.
+        let mut mdat = boxed(b"mdat", b"MEDIA");
+        mdat[..4].copy_from_slice(&0u32.to_be_bytes());
+        let f = file(&[ftyp(), mdat]);
+        let out = rewrite(&f, &Updates::new().set_merkle(vec![vec![0u8; 8]])).unwrap();
+        let s = parse(&mut Cursor::new(&out)).unwrap();
+        let sizes: Vec<_> = s.segments().iter().map(|g| g.extent().len()).collect();
+        assert_eq!(sizes[1], 13); // the mdat, now sized: 8 + "MEDIA"
+        assert_eq!(s.segments().len(), 3);
+        assert_eq!(&out[ftyp().len() + 4..][..4], b"mdat");
+        assert_eq!(be32(&out, ftyp().len() as u64), 13);
+
+        // Nothing after it: the header is left as it was.
+        let kept = rewrite(&f, &Updates::new()).unwrap();
+        assert_eq!(kept, f);
+        let manifest_first = rewrite(&f, &Updates::new().set_jumbf(b"STORE".to_vec())).unwrap();
+        let at = ftyp().len() + manifest_first.len() - f.len();
+        assert_eq!(be32(&manifest_first, at as u64), 0);
+    }
+
+    #[test]
+    fn a_first_box_that_ran_to_the_end_is_sized_before_a_box_is_added() {
+        // Found by fuzzing: an ftyp of size 0 followed by an inserted XMP box.
+        let mut f = ftyp();
+        f[..4].copy_from_slice(&0u32.to_be_bytes());
+        let out = rewrite(&f, &Updates::new().set_xmp(b"<x/>".to_vec())).unwrap();
+        assert_eq!(be32(&out, 0), f.len() as u32);
+        assert_eq!(parse(&mut Cursor::new(&out)).unwrap().segments().len(), 2);
     }
 
     #[test]
