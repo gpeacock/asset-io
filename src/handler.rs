@@ -122,23 +122,20 @@ pub trait ContainerHandler: std::fmt::Debug + Send + Sync {
 
     /// Parse the whole structure of an asset, reading it through `io`.
     ///
-    /// This is the method to implement. It is `async` so that the same code can be
-    /// run by any I/O: see [`Task`](crate::Task). Read with [`Io`]; everything else
-    /// is ordinary code. The default reports [`Error::UnsupportedFormat`], so a
-    /// handler that implements the blocking [`parse`](Self::parse) instead keeps
-    /// working, but cannot be run by [`HandlerRegistry::parse_task`](crate::HandlerRegistry::parse_task).
+    /// It is `async` so that the same code can be run by any I/O: see
+    /// [`Task`](crate::Task). Read with [`Io`], whose reads are `.await`ed;
+    /// everything else is ordinary code. [`parse`](Self::parse) and
+    /// [`HandlerRegistry::parse_task`](crate::HandlerRegistry::parse_task) run it.
     ///
     /// The result must tile the stream (see [`StructureBuilder`](crate::StructureBuilder))
     /// and must be built with `self` as its handler, which is why this takes the
-    /// `Arc`: `StructureBuilder::new(self, ...)`.
-    fn parse_async(self: Arc<Self>, _io: Io) -> BoxFuture<'static, Result<Structure>> {
-        Box::pin(async { Err(Error::UnsupportedFormat) })
-    }
+    /// `Arc`: `StructureBuilder::new(self, ...)`. Return
+    /// `Box::pin(async move { ... })`.
+    fn parse_async(self: Arc<Self>, io: Io) -> BoxFuture<'static, Result<Structure>>;
 
-    /// Parse the whole structure of an asset from a stream.
-    ///
-    /// The default runs [`parse_async`](Self::parse_async) with blocking reads. A
-    /// handler written before that method existed can implement this instead.
+    /// Parse the whole structure of an asset from a stream, reading it with
+    /// blocking calls. This runs [`parse_async`](Self::parse_async); there is no
+    /// need to implement it.
     fn parse(self: Arc<Self>, src: &mut dyn ReadSeek) -> Result<Structure> {
         let total = src.seek(SeekFrom::End(0))?;
         src.seek(SeekFrom::Start(0))?;
@@ -150,7 +147,8 @@ pub trait ContainerHandler: std::fmt::Debug + Send + Sync {
     /// read through `io`, which holds the stream `src_structure` was parsed from.
     ///
     /// This is the method to implement for writing; it is `async` for the same
-    /// reason as [`parse_async`](Self::parse_async). The default
+    /// reason as [`parse_async`](Self::parse_async). A handler that cannot write
+    /// leaves the default, which reports [`Error::UnsupportedFormat`]. The default
     /// [`write`](Self::write) executes the plan, and the default
     /// [`plan`](Self::plan) returns its structure. A handler that needs nothing
     /// from the source ignores `io`. The default reports
@@ -165,8 +163,8 @@ pub trait ContainerHandler: std::fmt::Debug + Send + Sync {
     }
 
     /// Like [`write_plan_async`](Self::write_plan_async), reading the source from
-    /// `src`. The default runs that method with blocking reads; a handler written
-    /// before it existed can implement this instead.
+    /// `src` with blocking calls. This runs that method; there is no need to
+    /// implement it.
     fn write_plan<'a>(
         &self,
         src_structure: &Structure,

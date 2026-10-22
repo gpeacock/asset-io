@@ -17,9 +17,9 @@
 
 use asset_io::plan::validate;
 use asset_io::{
-    ByteRange, Chunk, ContainerHandler, Error, FormatSpec, HandlerRegistry, MetadataUpdate, Name,
-    ReadSeek, Result, Role, SegmentId, SegmentKind, Sink, Step, Structure, StructureBuilder,
-    Updates, WritePlan,
+    BoxFuture, ByteRange, Chunk, ContainerHandler, Error, FormatSpec, HandlerRegistry, Io,
+    MetadataUpdate, Name, Result, Role, SegmentId, SegmentKind, Sink, Step, Structure,
+    StructureBuilder, Updates, WritePlan,
 };
 use std::io::Cursor;
 use std::sync::Arc;
@@ -42,45 +42,26 @@ impl ContainerHandler for Toy {
         header.starts_with(b"TOY!")
     }
 
-    fn parse(self: Arc<Self>, src: &mut dyn ReadSeek) -> Result<Structure> {
-        let mut data = Vec::new();
-        src.seek(std::io::SeekFrom::Start(0))?;
-        src.read_to_end(&mut data)?;
-        if !data.starts_with(b"TOY!") {
-            return Err(Error::InvalidFormat("not a toy".into()));
-        }
-        let mut b = StructureBuilder::new(self, "application/x-toy", data.len() as u64);
-        b.push_span(SegmentKind::Header, Name::FourCC(*b"TOY!"), 4, 0, 0)?;
-        let (mut at, mut idx) = (4usize, 0u64);
-        while at < data.len() {
-            let (kind, len) = match data[at..] {
-                [k, l, ..] => (k, l as usize),
-                _ => return Err(Error::InvalidFormat("truncated record".into())),
-            };
-            if at + 2 + len > data.len() {
-                return Err(Error::InvalidFormat("record overruns".into()));
-            }
-            let seg_kind = if kind == b'X' {
-                SegmentKind::Xmp
-            } else {
-                SegmentKind::Other
-            };
-            let id = b.push_span(seg_kind, Name::Id(idx), 2, len as u64, 0)?;
-            if kind == b'X' {
-                b.entity_of_segments(SegmentKind::Xmp, &[id])?;
-            }
-            at += 2 + len;
-            idx += 1;
-        }
-        b.finish()
+    fn parse_async(self: Arc<Self>, mut io: Io) -> BoxFuture<'static, Result<Structure>> {
+        Box::pin(async move {
+            // Read the whole stream; a real handler reads only what it needs.
+            let data = io.read_vec(0, io.len() as usize).await?;
+            parse_toy(self, &data)
+        })
     }
 
-    fn write_plan<'a>(
-        &self,
-        src: &Structure,
-        _: &mut dyn ReadSeek,
+    fn write_plan_async<'f, 'a: 'f>(
+        &'f self,
+        src: &'f Structure,
+        _io: Io,
         updates: &'a Updates,
-    ) -> Result<WritePlan<'a>> {
+    ) -> BoxFuture<'f, Result<WritePlan<'a>>> {
+        Box::pin(async move { write_toy_plan(src, updates) })
+    }
+}
+
+fn write_toy_plan<'a>(src: &Structure, updates: &'a Updates) -> Result<WritePlan<'a>> {
+    {
         // What each output record is: a source segment to copy, or new XMP.
         enum Rec<'a> {
             Copy(SegmentId),
@@ -153,6 +134,36 @@ impl ContainerHandler for Toy {
         }
         Ok(plan)
     }
+}
+
+fn parse_toy(handler: Arc<Toy>, data: &[u8]) -> Result<Structure> {
+    if !data.starts_with(b"TOY!") {
+        return Err(Error::InvalidFormat("not a toy".into()));
+    }
+    let mut b = StructureBuilder::new(handler, "application/x-toy", data.len() as u64);
+    b.push_span(SegmentKind::Header, Name::FourCC(*b"TOY!"), 4, 0, 0)?;
+    let (mut at, mut idx) = (4usize, 0u64);
+    while at < data.len() {
+        let (kind, len) = match data[at..] {
+            [k, l, ..] => (k, l as usize),
+            _ => return Err(Error::InvalidFormat("truncated record".into())),
+        };
+        if at + 2 + len > data.len() {
+            return Err(Error::InvalidFormat("record overruns".into()));
+        }
+        let seg_kind = if kind == b'X' {
+            SegmentKind::Xmp
+        } else {
+            SegmentKind::Other
+        };
+        let id = b.push_span(seg_kind, Name::Id(idx), 2, len as u64, 0)?;
+        if kind == b'X' {
+            b.entity_of_segments(SegmentKind::Xmp, &[id])?;
+        }
+        at += 2 + len;
+        idx += 1;
+    }
+    b.finish()
 }
 
 fn toy_bytes() -> Vec<u8> {
@@ -299,4 +310,60 @@ fn executor_rejects_steps_that_do_not_match_the_structure() {
             ()
         ))
         .is_err());
+}
+
+/// Run `task` to the end, answering each request from `source` by hand.
+fn run_by_hand<T>(mut task: asset_io::Task<'_, T>, source: &[u8]) -> (Result<T>, usize) {
+    let mut requests = 0;
+    loop {
+        match task.resume() {
+            Ok(asset_io::Progress::Read(mut req)) => {
+                requests += 1;
+                let from = (req.offset() as usize).min(source.len());
+                let to = (from + req.window_len()).min(source.len());
+                req.buffer().extend_from_slice(&source[from..to]);
+            }
+            Ok(asset_io::Progress::Done(v)) => return (Ok(v), requests),
+            Ok(_) => unreachable!(),
+            Err(e) => return (Err(e), requests),
+        }
+    }
+}
+
+#[test]
+fn a_third_party_handler_runs_under_a_task_with_no_changes() {
+    let bytes = toy_bytes();
+    let reg = registry();
+
+    // Parsing, with the I/O done here.
+    let (parsed, requests) =
+        run_by_hand(reg.parse_task("toy", bytes.len() as u64).unwrap(), &bytes);
+    let s = parsed.unwrap();
+    assert_eq!(s.total_size(), bytes.len() as u64);
+    assert_eq!(requests, 1); // the whole of a small stream, in one window
+
+    // Detection by content, then the same parse.
+    let (parsed, _) = run_by_hand(reg.parse_detect_task(bytes.len() as u64), &bytes);
+    assert_eq!(parsed.unwrap().segments().len(), s.segments().len());
+
+    // Planning a write, and running the plan step by step.
+    let u = Updates::new().set_xmp(b"new!".to_vec());
+    let (plan, _) = run_by_hand(s.write_plan_task(&u), &bytes);
+    let plan = plan.unwrap();
+    validate(&plan, bytes.len() as u64).unwrap();
+    let mut run = plan.start();
+    let mut out = Vec::new();
+    loop {
+        match run.step(&mut asset_io::NullSink).unwrap() {
+            asset_io::Action::Read { offset, buf } => {
+                let at = offset as usize;
+                buf.copy_from_slice(&bytes[at..at + buf.len()]);
+            }
+            asset_io::Action::Write(b) => out.extend_from_slice(b),
+            asset_io::Action::Done => break,
+            _ => unreachable!(),
+        }
+    }
+    let (want, _) = write(&u, &bytes);
+    assert_eq!(out, want);
 }

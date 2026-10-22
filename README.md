@@ -67,9 +67,20 @@ Edits to a multi-picture JPEG add metadata to the first image and shift the size
 
 ## Writing a handler
 
-A handler implements `ContainerHandler`: `parse` builds a `Structure` with `StructureBuilder`, and `write_plan` describes a write as a `WritePlan`, a structure plus ordered `Step`s that either copy source bytes (`Copy`) or supply new ones (`Put`). It does no I/O of its own. The default `write` runs the plan with `WritePlan::execute`, which coalesces reads, feeds the sink and checks the bytes against the structure; the default `plan` returns the plan's structure. A container with absolute file offsets (ISO BMFF chunk tables) uses `Step::Relocate`, which copies a table of offsets and rewrites them from an `OffsetMap`; the plan stays plain data. `plan::validate` checks a plan without any I/O, for a handler's tests. To run a plan with your own I/O (async, or from a state machine), use `WritePlan::start`: its `Execution::step` returns `Action::Read { offset, buf }`, `Action::Write(bytes)` or `Action::Done`, and does the sink calls, the checking and the read coalescing itself, so every way of running a plan behaves like `execute`. Read what to change from `Updates` (`xmp()`, `jumbf()`, ...). Options only one container has live outside `Updates`: attach them with `Updates::set_extension` and read them with `Updates::extension` (ISO BMFF's merkle boxes are `containers::bmff::BmffUpdates`). `tests/external_handler.rs` is a complete handler written with only the public API.
+A handler implements `ContainerHandler`:
+
+- `parse_async(self: Arc<Self>, io: Io)` builds a `Structure` with `StructureBuilder`, reading the stream through `io` (`io.read_at(offset, &mut buf).await?`, `io.reader(at)` for a run of fields, `io.fetch(..)` for a borrowed slice). Everything but the reads is ordinary code. Return `Box::pin(async move { ... })`.
+- `write_plan_async(&self, structure, io, updates)` describes a write as a `WritePlan`, a structure plus ordered `Step`s that either copy source bytes (`Copy`) or supply new ones (`Put`). It reads the source only for what it must know (`io`), and does no writing. A handler that cannot write leaves the default.
+
+The blocking `parse`, `write_plan` and `write` are provided: they run those methods against a `Read + Seek`. The default `write` runs the plan with `WritePlan::execute`, which coalesces reads, feeds the sink and checks the bytes against the structure and role. `plan::validate` checks a plan without any I/O, for a handler's tests. A container with absolute file offsets (ISO BMFF chunk tables) uses `Step::Relocate`, which copies a table of offsets and rewrites them from an `OffsetMap`. Read what to change from `Updates` (`xmp()`, `jumbf()`, ...). Options only one container has live outside `Updates`: attach them with `Updates::set_extension` and read them with `Updates::extension` (ISO BMFF's merkle boxes are `containers::bmff::BmffUpdates`). `tests/external_handler.rs` is a complete handler written with only the public API.
 
 Register a handler with `HandlerRegistry::with_handler`; the last handler registered for a format wins. Enums and structs a handler touches are `#[non_exhaustive]`, so new variants and fields are not breaking changes.
+
+## Running with your own I/O
+
+Parsing and planning are `async` code that does no I/O: a `Task` runs it, and when it needs bytes it does not hold (`Io` keeps a 4 KiB window, so a run of tiny reads is one request) `Task::resume` returns a `ReadRequest` with the offset, how much, and the buffer to fill. Fill it however you like (blocking, `async`, from a buffer you already have) and resume. No runtime is involved, and a task is `Send`. Get one from `HandlerRegistry::parse_task(format, total)` or `parse_detect_task(total)` for a parse, or `Structure::write_plan_task(&updates)` for a plan.
+
+A `WritePlan` runs the same way: `WritePlan::start` gives an `Execution` whose `step` returns `Action::Read { offset, buf }`, `Action::Write(bytes)` or `Action::Done`, and does the sink calls, the checking and the read coalescing itself, so every way of running a plan behaves like `execute`. The blocking calls (`HandlerRegistry::parse`, `Structure::write`) are these drivers over a `Read + Seek` and a `Write`.
 
 ## Zero-copy
 

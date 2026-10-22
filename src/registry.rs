@@ -172,9 +172,8 @@ impl HandlerRegistry {
     }
 
     /// A task that parses a stream of `total` bytes as `format`, for a caller that
-    /// does its own I/O; see [`Task`]. Reports [`Error::UnsupportedFormat`] (when
-    /// first resumed, if the handler does not implement
-    /// [`parse_async`](ContainerHandler::parse_async)) for a format nobody claims.
+    /// does its own I/O; see [`Task`]. Reports [`Error::UnsupportedFormat`] for a
+    /// format nobody claims.
     pub fn parse_task(&self, format: &str, total: u64) -> Result<Task<'static, Structure>> {
         let h = Arc::clone(self.handler(format).ok_or(Error::UnsupportedFormat)?);
         Ok(Task::new(total, move |io| h.parse_async(io)))
@@ -229,7 +228,7 @@ mod tests {
     use super::*;
     use crate::segment::SegmentKind;
     use crate::Updates;
-    use crate::{ContainerHandler, Name, ReadWriteSeek, Sink, StructureBuilder};
+    use crate::{BoxFuture, ContainerHandler, Io, Name, ReadWriteSeek, Sink, StructureBuilder};
     use std::borrow::Cow;
     use std::io::Cursor;
 
@@ -249,24 +248,24 @@ mod tests {
         fn detect(&self, header: &[u8]) -> bool {
             header.starts_with(b"TOY!")
         }
-        fn parse(self: Arc<Self>, src: &mut dyn ReadSeek) -> Result<Structure> {
-            let mut data = Vec::new();
-            src.seek(SeekFrom::Start(0))?;
-            src.read_to_end(&mut data)?;
-            let mut b = StructureBuilder::new(self, "application/x-toy", data.len() as u64);
-            b.push_span(SegmentKind::Header, Name::FourCC(*b"TOY!"), 4, 0, 0)?;
-            let mut at = 4usize;
-            let mut idx = 0u64;
-            while at < data.len() {
-                let len = data[at] as usize;
-                if at + 1 + len > data.len() {
-                    return Err(Error::InvalidFormat("toy record overruns".into()));
+        fn parse_async(self: Arc<Self>, mut io: Io) -> BoxFuture<'static, Result<Structure>> {
+            Box::pin(async move {
+                let data = io.read_vec(0, io.len() as usize).await?;
+                let mut b = StructureBuilder::new(self, "application/x-toy", data.len() as u64);
+                b.push_span(SegmentKind::Header, Name::FourCC(*b"TOY!"), 4, 0, 0)?;
+                let mut at = 4usize;
+                let mut idx = 0u64;
+                while at < data.len() {
+                    let len = data[at] as usize;
+                    if at + 1 + len > data.len() {
+                        return Err(Error::InvalidFormat("toy record overruns".into()));
+                    }
+                    b.push_span(SegmentKind::Other, Name::Id(idx), 1, len as u64, 0)?;
+                    at += 1 + len;
+                    idx += 1;
                 }
-                b.push_span(SegmentKind::Other, Name::Id(idx), 1, len as u64, 0)?;
-                at += 1 + len;
-                idx += 1;
-            }
-            b.finish()
+                b.finish()
+            })
         }
         fn write(
             &self,
@@ -352,8 +351,8 @@ mod tests {
                 const F: &[FormatSpec] = &[FormatSpec::new("application/x-toy2", "toy")];
                 F
             }
-            fn parse(self: Arc<Self>, _: &mut dyn ReadSeek) -> Result<Structure> {
-                Err(Error::InvalidFormat("toy2".into()))
+            fn parse_async(self: Arc<Self>, _: Io) -> BoxFuture<'static, Result<Structure>> {
+                Box::pin(async { Err(Error::InvalidFormat("toy2".into())) })
             }
             fn write(
                 &self,

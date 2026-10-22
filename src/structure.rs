@@ -1108,8 +1108,11 @@ mod tests {
             const F: &[crate::FormatSpec] = &[crate::FormatSpec::new("application/x-test", "test")];
             F
         }
-        fn parse(self: Arc<Self>, _: &mut dyn ReadSeek) -> Result<Structure> {
-            Err(Error::UnsupportedFormat)
+        fn parse_async(
+            self: Arc<Self>,
+            _: crate::Io,
+        ) -> crate::BoxFuture<'static, Result<Structure>> {
+            Box::pin(async { Err(Error::UnsupportedFormat) })
         }
         fn write(
             &self,
