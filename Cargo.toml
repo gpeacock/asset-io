@@ -51,6 +51,11 @@ name = "io"
 harness = false
 required-features = ["all-formats"]
 
+[[bench]]
+name = "pdf"
+harness = false
+required-features = ["pdf"]
+
 [profile.bench]
 inherits = "release"
 

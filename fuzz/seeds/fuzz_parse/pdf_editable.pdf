@@ -1,0 +1,48 @@
+%PDF-1.7
+1 0 obj
+<< /Type /Catalog /Metadata 2 0 R /AF [4 0 R 6 0 R] /Names << /EmbeddedFiles << /Names [(credentials) 4 0 R (other.txt) 6 0 R] >> >> >>
+endobj
+2 0 obj
+<< /Type /Metadata /Subtype /XML /Length 6 >>
+stream
+<xmp/>
+endstream
+endobj
+4 0 obj
+<< /Type /Filespec /Subtype /application#2Fc2pa /AFRelationship /C2PA_Manifest /EF << /F 5 0 R >> >>
+endobj
+5 0 obj
+<< /Type /EmbeddedFile /Length 8 >>
+stream
+manifest
+endstream
+endobj
+6 0 obj
+<< /Type /Filespec /AFRelationship /Data /F (other.txt) /EF << /F 7 0 R >> >>
+endobj
+7 0 obj
+<< /Type /EmbeddedFile /Length 5 >>
+stream
+other
+endstream
+endobj
+xref
+0 1
+0000000000 65535 f 
+1 1
+0000000009 00000 n 
+2 1
+0000000160 00000 n 
+4 1
+0000000245 00000 n 
+5 1
+0000000361 00000 n 
+6 1
+0000000438 00000 n 
+7 1
+0000000531 00000 n 
+trailer
+<< /Size 8 /Root 1 0 R /ID [<0102> <0304>] >>
+startxref
+605
+%%EOF

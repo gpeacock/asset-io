@@ -1,0 +1,31 @@
+%PDF-1.7
+1 0 obj
+<< /Type /Catalog /Metadata 2 0 R /AF [3 0 R] >>
+endobj
+2 0 obj
+<< /Type /Metadata /Subtype /XML /Length 6 >>
+stream
+<xmp/>
+endstream
+endobj
+3 0 obj
+<< /Type /Filespec /AFRelationship /C2PA_Manifest /Subtype /application#2Fc2pa /EF << /F 4 0 R >> >>
+endobj
+4 0 obj
+<< /Type /EmbeddedFile /Length 8 >>
+stream
+manifest
+endstream
+endobj
+xref
+0 5
+0000000000 65535 f 
+0000000009 00000 n 
+0000000073 00000 n 
+0000000158 00000 n 
+0000000274 00000 n 
+trailer
+<< /Size 5 /Root 1 0 R >>
+startxref
+351
+%%EOF
