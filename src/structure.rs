@@ -534,7 +534,7 @@ impl Structure {
         Ok(out)
     }
 
-    /// Read an item's item: [`read_item`](Self::read_item), then the
+    /// Read an item's content: [`read_item`](Self::read_item), then the
     /// container's [decoding](ContainerHandler::decode_item) of what is stored.
     /// For most containers the two are the same.
     pub fn read_decoded<R: Read + Seek + ?Sized>(
