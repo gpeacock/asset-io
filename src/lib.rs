@@ -68,12 +68,14 @@ mod handler;
 #[cfg(feature = "memory-mapped")]
 mod mapped;
 pub mod plan;
+mod plan_builder;
 mod range;
 mod registry;
 mod segment;
 mod sink;
 mod structure;
 mod task;
+pub mod testing;
 mod thumbnail;
 #[cfg(feature = "exif")]
 mod tiff;
@@ -89,6 +91,7 @@ pub use handler::{ContainerHandler, FormatSpec, ReadSeek, ReadWriteSeek, DETECT_
 #[cfg(feature = "memory-mapped")]
 pub use mapped::MappedFile;
 pub use plan::{Step, WritePlan};
+pub use plan_builder::PlanBuilder;
 pub use range::ByteRange;
 pub use registry::HandlerRegistry;
 pub use segment::{labels, Name, Role, Segment, SegmentKind, AFTER_BOX};
@@ -100,7 +103,7 @@ pub use task::{block_on, BoxFuture, Io, Progress, ReadRequest, Reader, Task, DEF
 pub use thumbnail::Thumbnail;
 #[cfg(feature = "exif")]
 pub use tiff::ExifInfo;
-pub use updates::{MetadataUpdate, Updates};
+pub use updates::{Existing, MetadataSlot, MetadataUpdate, Updates};
 pub use walk::Node;
 #[cfg(feature = "xmp")]
 pub use xmp::MiniXmp;

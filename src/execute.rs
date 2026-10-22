@@ -129,13 +129,13 @@ impl Tracker<'_> {
     fn begin_segment(&mut self, id: SegmentId) -> Result<()> {
         let seg = self.structure.segment(id)?;
         if self.pos != seg.extent().offset() {
-            return Err(Error::InvalidSegment {
-                offset: self.pos,
-                reason: format!(
+            return Err(Error::invalid_segment(
+                self.pos,
+                format!(
                     "output position diverged from planned structure (expected {})",
                     seg.extent().offset()
                 ),
-            });
+            ));
         }
         self.cur = Some(id);
         Ok(())
@@ -164,13 +164,13 @@ impl Tracker<'_> {
         };
         let end = self.pos.saturating_add(data.len() as u64);
         if self.pos < region.offset() || end > region.end() {
-            return Err(Error::InvalidSegment {
-                offset: self.pos,
-                reason: format!(
+            return Err(Error::invalid_segment(
+                self.pos,
+                format!(
                     "{} bytes do not lie in the {role:?} of their segment",
                     data.len()
                 ),
-            });
+            ));
         }
         if sink.wants(seg, role) {
             sink.chunk(Chunk::new(id, role, self.pos, data))?;
@@ -188,14 +188,14 @@ impl Tracker<'_> {
     /// Verify the whole structure was written.
     fn finish(&self) -> Result<()> {
         if self.pos != self.structure.total_size() {
-            return Err(Error::InvalidSegment {
-                offset: self.pos,
-                reason: format!(
+            return Err(Error::invalid_segment(
+                self.pos,
+                format!(
                     "wrote {} bytes, planned structure is {}",
                     self.pos,
                     self.structure.total_size()
                 ),
-            });
+            ));
         }
         Ok(())
     }
@@ -359,10 +359,10 @@ impl<'a, 'p> Execution<'a, 'p> {
                 self.next += 1;
                 let stride = rule.stride() as u64;
                 if !src.len().is_multiple_of(stride) {
-                    return Err(Error::InvalidSegment {
-                        offset: src.offset(),
-                        reason: "offset table is not a whole number of entries".into(),
-                    });
+                    return Err(Error::invalid_segment(
+                        src.offset(),
+                        "offset table is not a whole number of entries",
+                    ));
                 }
                 if src.is_empty() {
                     return Ok(Out::Continue);

@@ -228,7 +228,7 @@ mod tests {
     use super::*;
     use crate::segment::SegmentKind;
     use crate::Updates;
-    use crate::{BoxFuture, ContainerHandler, Io, Name, ReadWriteSeek, Sink, StructureBuilder};
+    use crate::{BoxFuture, ContainerHandler, Io, Name, Sink, StructureBuilder};
     use std::borrow::Cow;
     use std::io::Cursor;
 
@@ -271,7 +271,7 @@ mod tests {
             &self,
             _: &Structure,
             _: &mut dyn ReadSeek,
-            _: &mut dyn ReadWriteSeek,
+            _: &mut dyn std::io::Write,
             _: &Updates,
             _: &mut dyn Sink,
         ) -> Result<Structure> {
@@ -358,7 +358,7 @@ mod tests {
                 &self,
                 _: &Structure,
                 _: &mut dyn ReadSeek,
-                _: &mut dyn ReadWriteSeek,
+                _: &mut dyn std::io::Write,
                 _: &Updates,
                 _: &mut dyn Sink,
             ) -> Result<Structure> {

@@ -180,6 +180,9 @@ pub trait ContainerHandler: std::fmt::Debug + Send + Sync {
     /// Write the asset with `updates` applied, delivering every output byte to
     /// `sink`, and return the structure of what was written.
     ///
+    /// `out` is only written to, from its current position, so a file, a buffer, a
+    /// socket or a hashing writer will do.
+    ///
     /// The default executes [`write_plan`](Self::write_plan). Override it only to
     /// write some other way, such as a container whose output cannot be described
     /// ahead of time.
@@ -187,7 +190,7 @@ pub trait ContainerHandler: std::fmt::Debug + Send + Sync {
         &self,
         src_structure: &Structure,
         src: &mut dyn ReadSeek,
-        out: &mut dyn ReadWriteSeek,
+        out: &mut dyn Write,
         updates: &Updates,
         sink: &mut dyn Sink,
     ) -> Result<Structure> {

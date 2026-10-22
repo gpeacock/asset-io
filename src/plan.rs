@@ -220,6 +220,10 @@ impl<'a> WritePlan<'a> {
         }
     }
 
+    pub(crate) fn from_parts(structure: Structure, steps: Vec<Step<'a>>) -> Self {
+        Self { structure, steps }
+    }
+
     /// Append a step that copies `src` of the source asset into `role` of `dest`.
     pub fn copy(&mut self, dest: SegmentId, role: Role, src: ByteRange) -> &mut Self {
         self.steps.push(Step::Copy { dest, role, src });
@@ -257,6 +261,33 @@ impl<'a> WritePlan<'a> {
             rule,
         });
         self
+    }
+
+    /// Replace the steps that write `role` of `dest` with one that writes `data`,
+    /// for bytes that depend on the rest of the output. It must be as long as what
+    /// it replaces. Fails if `dest` has no step for `role`.
+    pub fn replace(
+        &mut self,
+        dest: SegmentId,
+        role: Role,
+        data: impl Into<Cow<'a, [u8]>>,
+    ) -> Result<&mut Self> {
+        let hit = |s: &Step<'_>| s.dest() == dest && s.role() == role;
+        let at = self
+            .steps
+            .iter()
+            .position(hit)
+            .ok_or(Error::NotFound { what: "step" })?;
+        self.steps.retain(|s| !hit(s));
+        self.steps.insert(
+            at,
+            Step::Put {
+                dest,
+                role,
+                data: data.into(),
+            },
+        );
+        Ok(self)
     }
 
     /// Append the steps that copy the source segment `src` unchanged into `dest`.
@@ -374,41 +405,41 @@ pub fn validate(plan: &WritePlan<'_>, source_len: u64) -> Result<()> {
         let end = pos.checked_add(step.len());
         let fits = region.offset() <= pos && end.is_some_and(|e| e <= region.end());
         if !fits {
-            return Err(Error::InvalidSegment {
-                offset: pos,
-                reason: format!(
+            return Err(Error::invalid_segment(
+                pos,
+                format!(
                     "step of {} bytes does not fit the {:?} of its segment",
                     step.len(),
                     step.role()
                 ),
-            });
+            ));
         }
         if let Step::Relocate { src, rule, .. } = step {
             if !src.len().is_multiple_of(rule.stride() as u64) {
-                return Err(Error::InvalidSegment {
-                    offset: src.offset(),
-                    reason: "offset table is not a whole number of entries".into(),
-                });
+                return Err(Error::invalid_segment(
+                    src.offset(),
+                    "offset table is not a whole number of entries",
+                ));
             }
         }
         if let Step::Copy { src, .. } | Step::Relocate { src, .. } = step {
             if src.end() > source_len {
-                return Err(Error::InvalidSegment {
-                    offset: src.offset(),
-                    reason: "copy reads past the end of the source".into(),
-                });
+                return Err(Error::invalid_segment(
+                    src.offset(),
+                    "copy reads past the end of the source",
+                ));
             }
         }
         pos += step.len();
     }
     if pos != structure.total_size() {
-        return Err(Error::InvalidSegment {
-            offset: pos,
-            reason: format!(
+        return Err(Error::invalid_segment(
+            pos,
+            format!(
                 "steps write {pos} bytes, structure is {}",
                 structure.total_size()
             ),
-        });
+        ));
     }
     Ok(())
 }

@@ -234,8 +234,6 @@ impl Structure {
         .ok()
     }
 
-    // Used by the built-in writers; which ones depends on the enabled features.
-    #[allow(dead_code)]
     /// How many leading segments are the container's own structure.
     pub(crate) fn box_count(&self) -> usize {
         self.boxes
@@ -367,7 +365,6 @@ impl Structure {
     }
 
     /// Every entity with its kind, in declaration order.
-    #[cfg(any(feature = "jpeg", feature = "bmff"))]
     pub(crate) fn entity_list(&self) -> impl Iterator<Item = (SegmentKind, &Entity)> + '_ {
         self.entities.iter().map(|e| (e.kind, e))
     }
@@ -400,10 +397,10 @@ impl Structure {
 
     fn check_readable(&self, range: ByteRange) -> Result<()> {
         if range.end() > self.total_size {
-            return Err(Error::InvalidSegment {
-                offset: range.offset(),
-                reason: "range extends past end of asset".into(),
-            });
+            return Err(Error::invalid_segment(
+                range.offset(),
+                "range extends past end of asset",
+            ));
         }
         Ok(())
     }
@@ -441,10 +438,10 @@ impl Structure {
         src.seek(SeekFrom::Start(range.offset()))?;
         Read::take(&mut *src, range.len()).read_to_end(out)?;
         if (out.len() - start) as u64 != range.len() {
-            return Err(Error::InvalidSegment {
-                offset: range.offset(),
-                reason: "unexpected end of data".into(),
-            });
+            return Err(Error::invalid_segment(
+                range.offset(),
+                "unexpected end of data",
+            ));
         }
         Ok(())
     }
@@ -560,19 +557,16 @@ impl Structure {
     pub fn slice<'a>(&self, data: &'a [u8], range: ByteRange) -> Result<&'a [u8]> {
         self.check_readable(range)?;
         if (data.len() as u64) < self.total_size {
-            return Err(Error::InvalidSegment {
-                offset: data.len() as u64,
-                reason: format!(
+            return Err(Error::invalid_segment(
+                data.len() as u64,
+                format!(
                     "buffer holds {} bytes, asset is {}",
                     data.len(),
                     self.total_size
                 ),
-            });
+            ));
         }
-        let bad = || Error::InvalidSegment {
-            offset: range.offset(),
-            reason: "range does not fit in memory".into(),
-        };
+        let bad = || Error::invalid_segment(range.offset(), "range does not fit in memory");
         let start = usize::try_from(range.offset()).map_err(|_| bad())?;
         let end = usize::try_from(range.end()).map_err(|_| bad())?;
         data.get(start..end).ok_or_else(bad)
@@ -710,12 +704,13 @@ impl Structure {
 
     /// Write this asset to `out` with `updates` applied, delivering every output
     /// byte to `sink`, and return the structure of what was written. `src` must be
-    /// the stream this structure was parsed from. The container's handler does the
-    /// work; callers never name the format.
+    /// the stream this structure was parsed from. `out` is only written to, from its
+    /// current position. The container's handler does the work; callers never name
+    /// the format.
     pub fn write(
         &self,
         src: &mut dyn ReadSeek,
-        out: &mut dyn ReadWriteSeek,
+        out: &mut dyn Write,
         updates: &crate::Updates,
         sink: &mut dyn crate::sink::Sink,
     ) -> Result<Structure> {
@@ -878,16 +873,16 @@ impl StructureBuilder {
         }
         let ext = seg.extent();
         if ext.offset() != self.cursor {
-            return Err(Error::InvalidSegment {
-                offset: ext.offset(),
-                reason: format!("segment must start at {} (gap or overlap)", self.cursor),
-            });
+            return Err(Error::invalid_segment(
+                ext.offset(),
+                format!("segment must start at {} (gap or overlap)", self.cursor),
+            ));
         }
         if ext.end() > self.total_size {
-            return Err(Error::InvalidSegment {
-                offset: ext.offset(),
-                reason: "segment extends past end of asset".into(),
-            });
+            return Err(Error::invalid_segment(
+                ext.offset(),
+                "segment extends past end of asset",
+            ));
         }
         let id = SegmentId::from_index(self.segments.len())?;
         self.cursor = ext.end();
@@ -907,10 +902,7 @@ impl StructureBuilder {
         let total = (header_len as u64)
             .checked_add(payload_len)
             .and_then(|v| v.checked_add(trailer_len as u64))
-            .ok_or_else(|| Error::InvalidSegment {
-                offset: self.cursor,
-                reason: "segment length overflows".into(),
-            })?;
+            .ok_or_else(|| Error::invalid_segment(self.cursor, "segment length overflows"))?;
         let seg = Segment::new(
             ByteRange::new(self.cursor, total)?,
             header_len,
@@ -919,6 +911,44 @@ impl StructureBuilder {
             name,
         )?;
         self.push(seg)
+    }
+
+    /// Like [`push_span`](Self::push_span), for a container where each item of
+    /// metadata is one segment, as chunks are: a segment of kind
+    /// [`Xmp`](SegmentKind::Xmp), [`Jumbf`](SegmentKind::Jumbf) or
+    /// [`Exif`](SegmentKind::Exif) is also declared as the entity it is the whole of.
+    pub fn push_item(
+        &mut self,
+        kind: SegmentKind,
+        name: Name,
+        header_len: u32,
+        payload_len: u64,
+        trailer_len: u16,
+    ) -> Result<SegmentId> {
+        let id = self.push_span(kind, name, header_len, payload_len, trailer_len)?;
+        if matches!(
+            kind,
+            SegmentKind::Xmp | SegmentKind::Jumbf | SegmentKind::Exif
+        ) {
+            self.entity_of_segments(kind, &[id])?;
+        }
+        Ok(id)
+    }
+
+    /// Append one unnamed segment of [`Other`](SegmentKind::Other) kind for
+    /// whatever is left of the asset, if anything: trailing data the container does
+    /// not account for.
+    pub fn push_tail(&mut self) -> Result<()> {
+        if self.cursor < self.total_size {
+            self.push_span(
+                SegmentKind::Other,
+                Name::None,
+                0,
+                self.total_size - self.cursor,
+                0,
+            )?;
+        }
+        Ok(())
     }
 
     /// Segment already pushed.
@@ -987,7 +1017,7 @@ impl StructureBuilder {
         self.entity_described(kind, label, media_type, None, parts)
     }
 
-    fn entity_described(
+    pub(crate) fn entity_described(
         &mut self,
         kind: SegmentKind,
         label: Option<Cow<'static, str>>,
@@ -1020,10 +1050,10 @@ impl StructureBuilder {
     fn make_part(&self, segment: SegmentId, range: ByteRange) -> Result<Part> {
         let seg = self.segment(segment)?;
         if !seg.extent().contains(&range) {
-            return Err(Error::InvalidSegment {
-                offset: range.offset(),
-                reason: "entity part lies outside its segment".into(),
-            });
+            return Err(Error::invalid_segment(
+                range.offset(),
+                "entity part lies outside its segment",
+            ));
         }
         Ok(Part { range, segment })
     }
@@ -1031,13 +1061,13 @@ impl StructureBuilder {
     /// Finish. The segments must cover the whole asset.
     pub fn finish(self) -> Result<Structure> {
         if self.cursor != self.total_size {
-            return Err(Error::InvalidSegment {
-                offset: self.cursor,
-                reason: format!(
+            return Err(Error::invalid_segment(
+                self.cursor,
+                format!(
                     "segments cover {} of {} bytes",
                     self.cursor, self.total_size
                 ),
-            });
+            ));
         }
         if self
             .sub_starts
@@ -1118,7 +1148,7 @@ mod tests {
             &self,
             _: &Structure,
             _: &mut dyn ReadSeek,
-            _: &mut dyn ReadWriteSeek,
+            _: &mut dyn Write,
             _: &crate::Updates,
             _: &mut dyn crate::Sink,
         ) -> Result<Structure> {

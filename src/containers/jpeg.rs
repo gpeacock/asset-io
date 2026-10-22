@@ -54,16 +54,16 @@
 use crate::error::{Error, Result};
 use crate::handler::{ContainerHandler, FormatSpec, ReadSeek};
 use crate::plan::WritePlan;
+use crate::plan_builder::PlanBuilder;
 use crate::segment::SegmentKind;
 use crate::segment::{Name, Role, Segment};
-use crate::sink::Sink;
 use crate::structure::{Part, SegmentId, Structure, StructureBuilder};
-use crate::task::{BoxFuture, Io, Task};
+use crate::task::{BoxFuture, Io};
 use crate::ByteRange;
-use crate::{MetadataUpdate, Updates};
+use crate::{Existing, MetadataSlot, Updates};
 use std::borrow::Cow;
-use std::io::{Read, Seek, SeekFrom, Write};
-use std::sync::{Arc, OnceLock};
+use std::io::{Read, Seek, SeekFrom};
+use std::sync::Arc;
 
 const SOI: u8 = 0xD8;
 const EOI: u8 = 0xD9;
@@ -130,8 +130,7 @@ pub struct JpegHandler;
 
 /// The shared JPEG handler.
 pub fn handler() -> Arc<dyn ContainerHandler> {
-    static H: OnceLock<Arc<JpegHandler>> = OnceLock::new();
-    H.get_or_init(|| Arc::new(JpegHandler)).clone()
+    Arc::new(JpegHandler)
 }
 
 /// The JPEG container's [`ContainerHandler::id`].
@@ -277,7 +276,7 @@ async fn parse_with(handler: Arc<dyn ContainerHandler>, mut io: Io) -> Result<St
         if multi {
             b.begin_subasset(None)?;
         }
-        b.push_span(SegmentKind::Other, Name::None, 0, total - offset, 0)?;
+        b.push_tail()?;
     }
     b.finish()
 }
@@ -328,10 +327,10 @@ async fn scan_image(
         // A marker is FF xx, optionally preceded by FF fill bytes.
         let first = r.u8().await?;
         if first != 0xFF {
-            return Err(Error::InvalidSegment {
+            return Err(Error::invalid_segment(
                 offset,
-                reason: format!("expected marker prefix 0xFF, found 0x{first:02X}"),
-            });
+                format!("expected marker prefix 0xFF, found 0x{first:02X}"),
+            ));
         }
         let mut fill = 0u64;
         let marker = loop {
@@ -343,10 +342,10 @@ async fn scan_image(
             }
         };
         if marker == 0x00 {
-            return Err(Error::InvalidSegment {
+            return Err(Error::invalid_segment(
                 offset,
-                reason: "stuffed byte outside entropy-coded data".into(),
-            });
+                "stuffed byte outside entropy-coded data",
+            ));
         }
         if fill > 0 {
             b.push_span(SegmentKind::Other, Name::None, 0, fill, 0)?;
@@ -369,17 +368,14 @@ async fn scan_image(
 
         let len = r.u16_be().await? as u64;
         if len < 2 {
-            return Err(Error::InvalidSegment {
-                offset: mstart,
-                reason: "marker length < 2".into(),
-            });
+            return Err(Error::invalid_segment(mstart, "marker length < 2"));
         }
         let seg_total = 2 + len;
         if mstart + seg_total > total {
-            return Err(Error::InvalidSegment {
-                offset: mstart,
-                reason: "segment extends past end of file".into(),
-            });
+            return Err(Error::invalid_segment(
+                mstart,
+                "segment extends past end of file",
+            ));
         }
         let data_len = len - 2;
 
@@ -677,7 +673,7 @@ fn find_mpf<R: Read + Seek>(
     rd: &mut R,
     primary_end: usize,
 ) -> Result<Option<SegmentId>> {
-    let found = Task::new(src.total_size(), |mut io| async move {
+    let found = crate::task::Task::new(src.total_size(), |mut io| async move {
         find_all_mpf(src, &mut io, primary_end).await
     })
     .run(rd)?;
@@ -694,9 +690,9 @@ fn find_mpf<R: Read + Seek>(
 async fn fix_mpf(
     src: &Structure,
     io: &mut Io,
-    op_of_src: &[Option<usize>],
+    dest_of: &[Option<SegmentId>],
     dest: &Structure,
-) -> Result<Option<(usize, Vec<u8>)>> {
+) -> Result<Option<(SegmentId, Vec<u8>)>> {
     let subs = src.subassets();
     let primary_end = subs[0].segments().end;
     if subs.len() < 2 {
@@ -706,11 +702,11 @@ async fn fix_mpf(
     let Some(&id) = blocks.first() else {
         return Ok(None);
     };
-    let Some(op) = op_of_src[id.index()] else {
+    let Some(dest_id) = dest_of[id.index()] else {
         return Ok(None);
     };
     let old_base = src.segment(id)?.payload().offset();
-    let new_base = dest.segments()[op].payload().offset();
+    let new_base = dest.segment(dest_id)?.payload().offset();
     let images: Vec<usize> = (0..subs.len())
         .filter(|&k| subs[k].media_type().is_some())
         .collect();
@@ -796,7 +792,7 @@ async fn fix_mpf(
             index.put(&mut payload, at + 4, to_u32(new)?);
         }
     }
-    Ok(Some((op, payload)))
+    Ok(Some((dest_id, payload)))
 }
 
 /// What the entropy-coded data scanner found.
@@ -925,19 +921,11 @@ pub(crate) fn subdivide<R: Read + Seek>(
         let (boundary, next) = match scan.next(src)? {
             Event::Rst(at, m) => (at, Some(m)),
             Event::Eof => (end, None),
-            Event::Marker(at) => {
-                return Err(Error::InvalidSegment {
-                    offset: at,
-                    reason: "marker inside scan".into(),
-                })
-            }
+            Event::Marker(at) => return Err(Error::invalid_segment(at, "marker inside scan")),
         };
         let len = boundary
             .checked_sub(start)
-            .ok_or_else(|| Error::InvalidSegment {
-                offset: start,
-                reason: "restart marker before scan start".into(),
-            })?;
+            .ok_or_else(|| Error::invalid_segment(start, "restart marker before scan start"))?;
         emit(&Segment::new(
             ByteRange::new(start, len)?,
             header_len,
@@ -963,8 +951,6 @@ pub(crate) fn subdivide<R: Read + Seek>(
 enum Op<'a> {
     /// Copy a source segment unchanged.
     Copy(SegmentId),
-    /// Copy a source segment with its payload replaced by one of the same length.
-    Patched { id: SegmentId, payload: Vec<u8> },
     /// Standard XMP in one APP1.
     XmpStd { payload: &'a [u8] },
     /// Stub main XMP pointing at extended XMP.
@@ -984,76 +970,12 @@ enum Op<'a> {
     },
 }
 
-struct Dims {
-    kind: SegmentKind,
-    name: Name,
-    header_len: u32,
-    payload_len: u64,
-    trailer_len: u16,
-    subdivides: bool,
-}
-
-/// Value for a marker's length field, or an error if it does not fit.
-fn len_field(header_len: u32, payload_len: u64) -> Result<()> {
-    // The field counts itself and everything after the 2-byte marker.
-    let v = (header_len as u64 - 2).saturating_add(payload_len);
-    if v > MAX_LEN_FIELD {
-        return Err(Error::LimitExceeded {
-            what: "JPEG segment length",
-            limit: MAX_LEN_FIELD,
-        });
-    }
-    Ok(())
-}
-
-impl Op<'_> {
-    fn dims(&self, src: &Structure) -> Result<Dims> {
-        let (kind, marker, header_len, payload_len) = match self {
-            Op::Copy(id) | Op::Patched { id, .. } => {
-                let s = src.segment(*id)?;
-                return Ok(Dims {
-                    kind: s.kind(),
-                    name: s.name(),
-                    header_len: s.header().len() as u32,
-                    payload_len: s.payload().len(),
-                    trailer_len: s.trailer().len() as u16,
-                    subdivides: s.subdivides(),
-                });
-            }
-            Op::XmpStd { payload } => (
-                SegmentKind::Xmp,
-                APP1,
-                4 + XMP_SIG_LEN as u32,
-                payload.len() as u64,
-            ),
-            Op::XmpMain { payload } => (
-                SegmentKind::Xmp,
-                APP1,
-                4 + XMP_SIG_LEN as u32,
-                payload.len() as u64,
-            ),
-            Op::XmpExt { payload, .. } => (
-                SegmentKind::Xmp,
-                APP1,
-                4 + EXT_PREFIX_LEN as u32,
-                payload.len() as u64,
-            ),
-            Op::Jumbf { seq, payload, .. } => (
-                SegmentKind::Jumbf,
-                APP11,
-                if *seq > 1 { 4 + 16 } else { 4 + 8 },
-                payload.len() as u64,
-            ),
-        };
-        len_field(header_len, payload_len)?;
-        Ok(Dims {
-            kind,
-            name: Name::Marker(marker),
-            header_len,
-            payload_len,
-            trailer_len: 0,
-            subdivides: false,
-        })
+/// What a new segment is: its kind and marker.
+fn new_kind(op: &Op<'_>) -> Result<(SegmentKind, u8)> {
+    match op {
+        Op::Copy(_) => Err(Error::InvalidFormat("not a new segment".into())),
+        Op::XmpStd { .. } | Op::XmpMain { .. } | Op::XmpExt { .. } => Ok((SegmentKind::Xmp, APP1)),
+        Op::Jumbf { .. } => Ok((SegmentKind::Jumbf, APP11)),
     }
 }
 
@@ -1139,25 +1061,14 @@ fn is_insertion_point(seg: &Segment) -> bool {
 
 /// Decide what the output contains and describe how to write it.
 async fn plan<'a>(src: &Structure, io: &mut Io, updates: &'a Updates) -> Result<WritePlan<'a>> {
-    let (ops, dest) = plan_ops(src, io, updates).await?;
-    let mut plan = WritePlan::new(dest);
-    for (i, op) in ops.into_iter().enumerate() {
-        let dest = SegmentId::from_index(i)?;
-        match op {
-            Op::Copy(sid) => {
-                plan.copy_segment(dest, src.segment(sid)?);
-            }
-            Op::Patched { id, payload } => {
-                let mut payload = Some(payload);
-                for (role, range) in src.segment(id)?.regions() {
-                    if let (Role::Payload, Some(p)) = (role, payload.as_mut()) {
-                        plan.put(dest, role, std::mem::take(p));
-                    } else {
-                        plan.copy(dest, role, range);
-                    }
-                }
-            }
+    let (ops, groups) = plan_ops(src, updates)?;
+    let mut b = PlanBuilder::new(src);
+    let mut ids = Vec::with_capacity(ops.len());
+    for op in ops {
+        ids.push(match op {
+            Op::Copy(sid) => b.copy_segment(sid)?,
             new => {
+                let (kind, marker) = new_kind(&new)?;
                 let mut hdr = [0u8; MAX_HEADER];
                 let (n, _) = encode_new(&new, &mut hdr)?;
                 let payload: Cow<'a, [u8]> = match new {
@@ -1165,32 +1076,42 @@ async fn plan<'a>(src: &Structure, io: &mut Io, updates: &'a Updates) -> Result<
                     | Op::XmpExt { payload, .. }
                     | Op::Jumbf { payload, .. } => Cow::Borrowed(payload),
                     Op::XmpMain { payload } => Cow::Owned(payload),
-                    Op::Copy(_) | Op::Patched { .. } => {
-                        return Err(Error::InvalidFormat("not a new segment".into()))
-                    }
+                    Op::Copy(_) => return Err(Error::InvalidFormat("not a new segment".into())),
                 };
-                plan.put(dest, Role::Header, hdr[..n].to_vec());
-                plan.put(dest, Role::Payload, payload);
+                b.put_segment(
+                    kind,
+                    Name::Marker(marker),
+                    hdr[..n].to_vec(),
+                    payload,
+                    &[][..],
+                )?
             }
+        });
+    }
+    // New entities first, then those of kept segments, as they were.
+    for (kind, ty, idx) in &groups {
+        let group: Vec<SegmentId> = idx.iter().map(|&i| ids[i]).collect();
+        b.entity_typed(*kind, *ty, &group)?;
+    }
+    b.carry_entities(|_| true);
+    let dest_of = (src.subassets().len() > 1).then(|| b.dest_map().to_vec());
+    let mut plan = b.finish()?;
+    if let Some(dest_of) = dest_of {
+        if let Some((id, payload)) = fix_mpf(src, io, &dest_of, plan.structure()).await? {
+            plan.replace(id, Role::Payload, payload)?;
         }
     }
     Ok(plan)
 }
 
-/// Decide what the output contains. Single source of truth for the destination
-/// structure and the bytes written.
-async fn plan_ops<'a>(
-    src: &Structure,
-    io: &mut Io,
-    updates: &'a Updates,
-) -> Result<(Vec<Op<'a>>, Structure)> {
+/// Decide what the output contains: the ops, and the entities made of new ones.
+fn plan_ops<'a>(src: &Structure, updates: &'a Updates) -> Result<(Vec<Op<'a>>, Groups)> {
     let n = src.segments().len();
     let primary_end = src.subassets()[0].segments().end;
     let mut ops: Vec<Op<'a>> = Vec::with_capacity(n + 2);
     let mut groups: Groups = Vec::new();
-    let mut op_of_src: Vec<Option<usize>> = vec![None; n];
-    let mut xmp_done = false;
-    let mut jumbf_done = false;
+    let mut xmp = MetadataSlot::new(updates.xmp());
+    let mut jumbf = MetadataSlot::new(updates.jumbf());
     let mut inserted = false;
 
     // The segments of the JUMBF the update applies to.
@@ -1206,122 +1127,34 @@ async fn plan_ops<'a>(
     for (i, seg) in src.segments().iter().enumerate() {
         let id = SegmentId::from_index(i)?;
         match seg.kind() {
-            SegmentKind::Xmp => match &updates.xmp {
-                MetadataUpdate::Keep => {
-                    op_of_src[i] = Some(ops.len());
-                    ops.push(Op::Copy(id));
-                    xmp_done = true;
-                }
-                MetadataUpdate::Set(d) if !xmp_done => {
-                    push_new_xmp(&mut ops, &mut groups, d)?;
-                    xmp_done = true;
-                }
+            SegmentKind::Xmp => match xmp.existing() {
+                Existing::Keep => ops.push(Op::Copy(id)),
+                Existing::Replace(d) => push_new_xmp(&mut ops, &mut groups, d)?,
                 _ => {}
             },
             // JUMBF the update does not target is kept: other types, and all of it
             // when nothing is to change.
-            SegmentKind::Jumbf => match &updates.jumbf {
-                MetadataUpdate::Set(d) if targeted[i] && !jumbf_done => {
-                    push_new_jumbf(&mut ops, &mut groups, d)?;
-                    jumbf_done = true;
-                }
-                MetadataUpdate::Set(_) | MetadataUpdate::Remove if targeted[i] => {}
-                _ => {
-                    op_of_src[i] = Some(ops.len());
-                    ops.push(Op::Copy(id));
-                }
+            SegmentKind::Jumbf if targeted[i] => match jumbf.existing() {
+                Existing::Keep => ops.push(Op::Copy(id)),
+                Existing::Replace(d) => push_new_jumbf(&mut ops, &mut groups, d)?,
+                _ => {}
             },
+            SegmentKind::Jumbf => ops.push(Op::Copy(id)),
             _ => {
                 if !inserted && i < primary_end && is_insertion_point(seg) {
                     inserted = true;
-                    if !xmp_done {
-                        if let MetadataUpdate::Set(d) = &updates.xmp {
-                            push_new_xmp(&mut ops, &mut groups, d)?;
-                            xmp_done = true;
-                        }
+                    if let Some(d) = xmp.pending() {
+                        push_new_xmp(&mut ops, &mut groups, d)?;
                     }
-                    if !jumbf_done {
-                        if let MetadataUpdate::Set(d) = &updates.jumbf {
-                            push_new_jumbf(&mut ops, &mut groups, d)?;
-                            jumbf_done = true;
-                        }
+                    if let Some(d) = jumbf.pending() {
+                        push_new_jumbf(&mut ops, &mut groups, d)?;
                     }
                 }
-                op_of_src[i] = Some(ops.len());
                 ops.push(Op::Copy(id));
             }
         }
     }
-
-    // Entities of kept segments carry over as they were.
-    for (kind, entity) in src.entity_list() {
-        let idx: Option<Vec<usize>> = entity
-            .parts()
-            .map(|p| op_of_src[p.segment().index()])
-            .collect();
-        if let Some(idx) = idx {
-            groups.push((kind, entity.jumbf_type(), idx));
-        }
-    }
-
-    // Destination size, then destination structure.
-    let mut total = 0u64;
-    let mut dims = Vec::with_capacity(ops.len());
-    for op in &ops {
-        let d = op.dims(src)?;
-        total = (d.header_len as u64)
-            .checked_add(d.payload_len)
-            .and_then(|v| v.checked_add(d.trailer_len as u64))
-            .and_then(|v| total.checked_add(v))
-            .ok_or(Error::LimitExceeded {
-                what: "output size",
-                limit: u64::MAX,
-            })?;
-        dims.push(d);
-    }
-    let mut b = StructureBuilder::new(src.handler().clone(), src.media_type().to_owned(), total);
-    // Where the sub-assets after the primary start in the output.
-    let mut starts = Vec::new();
-    for sub in &src.subassets()[1..] {
-        let op = op_of_src[sub.segments().start]
-            .ok_or_else(|| Error::InvalidFormat("sub-asset start was dropped".into()))?;
-        starts.push((op, sub.media_type().map(|m| m.to_owned().into())));
-    }
-    let mut starts = starts.into_iter().peekable();
-    // Where the data beyond the first image's structure starts in the output.
-    let trailing_op = match src.box_count() {
-        k if k < n => Some(
-            op_of_src[k].ok_or_else(|| Error::InvalidFormat("trailing data was dropped".into()))?,
-        ),
-        _ => None,
-    };
-    for (i, d) in dims.iter().enumerate() {
-        if trailing_op == Some(i) {
-            b.end_boxes()?;
-        }
-        if let Some((_, media)) = starts.next_if(|(op, _)| *op == i) {
-            b.begin_subasset(media)?;
-        }
-        let id = b.push_span(d.kind, d.name, d.header_len, d.payload_len, d.trailer_len)?;
-        if d.subdivides {
-            b.mark_subdivides(id)?;
-        }
-    }
-    for (kind, ty, idx) in &groups {
-        let mut ids = Vec::with_capacity(idx.len());
-        for &i in idx {
-            ids.push(SegmentId::from_index(i)?);
-        }
-        b.entity_of_segments_typed(*kind, *ty, &ids)?;
-    }
-    let dest = b.finish()?;
-    if let Some((op, payload)) = fix_mpf(src, io, &op_of_src, &dest).await? {
-        let Op::Copy(id) = ops[op] else {
-            return Err(Error::InvalidFormat("MPF block was not kept".into()));
-        };
-        ops[op] = Op::Patched { id, payload };
-    }
-    Ok((ops, dest))
+    Ok((ops, groups))
 }
 
 fn put_marker_len(hdr: &mut [u8], marker: u8, header_len: u32, payload_len: u64) -> Result<()> {
@@ -1339,9 +1172,7 @@ fn put_marker_len(hdr: &mut [u8], marker: u8, header_len: u32, payload_len: u64)
 /// Build the header of a new segment in `hdr`; returns its length and the payload.
 fn encode_new<'o>(op: &'o Op<'_>, hdr: &mut [u8; MAX_HEADER]) -> Result<(usize, &'o [u8])> {
     let (n, payload): (usize, &[u8]) = match op {
-        Op::Copy(_) | Op::Patched { .. } => {
-            return Err(Error::InvalidFormat("not a new segment".into()))
-        }
+        Op::Copy(_) => return Err(Error::InvalidFormat("not a new segment".into())),
         Op::XmpStd { payload } => {
             let h = 4 + XMP_SIG_LEN;
             put_marker_len(&mut hdr[..], APP1, h as u32, payload.len() as u64)?;
@@ -1410,31 +1241,6 @@ fn compose(kind: SegmentKind, data: &[u8]) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-/// Write `src` with `updates` applied, delivering every output byte to `sink`.
-///
-/// Unchanged segments are copied byte for byte. `out` is written from its
-/// current start; offsets reported to the sink are relative to the first byte
-/// written. Returns the structure of the output.
-pub fn write<R, W, S>(
-    src_structure: &Structure,
-    src: &mut R,
-    out: &mut W,
-    updates: &Updates,
-    sink: &mut S,
-) -> Result<Structure>
-where
-    R: Read + Seek,
-    W: Write + ?Sized,
-    S: Sink + ?Sized,
-{
-    let plan = Task::new(src_structure.total_size(), |mut io| async move {
-        plan(src_structure, &mut io, updates).await
-    })
-    .run(&mut *src)?;
-    plan.execute(src, out, sink)?;
-    Ok(plan.into_structure())
-}
-
 // ----------------------------------------------------------------------------
 // Reading
 // ----------------------------------------------------------------------------
@@ -1467,10 +1273,10 @@ pub fn read_xmp<R: Read + Seek>(s: &Structure, src: &mut R) -> Result<Option<Vec
     for p in &parts[1..] {
         let header = s.segment(p.segment())?.header();
         if header.len() < 40 {
-            return Err(Error::InvalidSegment {
-                offset: header.offset(),
-                reason: "extended XMP header too short".into(),
-            });
+            return Err(Error::invalid_segment(
+                header.offset(),
+                "extended XMP header too short",
+            ));
         }
         let tail = s.read_range(src, header.sub(header.len() - 40, 40)?)?;
         let mut g = [0u8; 32];
@@ -1506,10 +1312,10 @@ pub fn read_xmp<R: Read + Seek>(s: &Structure, src: &mut R) -> Result<Option<Vec
     for (range, off) in chunks {
         let end = off as u64 + range.len();
         if end > total as u64 {
-            return Err(Error::InvalidSegment {
-                offset: range.offset(),
-                reason: "extended XMP chunk outside declared length".into(),
-            });
+            return Err(Error::invalid_segment(
+                range.offset(),
+                "extended XMP chunk outside declared length",
+            ));
         }
         let data = s.read_range(src, range)?;
         out[off as usize..end as usize].copy_from_slice(&data);
@@ -1520,7 +1326,9 @@ pub fn read_xmp<R: Read + Seek>(s: &Structure, src: &mut R) -> Result<Option<Vec
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sink::Sink;
     use crate::sink::{Chunk, NullSink};
+    use crate::testing::{write, Conformance};
     use sha2::{Digest, Sha256};
     use std::io::Cursor;
 
@@ -1593,15 +1401,9 @@ mod tests {
     }
 
     #[test]
-    fn parse_tiles_file() {
+    fn a_scan_is_one_image_data_segment() {
         let j = sample_jpeg();
-        let s = parse(&mut Cursor::new(j.clone())).unwrap();
-        let mut next = 0;
-        for r in s.regions() {
-            assert_eq!(r.range.offset(), next);
-            next = r.range.end();
-        }
-        assert_eq!(next, j.len() as u64);
+        let s = parse(&mut Cursor::new(j)).unwrap();
         let scan = s
             .segments()
             .iter()
@@ -1611,24 +1413,34 @@ mod tests {
     }
 
     #[test]
-    fn keep_is_byte_identical_including_repeated_markers() {
-        let j = sample_jpeg();
-        let (out, _) = do_write(&j, &Updates::new());
-        assert_eq!(out, j);
-    }
+    fn conforms() {
+        let c = Conformance::new(handler()).jumbf(Some(fake_jumbf(70_000)));
+        c.check("sample", &sample_jpeg());
+        c.check("minimal", &[0xFF, SOI, 0xFF, EOI]);
 
-    #[test]
-    fn fill_bytes_and_trailing_data_round_trip() {
-        let mut j = vec![0xFF, SOI];
-        j.extend(marker(0xE0, b"JFIF\0"));
-        j.push(0xFF); // fill byte before the next marker
-        j.extend(marker(0xDB, &[0u8; 65]));
-        j.extend_from_slice(&[0xFF, EOI]);
-        j.extend_from_slice(b"trailing");
-        let s = parse(&mut Cursor::new(j.clone())).unwrap();
-        assert_eq!(s.total_size(), j.len() as u64);
-        let (out, _) = do_write(&j, &Updates::new());
-        assert_eq!(out, j);
+        let mut fill = vec![0xFF, SOI];
+        fill.extend(marker(0xE0, b"JFIF\0"));
+        fill.push(0xFF); // fill byte before the next marker
+        fill.extend(marker(0xDB, &[0u8; 65]));
+        fill.extend_from_slice(&[0xFF, EOI]);
+        fill.extend_from_slice(b"trailing");
+        c.check("fill bytes and trailing data", &fill);
+
+        c.check(
+            "multi-picture",
+            &mpf_file(&second_image(), b"tail", 0, false),
+        );
+        c.check(
+            "multi-picture, little-endian",
+            &mpf_file(&second_image(), b"", 0, true),
+        );
+
+        // Too big for one APP1: standard XMP stub plus extended chunks.
+        let big = vec![b'x'; 100_000];
+        Conformance::new(handler())
+            .xmp(Some(big))
+            .mutations(false)
+            .check("extended xmp", &sample_jpeg());
     }
 
     #[test]
@@ -2108,24 +1920,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn sink_sees_every_byte_once_in_order() {
-        let j = sample_jpeg();
-        let s = parse(&mut Cursor::new(j.clone())).unwrap();
-        let mut seen = Vec::new();
-        let mut next = 0u64;
-        let mut sink = |c: Chunk<'_>| -> Result<()> {
-            assert_eq!(c.offset, next);
-            next += c.data.len() as u64;
-            seen.extend_from_slice(c.data);
-            Ok(())
-        };
-        let updates = Updates::new().set_jumbf(fake_jumbf(150_000));
-        let mut out = Cursor::new(Vec::new());
-        write(&s, &mut Cursor::new(j), &mut out, &updates, &mut sink).unwrap();
-        assert_eq!(seen, out.into_inner());
-    }
-
     /// The case that motivated the redesign: every part's payload is excluded,
     /// every part's header is hashed. Three independent routes must agree.
     #[test]
@@ -2454,14 +2248,6 @@ mod tests {
         assert_eq!(subs[2].media_type(), None);
         assert_eq!(subs[2].range().end(), f.len() as u64);
         assert_eq!(subs[1].range().end(), subs[2].range().offset());
-    }
-
-    #[test]
-    fn keeping_a_multi_picture_file_is_byte_identical() {
-        let f = mpf_file(&second_image(), b"tail", 0, false);
-        let (out, dest) = do_write(&f, &Updates::new());
-        assert_eq!(out, f);
-        assert_eq!(dest.subassets().len(), 3);
     }
 
     #[test]

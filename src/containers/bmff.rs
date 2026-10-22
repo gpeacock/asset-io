@@ -71,16 +71,17 @@ use super::heif_items;
 use crate::error::{Error, Result};
 use crate::handler::{ContainerHandler, FormatSpec, ReadSeek};
 use crate::plan::{OffsetMap, Relocate, WritePlan};
+use crate::plan_builder::PlanBuilder;
 use crate::range::ByteRange;
 use crate::segment::SegmentKind;
 use crate::segment::{Name, Role, Segment, MAX_SEGMENT_SIZE};
 use crate::structure::{Entity, SegmentId, Structure, StructureBuilder};
 use crate::task::{block_on, BoxFuture, Io, Task};
 use crate::walk::Node;
-use crate::{MetadataUpdate, Updates};
+use crate::{Existing, MetadataSlot, MetadataUpdate, Updates};
 use std::borrow::Cow;
 use std::io::{Read, Seek, SeekFrom};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 /// C2PA content provenance box type, `D8FEC3D6-1B0E-483C-9297-5828877EC481`.
 pub const C2PA_UUID: [u8; 16] = [
@@ -199,8 +200,7 @@ pub struct BmffHandler;
 
 /// The shared BMFF handler.
 pub fn handler() -> Arc<dyn ContainerHandler> {
-    static H: OnceLock<Arc<BmffHandler>> = OnceLock::new();
-    H.get_or_init(|| Arc::new(BmffHandler)).clone()
+    Arc::new(BmffHandler)
 }
 
 /// The ISO BMFF container's [`ContainerHandler::id`].
@@ -239,8 +239,8 @@ impl ContainerHandler for BmffHandler {
         updates: &'a Updates,
     ) -> BoxFuture<'f, Result<WritePlan<'a>>> {
         Box::pin(async move {
-            let (ops, structure, map) = plan(src_structure, &mut io, updates).await?;
-            steps(src_structure, &mut io, ops, structure, map).await
+            let (ops, labels, map) = plan(src_structure, &mut io, updates).await?;
+            assemble(src_structure, &mut io, ops, &labels, map, true).await
         })
     }
 
@@ -253,8 +253,9 @@ impl ContainerHandler for BmffHandler {
         updates: &Updates,
     ) -> Result<Structure> {
         Task::new(src_structure.total_size(), |mut io| async move {
-            let (_, structure, _) = plan(src_structure, &mut io, updates).await?;
-            Ok(structure)
+            let (ops, labels, map) = plan(src_structure, &mut io, updates).await?;
+            let plan = assemble(src_structure, &mut io, ops, &labels, map, false).await?;
+            Ok(plan.into_structure())
         })
         .run(src)
     }
@@ -303,13 +304,6 @@ struct BoxHeader {
     ty: [u8; 4],
 }
 
-fn bad(offset: u64, reason: &str) -> Error {
-    Error::InvalidSegment {
-        offset,
-        reason: reason.into(),
-    }
-}
-
 /// Read the box header at `at`, inside a region ending at `end` (`at < end`).
 ///
 /// - `Ok(None)`: fewer than 8 bytes remain; some files carry trailing bytes.
@@ -329,7 +323,7 @@ async fn read_header(io: &mut Io, at: u64, end: u64) -> Result<Option<BoxHeader>
         0 => (remaining, 8u32),
         1 => {
             if remaining < 16 {
-                return Err(bad(at, "extended box size truncated"));
+                return Err(Error::invalid_segment(at, "extended box size truncated"));
             }
             let mut l = [0u8; 8];
             io.read_at(at + 8, &mut l).await?;
@@ -338,13 +332,16 @@ async fn read_header(io: &mut Io, at: u64, end: u64) -> Result<Option<BoxHeader>
         n => (n as u64, 8u32),
     };
     if size < header_len as u64 {
-        return Err(bad(at, "box size smaller than its header"));
+        return Err(Error::invalid_segment(
+            at,
+            "box size smaller than its header",
+        ));
     }
     if size > remaining {
         if ty == MDAT {
             size = remaining;
         } else {
-            return Err(bad(at, "box extends past its container"));
+            return Err(Error::invalid_segment(at, "box extends past its container"));
         }
     }
     Ok(Some(BoxHeader {
@@ -413,7 +410,10 @@ where
 
         if h.ty == UUID {
             if box_end - content < 16 {
-                return Err(bad(at, "uuid box too small for its type"));
+                return Err(Error::invalid_segment(
+                    at,
+                    "uuid box too small for its type",
+                ));
             }
             let mut u = [0u8; 16];
             io.read_at(content, &mut u).await?;
@@ -428,7 +428,10 @@ where
         let (mut version, mut flags) = (None, None);
         if full {
             if box_end - content < 4 {
-                return Err(bad(at, "FullBox too small for version and flags"));
+                return Err(Error::invalid_segment(
+                    at,
+                    "FullBox too small for version and flags",
+                ));
             }
             let mut vf = [0u8; 4];
             io.read_at(content, &mut vf).await?;
@@ -533,7 +536,10 @@ async fn classify(io: &mut Io, at: u64, h: &BoxHeader) -> Result<Classified> {
     let box_end = at + h.size;
     let body = at + h.header_len as u64;
     if box_end - body < 16 {
-        return Err(bad(at, "uuid box too small for its type"));
+        return Err(Error::invalid_segment(
+            at,
+            "uuid box too small for its type",
+        ));
     }
     let mut u = [0u8; 16];
     io.read_at(body, &mut u).await?;
@@ -556,16 +562,16 @@ async fn classify(io: &mut Io, at: u64, h: &BoxHeader) -> Result<Classified> {
     // FullBox version and flags, then the NUL-terminated purpose.
     let purpose_at = after_uuid + 4;
     if purpose_at >= box_end {
-        return Err(bad(at, "C2PA box has no purpose"));
+        return Err(Error::invalid_segment(at, "C2PA box has no purpose"));
     }
     let n = (box_end - purpose_at).min(MAX_PURPOSE_LEN as u64 + 1) as usize;
     let mut buf = [0u8; MAX_PURPOSE_LEN + 1];
     io.read_at(purpose_at, &mut buf[..n]).await?;
-    let nul = buf[..n]
-        .iter()
-        .position(|&b| b == 0)
-        .ok_or_else(|| bad(at, "C2PA box purpose is unterminated or too long"))?;
-    let label = purpose_label(&buf[..nul]).ok_or_else(|| bad(at, "unknown C2PA box purpose"))?;
+    let nul = buf[..n].iter().position(|&b| b == 0).ok_or_else(|| {
+        Error::invalid_segment(at, "C2PA box purpose is unterminated or too long")
+    })?;
+    let label = purpose_label(&buf[..nul])
+        .ok_or_else(|| Error::invalid_segment(at, "unknown C2PA box purpose"))?;
 
     let mut header_len = (purpose_at - at) + nul as u64 + 1;
     let kind = if label == MERKLE {
@@ -574,13 +580,17 @@ async fn classify(io: &mut Io, at: u64, h: &BoxHeader) -> Result<Classified> {
         // 8-byte offset of the first merkle box, then the manifest store.
         header_len += 8;
         if at + header_len > box_end {
-            return Err(bad(at, "C2PA box too small for its merkle offset"));
+            return Err(Error::invalid_segment(
+                at,
+                "C2PA box too small for its merkle offset",
+            ));
         }
         SegmentKind::Jumbf
     };
     Ok(Classified {
         kind,
-        header_len: u32::try_from(header_len).map_err(|_| bad(at, "header too long"))?,
+        header_len: u32::try_from(header_len)
+            .map_err(|_| Error::invalid_segment(at, "header too long"))?,
         entity: Some(EntityKind::C2pa(label)),
     })
 }
@@ -635,7 +645,7 @@ async fn parse_with(handler: Arc<dyn ContainerHandler>, mut io: Io) -> Result<St
     while at < total {
         let Some(h) = read_header(io, at, total).await? else {
             // Fewer than 8 bytes cannot be a box: keep them as unnamed trailing data.
-            b.push_span(SegmentKind::Other, Name::None, 0, total - at, 0)?;
+            b.push_tail()?;
             break;
         };
         let c = classify(io, at, &h).await?;
@@ -859,7 +869,10 @@ async fn collect_patches(io: &mut Io, seg: &Segment, map: &OffsetMap) -> Result<
             });
         }
         let (Some(version), Some(flags)) = (n.version, n.flags) else {
-            return Err(bad(n.extent.offset(), "offset table is not a FullBox"));
+            return Err(Error::invalid_segment(
+                n.extent.offset(),
+                "offset table is not a FullBox",
+            ));
         };
         cands.push(Candidate {
             table,
@@ -881,7 +894,10 @@ async fn collect_patches(io: &mut Io, seg: &Segment, map: &OffsetMap) -> Result<
     patches.sort_by_key(Patch::start);
     for w in patches.windows(2) {
         if w[0].start().saturating_add(w[0].len()) > w[1].start() {
-            return Err(bad(w[1].start(), "overlapping offset tables"));
+            return Err(Error::invalid_segment(
+                w[1].start(),
+                "overlapping offset tables",
+            ));
         }
     }
     Ok(patches)
@@ -900,7 +916,7 @@ fn table(
         .checked_mul(stride as u64)
         .and_then(|l| start.checked_add(l))
         .filter(|&e| e <= end)
-        .ok_or_else(|| bad(start, "offset table extends past its box"))?;
+        .ok_or_else(|| Error::invalid_segment(start, "offset table extends past its box"))?;
     debug_assert!(len >= start);
     Ok(Some(Patch::Table {
         start,
@@ -914,7 +930,10 @@ fn table(
 async fn build_patch(io: &mut Io, c: &Candidate, map: &OffsetMap) -> Result<Option<Patch>> {
     let room = |need: u64| -> Result<()> {
         if c.end.saturating_sub(c.content) < need {
-            return Err(bad(c.content, "offset table box is truncated"));
+            return Err(Error::invalid_segment(
+                c.content,
+                "offset table box is truncated",
+            ));
         }
         Ok(())
     };
@@ -994,7 +1013,7 @@ fn adjust_iloc(b: &mut [u8], version: u8, map: &OffsetMap) -> Result<()> {
         pos = s
             .checked_add(n)
             .filter(|&e| e <= b.len())
-            .ok_or_else(|| bad(0, "iloc box is truncated"))?;
+            .ok_or_else(|| Error::invalid_segment(0, "iloc box is truncated"))?;
         Ok(s)
     };
 
@@ -1110,14 +1129,6 @@ enum Op<'a> {
     },
 }
 
-struct Dims {
-    kind: SegmentKind,
-    name: Name,
-    header_len: u32,
-    payload_len: u64,
-    label: Option<&'static str>,
-}
-
 /// Record that the region ending at `old_end` changed from `old_len` to `new_len`
 /// bytes. Regions at the end of the file move nothing.
 fn note(map: &mut OffsetMap, total: u64, old_end: u64, new_len: u64, old_len: u64) -> Result<()> {
@@ -1173,10 +1184,10 @@ async fn read_entity(src: &Structure, io: &mut Io, entity: &Entity) -> Result<Ve
     for part in entity.parts() {
         let r = part.range();
         if r.end() > src.total_size() {
-            return Err(Error::InvalidSegment {
-                offset: r.offset(),
-                reason: "range outside the asset".into(),
-            });
+            return Err(Error::invalid_segment(
+                r.offset(),
+                "range outside the asset",
+            ));
         }
         if (out.len() as u64).saturating_add(r.len()) > MAX_SEGMENT_SIZE {
             return Err(Error::LimitExceeded {
@@ -1204,7 +1215,7 @@ async fn plan<'a>(
     src: &Structure,
     io: &mut Io,
     updates: &'a Updates,
-) -> Result<(Vec<Op<'a>>, Structure, OffsetMap)> {
+) -> Result<(Vec<Op<'a>>, Vec<Option<&'static str>>, OffsetMap)> {
     let segs = src.segments();
     let mut labels: Vec<Option<&'static str>> = vec![None; segs.len()];
     for (_, e) in src.entity_list() {
@@ -1259,7 +1270,9 @@ async fn plan<'a>(
     let total = src.total_size();
     let mut map = OffsetMap::default();
     let mut ops: Vec<Op<'a>> = Vec::with_capacity(segs.len() + 2);
-    let (mut store_done, mut xmp_done, mut ftyp_seen) = (update_mode, false, false);
+    let mut store = MetadataSlot::new(updates.jumbf());
+    let mut xmp = MetadataSlot::new(updates.xmp());
+    let mut ftyp_seen = false;
 
     for (i, seg) in segs.iter().enumerate() {
         let id = SegmentId::from_index(i)?;
@@ -1286,48 +1299,46 @@ async fn plan<'a>(
                 note(&mut map, total, end, op_len(&op, src)?, old_len)?;
                 ops.push(op);
             }
-            Some(MANIFEST) | Some(ORIGINAL) => match &updates.jumbf {
-                MetadataUpdate::Keep => ops.push(Op::Copy(id)),
-                MetadataUpdate::Remove => note(&mut map, total, end, 0, old_len)?,
-                MetadataUpdate::Set(d) if !store_done => {
+            Some(MANIFEST) | Some(ORIGINAL) => match store.existing() {
+                Existing::Keep => ops.push(Op::Copy(id)),
+                Existing::Replace(d) => {
                     let op = new_c2pa(d)?;
                     note(&mut map, total, end, op_len(&op, src)?, old_len)?;
                     ops.push(op);
-                    store_done = true;
                 }
-                MetadataUpdate::Set(_) => note(&mut map, total, end, 0, old_len)?,
+                _ => note(&mut map, total, end, 0, old_len)?,
             },
             // An update box does not survive a new manifest.
             Some(UPDATE) => match &updates.jumbf {
                 MetadataUpdate::Keep => ops.push(Op::Copy(id)),
                 _ => note(&mut map, total, end, 0, old_len)?,
             },
-            _ if seg.kind() == SegmentKind::Xmp => match &updates.xmp {
-                MetadataUpdate::Keep => ops.push(Op::Copy(id)),
-                MetadataUpdate::Remove => note(&mut map, total, end, 0, old_len)?,
-                MetadataUpdate::Set(d) if !xmp_done => {
+            _ if seg.kind() == SegmentKind::Xmp => match xmp.existing() {
+                Existing::Keep => ops.push(Op::Copy(id)),
+                Existing::Replace(d) => {
                     let op = new_xmp(d)?;
                     note(&mut map, total, end, op_len(&op, src)?, old_len)?;
                     ops.push(op);
-                    xmp_done = true;
                 }
-                MetadataUpdate::Set(_) => note(&mut map, total, end, 0, old_len)?,
+                _ => note(&mut map, total, end, 0, old_len)?,
             },
             _ => {
                 ops.push(Op::Copy(id));
                 if !ftyp_seen && seg.name() == Name::FourCC(FTYP) {
                     ftyp_seen = true;
-                    if let (MetadataUpdate::Set(d), false) = (&updates.jumbf, has_store) {
-                        let op = new_c2pa(d)?;
-                        note(&mut map, total, end, op_len(&op, src)?, 0)?;
-                        ops.push(op);
-                        store_done = true;
+                    if !has_store {
+                        if let Some(d) = store.pending() {
+                            let op = new_c2pa(d)?;
+                            note(&mut map, total, end, op_len(&op, src)?, 0)?;
+                            ops.push(op);
+                        }
                     }
-                    if let (MetadataUpdate::Set(d), false) = (&updates.xmp, has_xmp) {
-                        let op = new_xmp(d)?;
-                        note(&mut map, total, end, op_len(&op, src)?, 0)?;
-                        ops.push(op);
-                        xmp_done = true;
+                    if !has_xmp {
+                        if let Some(d) = xmp.pending() {
+                            let op = new_xmp(d)?;
+                            note(&mut map, total, end, op_len(&op, src)?, 0)?;
+                            ops.push(op);
+                        }
                     }
                 }
             }
@@ -1354,9 +1365,7 @@ async fn plan<'a>(
         // exists moves.
         ops.push(new_store_box(UPDATE, Cow::Owned(add))?);
     }
-    if (matches!(updates.jumbf, MetadataUpdate::Set(_)) && !store_done)
-        || (matches!(updates.xmp, MetadataUpdate::Set(_)) && !xmp_done)
-    {
+    if (!update_mode && store.is_pending()) || xmp.is_pending() {
         return Err(Error::InvalidFormat(
             "BMFF has no ftyp box to insert metadata after".into(),
         ));
@@ -1373,158 +1382,94 @@ async fn plan<'a>(
         }
     }
 
-    // Destination structure.
-    let mut dims = Vec::with_capacity(ops.len());
-    let mut starts = Vec::with_capacity(ops.len());
-    let mut size = 0u64;
-    for op in &ops {
-        starts.push(size);
-        let d = match op {
-            Op::Copy(id) | Op::Scan(id) | Op::Relabel { id, .. } => {
-                let s = src.segment(*id)?;
-                Dims {
-                    kind: s.kind(),
-                    name: s.name(),
-                    header_len: s.header().len() as u32,
-                    payload_len: s.payload().len(),
-                    label: match op {
-                        Op::Relabel { to, .. } => Some(*to),
-                        _ => labels[id.index()],
-                    },
+    Ok((ops, labels, map))
+}
+
+/// The plan that writes `ops`: the output structure and, unless `with_steps` is
+/// false, the steps. Reads the source for what the steps need to know: the offset
+/// tables to rewrite and the header of a relabelled box.
+async fn assemble<'a>(
+    src: &Structure,
+    io: &mut Io,
+    ops: Vec<Op<'a>>,
+    labels: &[Option<&'static str>],
+    map: OffsetMap,
+    with_steps: bool,
+) -> Result<WritePlan<'a>> {
+    let map = Arc::new(map);
+    let mut b = PlanBuilder::new(src);
+    for op in ops {
+        let (id, kind, label) = match op {
+            Op::Copy(sid) => {
+                let s = src.segment(sid)?;
+                (b.copy_segment(sid)?, s.kind(), labels[sid.index()])
+            }
+            Op::Scan(sid) => {
+                let seg = src.segment(sid)?;
+                let id = b.shape_like(sid)?;
+                if with_steps {
+                    let mut patches = collect_patches(io, seg, &map).await?;
+                    for (role, range) in seg.regions() {
+                        patched_steps(&mut b, id, role, range, &mut patches, &map)?;
+                    }
                 }
+                (id, seg.kind(), labels[sid.index()])
+            }
+            Op::Relabel { id: sid, from, to } => {
+                let seg = src.segment(sid)?;
+                let id = b.shape_like(sid)?;
+                if with_steps {
+                    let header = seg.header();
+                    // [size, type] [uuid 16] [version, flags 4] [purpose NUL] [merkle offset 8]
+                    let fixed = 16 + 4 + from.len() + 1 + 8;
+                    let prefix = (header.len() as usize)
+                        .checked_sub(fixed)
+                        .filter(|p| *p == 8 || *p == 16)
+                        .ok_or_else(|| {
+                            Error::invalid_segment(header.offset(), "unexpected C2PA box header")
+                        })?;
+                    let mut h = vec![0u8; header.len() as usize];
+                    io.read_at(header.offset(), &mut h).await?;
+                    let at = prefix + 16 + 4;
+                    if &h[at..at + from.len()] != from.as_bytes() || h[at + from.len()] != 0 {
+                        return Err(Error::invalid_segment(
+                            header.offset(),
+                            "C2PA box purpose is not what was parsed",
+                        ));
+                    }
+                    h[at..at + to.len()].copy_from_slice(to.as_bytes());
+                    b.put(id, Role::Header, h);
+                    b.copy(id, Role::Payload, seg.payload());
+                }
+                (id, seg.kind(), Some(to))
             }
             Op::New {
                 kind,
                 label,
                 header,
                 payload,
-            } => Dims {
-                kind: *kind,
-                name: Name::FourCC(UUID),
-                header_len: header.len() as u32,
-                payload_len: payload.len() as u64,
-                label: *label,
-            },
+            } => (
+                b.put_segment(kind, Name::FourCC(UUID), header, payload, &[][..])?,
+                kind,
+                label,
+            ),
         };
-        size = size
-            .checked_add(d.header_len as u64)
-            .and_then(|v| v.checked_add(d.payload_len))
-            .ok_or(Error::LimitExceeded {
-                what: "output size",
-                limit: u64::MAX,
-            })?;
-        dims.push(d);
-    }
-    let mut b = StructureBuilder::new(src.handler().clone(), src.media_type().to_owned(), size);
-    for d in &dims {
-        let id = b.push_span(d.kind, d.name, d.header_len, d.payload_len, 0)?;
-        match (d.label, d.kind) {
-            (Some(l), _) => {
-                let payload = b.segment(id)?.payload();
-                b.entity_labelled(d.kind, l, &[(id, payload)])?;
-            }
-            (None, SegmentKind::Xmp) => b.entity_of_segments(SegmentKind::Xmp, &[id])?,
+        match (label, kind) {
+            (Some(l), _) => b.entity_labelled(kind, l, &[id])?,
+            (None, SegmentKind::Xmp) => b.entity(SegmentKind::Xmp, &[id])?,
             _ => {}
         }
     }
-
     // Items (EXIF, thumbnails) are bytes inside boxes that are copied as they are,
-    // so their entities follow the boxes to wherever those land. One whose box was
-    // dropped is dropped with it.
-    let mut dest_of: Vec<Option<usize>> = vec![None; segs.len()];
-    for (i, op) in ops.iter().enumerate() {
-        if let Op::Copy(id) | Op::Scan(id) | Op::Relabel { id, .. } = op {
-            dest_of[id.index()] = Some(i);
-        }
-    }
-    for (kind, e) in src.entity_list() {
-        if !matches!(kind, SegmentKind::Exif | SegmentKind::Thumbnail) {
-            continue;
-        }
-        let mut parts = Vec::new();
-        for p in e.parts() {
-            let si = p.segment().index();
-            let Some(di) = dest_of[si] else { break };
-            let moved = starts[di] + (p.range().offset() - segs[si].extent().offset());
-            parts.push((
-                SegmentId::from_index(di)?,
-                ByteRange::new(moved, p.range().len())?,
-            ));
-        }
-        if parts.is_empty() || parts.len() != e.part_count() {
-            continue;
-        }
-        b.entity_with_media_type(
-            kind,
-            e.label().map(|l| l.to_owned().into()),
-            e.media_type().map(|m| m.to_owned().into()),
-            &parts,
-        )?;
-    }
-    Ok((ops, b.finish()?, map))
-}
-
-/// The steps that write the planned `ops`. Reads the source for what the plan
-/// needs to know: the offset tables to rewrite and the header of a relabelled box.
-async fn steps<'a>(
-    src: &Structure,
-    io: &mut Io,
-    ops: Vec<Op<'a>>,
-    structure: Structure,
-    map: OffsetMap,
-) -> Result<WritePlan<'a>> {
-    let map = Arc::new(map);
-    let mut plan = WritePlan::new(structure);
-    for (i, op) in ops.into_iter().enumerate() {
-        let dest = SegmentId::from_index(i)?;
-        match op {
-            Op::Copy(sid) => {
-                plan.copy_segment(dest, src.segment(sid)?);
-            }
-            Op::Scan(sid) => {
-                let seg = src.segment(sid)?;
-                let mut patches = collect_patches(io, seg, &map).await?;
-                for (role, range) in seg.regions() {
-                    patched_steps(&mut plan, dest, role, range, &mut patches, &map)?;
-                }
-            }
-            Op::Relabel { id, from, to } => {
-                let seg = src.segment(id)?;
-                let header = seg.header();
-                // [size, type] [uuid 16] [version, flags 4] [purpose NUL] [merkle offset 8]
-                let fixed = 16 + 4 + from.len() + 1 + 8;
-                let prefix = (header.len() as usize)
-                    .checked_sub(fixed)
-                    .filter(|p| *p == 8 || *p == 16)
-                    .ok_or_else(|| bad(header.offset(), "unexpected C2PA box header"))?;
-                let mut h = vec![0u8; header.len() as usize];
-                io.read_at(header.offset(), &mut h).await?;
-                let at = prefix + 16 + 4;
-                if &h[at..at + from.len()] != from.as_bytes() || h[at + from.len()] != 0 {
-                    return Err(bad(
-                        header.offset(),
-                        "C2PA box purpose is not what was parsed",
-                    ));
-                }
-                h[at..at + to.len()].copy_from_slice(to.as_bytes());
-                plan.put(dest, Role::Header, h);
-                plan.copy(dest, Role::Payload, seg.payload());
-            }
-            Op::New {
-                header, payload, ..
-            } => {
-                plan.put(dest, Role::Header, header);
-                plan.put(dest, Role::Payload, payload);
-            }
-        }
-    }
-    Ok(plan)
+    // so their entities follow the boxes to wherever those land.
+    b.carry_entities(|k| matches!(k, SegmentKind::Exif | SegmentKind::Thumbnail));
+    b.finish()
 }
 
 /// Append the steps that copy `range`, rewriting the patches inside it. `patches`
 /// are sorted and disjoint; those outside `range` are skipped.
 fn patched_steps(
-    plan: &mut WritePlan<'_>,
+    plan: &mut PlanBuilder<'_, '_>,
     dest: SegmentId,
     role: Role,
     range: ByteRange,
@@ -1549,7 +1494,7 @@ fn patched_steps(
                 ..
             } => {
                 let rule = Relocate::new(map.clone(), *stride, *field_off, *width)
-                    .map_err(|_| bad(start, "invalid offset table geometry"))?;
+                    .map_err(|_| Error::invalid_segment(start, "invalid offset table geometry"))?;
                 plan.relocate(dest, role, ByteRange::new(start, len)?, rule);
             }
         }
@@ -1775,6 +1720,7 @@ mod tests {
 
     // ---- writing ----
 
+    use crate::testing::Conformance;
     use crate::{Chunk, NullSink};
 
     fn full(ty: &[u8; 4], version: u8, flags: u32, body: &[u8]) -> Vec<u8> {
@@ -1855,9 +1801,25 @@ mod tests {
     }
 
     #[test]
-    fn keep_is_byte_identical() {
-        let (f, _) = media_file(&[c2pa_box(MANIFEST, b"A")], &[], None);
-        assert_eq!(rewrite(&f, &Updates::new()).unwrap(), f);
+    fn conforms() {
+        let c = Conformance::new(handler())
+            .jumbf(Some(b"STORE".to_vec()))
+            .updates("merkle", Updates::new().set_merkle(vec![vec![0u8; 8]; 2]))
+            .updates(
+                "manifest and no merkle",
+                Updates::new().set_jumbf(b"STORE".to_vec()).remove_merkle(),
+            );
+        c.check("plain", &media_file(&[], &[], None).0);
+        c.check(
+            "with a manifest",
+            &media_file(&[c2pa_box(MANIFEST, b"A")], &[], None).0,
+        );
+        c.check(
+            "with a manifest and merkle boxes",
+            &media_file(&[c2pa_box(MANIFEST, b"A")], &[c2pa_box(MERKLE, b"M")], None).0,
+        );
+        c.check("fragmented", &fragmented());
+        c.check("heif", &heif(EXIF_ITEM, THUMB));
     }
 
     #[test]
@@ -2163,30 +2125,6 @@ mod tests {
             boxed(b"mdat", b"MEDIA"),
         ]);
         assert!(rewrite(&f, &Updates::new().set_jumbf(b"S".to_vec())).is_err());
-    }
-
-    #[test]
-    fn sink_sees_every_output_byte_once_in_order() {
-        let (f, _) = media_file(&[], &[], None);
-        let s = parse(&mut Cursor::new(&f)).unwrap();
-        let mut got: Vec<u8> = Vec::new();
-        let mut sink = |c: Chunk<'_>| -> Result<()> {
-            assert_eq!(c.offset as usize, got.len());
-            got.extend_from_slice(c.data);
-            Ok(())
-        };
-        let mut out = Cursor::new(Vec::new());
-        s.handler()
-            .write(
-                &s,
-                &mut Cursor::new(&f[..]),
-                &mut out,
-                &Updates::new().set_jumbf(b"STORE".to_vec()),
-                &mut sink,
-            )
-            .unwrap();
-        assert_eq!(got, out.into_inner());
-        assert!(media_at(&got, stco_entry(&got)));
     }
 
     fn jstore(children: &[Vec<u8>]) -> Vec<u8> {
@@ -2558,9 +2496,12 @@ mod tests {
         assert!(media_at(&out, v));
     }
 
-    #[test]
-    fn fragment_offsets_follow() {
-        let base = 20u64; // the moof starts right after ftyp
+    /// A movie fragment and a fragment-random-access box that both record where
+    /// the `moof` is, which is `FRAGMENT_BASE`.
+    const FRAGMENT_BASE: u64 = 20;
+
+    fn fragmented() -> Vec<u8> {
+        let base = FRAGMENT_BASE; // the moof starts right after ftyp
         let mut tfhd = 1u32.to_be_bytes().to_vec();
         tfhd.extend_from_slice(&base.to_be_bytes());
         let moof = boxed(b"moof", &boxed(b"traf", &full(b"tfhd", 0, 1, &tfhd)));
@@ -2571,7 +2512,13 @@ mod tests {
         tfra.extend_from_slice(&(base as u32).to_be_bytes()); // moof offset
         tfra.extend_from_slice(&[1, 1, 1]);
         let mfra = boxed(b"mfra", &full(b"tfra", 0, 0, &tfra));
-        let f = file(&[ftyp(), moof, boxed(b"mdat", b"MEDIA"), mfra]);
+        file(&[ftyp(), moof, boxed(b"mdat", b"MEDIA"), mfra])
+    }
+
+    #[test]
+    fn fragment_offsets_follow() {
+        let base = FRAGMENT_BASE;
+        let f = fragmented();
 
         let out = rewrite(&f, &Updates::new().set_jumbf(b"STORE".to_vec())).unwrap();
         let moof_at = find(&out, "/moof").0;

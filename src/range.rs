@@ -28,10 +28,10 @@ impl ByteRange {
     /// Create a range, failing if `offset + len` overflows `u64`.
     pub fn new(offset: u64, len: u64) -> Result<Self> {
         if offset.checked_add(len).is_none() {
-            return Err(Error::InvalidSegment {
+            return Err(Error::invalid_segment(
                 offset,
-                reason: format!("range overflows u64 (len {len})"),
-            });
+                format!("range overflows u64 (len {len})"),
+            ));
         }
         Ok(Self { offset, len })
     }
@@ -71,13 +71,13 @@ impl ByteRange {
         let end = rel_offset.checked_add(len);
         match end {
             Some(e) if e <= self.len => Ok(ByteRange::raw(self.offset + rel_offset, len)),
-            _ => Err(Error::InvalidSegment {
-                offset: self.offset,
-                reason: format!(
+            _ => Err(Error::invalid_segment(
+                self.offset,
+                format!(
                     "sub-range {rel_offset}+{len} exceeds range length {}",
                     self.len
                 ),
-            }),
+            )),
         }
     }
 }

@@ -20,14 +20,14 @@ use crate::crc::Crc32;
 use crate::error::{Error, Result};
 use crate::handler::{ContainerHandler, FormatSpec, ReadWriteSeek};
 use crate::plan::WritePlan;
+use crate::plan_builder::PlanBuilder;
 use crate::segment::SegmentKind;
-use crate::segment::{Name, Role, Segment};
-use crate::sink::Sink;
+use crate::segment::{Name, Segment};
 use crate::structure::{SegmentId, Structure, StructureBuilder};
 use crate::task::{BoxFuture, Io};
-use crate::{MetadataUpdate, Updates};
+use crate::{Existing, MetadataSlot, Updates};
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 const SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
 const ITXT: [u8; 4] = *b"iTXt";
@@ -71,8 +71,7 @@ pub struct PngHandler;
 
 /// The shared PNG handler.
 pub fn handler() -> Arc<dyn ContainerHandler> {
-    static H: OnceLock<Arc<PngHandler>> = OnceLock::new();
-    H.get_or_init(|| Arc::new(PngHandler)).clone()
+    Arc::new(PngHandler)
 }
 
 /// The PNG container's [`ContainerHandler::id`].
@@ -170,17 +169,17 @@ async fn parse_with(handler: Arc<dyn ContainerHandler>, mut io: Io) -> Result<St
         let len = u32::from_be_bytes([hdr[0], hdr[1], hdr[2], hdr[3]]) as u64;
         let ty = [hdr[4], hdr[5], hdr[6], hdr[7]];
         if len > MAX_CHUNK_LEN {
-            return Err(Error::InvalidSegment {
+            return Err(Error::invalid_segment(
                 offset,
-                reason: format!("chunk length too large: {len}"),
-            });
+                format!("chunk length too large: {len}"),
+            ));
         }
         let chunk_len = 12 + len;
         if chunk_len > remaining {
-            return Err(Error::InvalidSegment {
+            return Err(Error::invalid_segment(
                 offset,
-                reason: "chunk extends past end of file".into(),
-            });
+                "chunk extends past end of file",
+            ));
         }
 
         let mut prefix = 0u64;
@@ -201,13 +200,7 @@ async fn parse_with(handler: Arc<dyn ContainerHandler>, mut io: Io) -> Result<St
             _ => SegmentKind::Other,
         };
 
-        let id = b.push_span(kind, Name::FourCC(ty), 8 + prefix as u32, len - prefix, 4)?;
-        match kind {
-            SegmentKind::Xmp | SegmentKind::Jumbf | SegmentKind::Exif => {
-                b.entity_of_segments(kind, &[id])?
-            }
-            _ => {}
-        }
+        b.push_item(kind, Name::FourCC(ty), 8 + prefix as u32, len - prefix, 4)?;
 
         offset += chunk_len;
         found_iend = ty == IEND;
@@ -215,9 +208,7 @@ async fn parse_with(handler: Arc<dyn ContainerHandler>, mut io: Io) -> Result<St
 
     // The chunks through IEND are the structure; anything after is data beyond it.
     b.end_boxes()?;
-    if offset < total {
-        b.push_span(SegmentKind::Other, Name::None, 0, total - offset, 0)?;
-    }
+    b.push_tail()?;
     b.finish()
 }
 
@@ -232,43 +223,6 @@ enum Op<'a> {
         prefix: &'static [u8],
         payload: &'a [u8],
     },
-}
-
-struct Dims {
-    kind: SegmentKind,
-    name: Name,
-    header_len: u32,
-    payload_len: u64,
-    trailer_len: u16,
-}
-
-impl Op<'_> {
-    fn dims(&self, src: &Structure) -> Result<Dims> {
-        Ok(match self {
-            Op::Copy(id) => {
-                let s = src.segment(*id)?;
-                Dims {
-                    kind: s.kind(),
-                    name: s.name(),
-                    header_len: s.header().len() as u32,
-                    payload_len: s.payload().len(),
-                    trailer_len: s.trailer().len() as u16,
-                }
-            }
-            Op::New {
-                kind,
-                ty,
-                prefix,
-                payload,
-            } => Dims {
-                kind: *kind,
-                name: Name::FourCC(*ty),
-                header_len: 8 + prefix.len() as u32,
-                payload_len: payload.len() as u64,
-                trailer_len: 4,
-            },
-        })
-    }
 }
 
 fn new_chunk<'a>(
@@ -295,8 +249,8 @@ fn new_chunk<'a>(
 /// both the destination structure and the bytes written.
 fn plan<'a>(src: &Structure, updates: &'a Updates) -> Result<WritePlan<'a>> {
     let mut ops: Vec<Op<'a>> = Vec::with_capacity(src.segments().len() + 2);
-    let mut xmp_done = false;
-    let mut jumbf_done = false;
+    let mut xmp = MetadataSlot::new(updates.xmp());
+    let mut jumbf = MetadataSlot::new(updates.jumbf());
     let has_jumbf = src
         .segments()
         .iter()
@@ -305,26 +259,16 @@ fn plan<'a>(src: &Structure, updates: &'a Updates) -> Result<WritePlan<'a>> {
     for (i, seg) in src.segments().iter().enumerate() {
         let id = SegmentId::from_index(i)?;
         match seg.kind() {
-            SegmentKind::Xmp => match &updates.xmp {
-                MetadataUpdate::Keep => {
-                    ops.push(Op::Copy(id));
-                    xmp_done = true;
-                }
-                MetadataUpdate::Set(d) if !xmp_done => {
-                    ops.push(new_chunk(SegmentKind::Xmp, ITXT, XMP_ITXT_PREFIX, d)?);
-                    xmp_done = true;
+            SegmentKind::Xmp => match xmp.existing() {
+                Existing::Keep => ops.push(Op::Copy(id)),
+                Existing::Replace(d) => {
+                    ops.push(new_chunk(SegmentKind::Xmp, ITXT, XMP_ITXT_PREFIX, d)?)
                 }
                 _ => {}
             },
-            SegmentKind::Jumbf => match &updates.jumbf {
-                MetadataUpdate::Keep => {
-                    ops.push(Op::Copy(id));
-                    jumbf_done = true;
-                }
-                MetadataUpdate::Set(d) if !jumbf_done => {
-                    ops.push(new_chunk(SegmentKind::Jumbf, CABX, &[], d)?);
-                    jumbf_done = true;
-                }
+            SegmentKind::Jumbf => match jumbf.existing() {
+                Existing::Keep => ops.push(Op::Copy(id)),
+                Existing::Replace(d) => ops.push(new_chunk(SegmentKind::Jumbf, CABX, &[], d)?),
                 _ => {}
             },
             _ => {
@@ -333,8 +277,8 @@ fn plan<'a>(src: &Structure, updates: &'a Updates) -> Result<WritePlan<'a>> {
                 // precedes it so the frame-control chunk stays with its data.
                 // Only when there is nothing to replace: an existing manifest keeps
                 // its position (C2PA 11.2.3: an update must not move the store).
-                if !has_jumbf && !jumbf_done && seg.name() == Name::FourCC(IDAT) {
-                    if let MetadataUpdate::Set(d) = &updates.jumbf {
+                if !has_jumbf && seg.name() == Name::FourCC(IDAT) {
+                    if let Some(d) = jumbf.pending() {
                         let op = new_chunk(SegmentKind::Jumbf, CABX, &[], d)?;
                         let after_fctl = matches!(
                             ops.last(),
@@ -347,21 +291,14 @@ fn plan<'a>(src: &Structure, updates: &'a Updates) -> Result<WritePlan<'a>> {
                         } else {
                             ops.push(op);
                         }
-                        jumbf_done = true;
                     }
                 }
                 if seg.name() == Name::FourCC(IEND) {
-                    if !xmp_done {
-                        if let MetadataUpdate::Set(d) = &updates.xmp {
-                            ops.push(new_chunk(SegmentKind::Xmp, ITXT, XMP_ITXT_PREFIX, d)?);
-                            xmp_done = true;
-                        }
+                    if let Some(d) = xmp.pending() {
+                        ops.push(new_chunk(SegmentKind::Xmp, ITXT, XMP_ITXT_PREFIX, d)?);
                     }
-                    if !jumbf_done {
-                        if let MetadataUpdate::Set(d) = &updates.jumbf {
-                            ops.push(new_chunk(SegmentKind::Jumbf, CABX, &[], d)?);
-                            jumbf_done = true;
-                        }
+                    if let Some(d) = jumbf.pending() {
+                        ops.push(new_chunk(SegmentKind::Jumbf, CABX, &[], d)?);
                     }
                 }
                 ops.push(Op::Copy(id));
@@ -369,61 +306,29 @@ fn plan<'a>(src: &Structure, updates: &'a Updates) -> Result<WritePlan<'a>> {
         }
     }
 
-    // Destination size, then destination structure.
-    let mut total = 0u64;
-    let mut dims = Vec::with_capacity(ops.len());
-    for op in &ops {
-        let d = op.dims(src)?;
-        total = (d.header_len as u64)
-            .checked_add(d.payload_len)
-            .and_then(|v| v.checked_add(d.trailer_len as u64))
-            .and_then(|v| total.checked_add(v))
-            .ok_or(Error::LimitExceeded {
-                what: "output size",
-                limit: u64::MAX,
-            })?;
-        dims.push(d);
-    }
-
-    let mut b = StructureBuilder::new(src.handler().clone(), src.media_type().to_owned(), total);
-    // Where the data beyond the chunk structure starts in the output.
-    let k = src.box_count();
-    let trailing_op = ops
-        .iter()
-        .position(|op| matches!(op, Op::Copy(id) if id.index() == k));
-    for (i, d) in dims.iter().enumerate() {
-        if trailing_op == Some(i) {
-            b.end_boxes()?;
-        }
-        let id = b.push_span(d.kind, d.name, d.header_len, d.payload_len, d.trailer_len)?;
-        if matches!(
-            d.kind,
-            SegmentKind::Xmp | SegmentKind::Jumbf | SegmentKind::Exif
-        ) {
-            b.entity_of_segments(d.kind, &[id])?;
-        }
-    }
-    let mut plan = WritePlan::new(b.finish()?);
-    for (i, op) in ops.iter().enumerate() {
-        let id = SegmentId::from_index(i)?;
-        match op {
-            Op::Copy(sid) => {
-                plan.copy_segment(id, src.segment(*sid)?);
-            }
+    let mut b = PlanBuilder::new(src);
+    for op in ops {
+        let id = match op {
+            Op::Copy(sid) => b.copy_segment(sid)?,
             Op::New {
+                kind,
                 ty,
                 prefix,
                 payload,
-                ..
             } => {
-                let (hdr, n) = chunk_header(ty, prefix, payload.len());
-                plan.put(id, Role::Header, hdr[..n].to_vec());
-                plan.put(id, Role::Payload, *payload);
-                plan.put(id, Role::Trailer, chunk_crc(ty, prefix, payload).to_vec());
+                let (hdr, n) = chunk_header(&ty, prefix, payload.len());
+                b.put_segment(
+                    kind,
+                    Name::FourCC(ty),
+                    hdr[..n].to_vec(),
+                    payload,
+                    chunk_crc(&ty, prefix, payload).to_vec(),
+                )?
             }
-        }
+        };
+        b.entity_for(id)?;
     }
-    Ok(plan)
+    b.finish()
 }
 
 /// Length, type and prefix of a new chunk; returns the bytes and how many are used.
@@ -450,35 +355,14 @@ fn chunk_crc(ty: &[u8; 4], prefix: &[u8], payload: &[u8]) -> [u8; 4] {
     crc.finalize().to_be_bytes()
 }
 
-/// Write `src` with `updates` applied, delivering every output byte to `sink`.
-///
-/// `out` is written from its current start; offsets reported to the sink are
-/// relative to the first byte written. Returns the structure of the output.
-pub fn write<R, W, S>(
-    src_structure: &Structure,
-    src: &mut R,
-    out: &mut W,
-    updates: &Updates,
-    sink: &mut S,
-) -> Result<Structure>
-where
-    R: Read + Seek + ?Sized,
-    W: Write + ?Sized,
-    S: Sink + ?Sized,
-{
-    let plan = plan(src_structure, updates)?;
-    plan.execute(src, out, sink)?;
-    Ok(plan.into_structure())
-}
-
 /// Recompute and store the CRC of the chunk in `seg` by reading it back from `out`.
 pub(crate) fn fix_crc<W: Read + Write + Seek>(out: &mut W, seg: &Segment) -> Result<()> {
     let trailer = seg.trailer();
     if trailer.len() != 4 || seg.header().len() < 8 {
-        return Err(Error::InvalidSegment {
-            offset: seg.extent().offset(),
-            reason: "not a PNG chunk".into(),
-        });
+        return Err(Error::invalid_segment(
+            seg.extent().offset(),
+            "not a PNG chunk",
+        ));
     }
     // CRC covers type + data: everything after the 4-byte length, before the CRC.
     let start = seg.extent().offset() + 4;
@@ -500,8 +384,7 @@ pub(crate) fn fix_crc<W: Read + Write + Seek>(out: &mut W, seg: &Segment) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sink::Chunk;
-    use sha2::{Digest, Sha256};
+    use crate::testing::{write, Conformance};
     use std::io::Cursor;
 
     fn chunk(ty: &[u8; 4], data: &[u8]) -> Vec<u8> {
@@ -589,42 +472,48 @@ mod tests {
         );
     }
 
-    #[test]
-    fn new_cabx_stays_ahead_of_apng_fctl() {
+    fn apng() -> Vec<u8> {
         let mut v = SIGNATURE.to_vec();
         v.extend(chunk(b"IHDR", &[0, 0, 0, 1, 0, 0, 0, 1, 8, 2, 0, 0, 0]));
         v.extend(chunk(b"acTL", &[0, 0, 0, 2, 0, 0, 0, 0]));
         v.extend(chunk(b"fcTL", &[0u8; 26]));
         v.extend(chunk(b"IDAT", &[1, 2, 3, 4]));
         v.extend(chunk(b"IEND", &[]));
+        v
+    }
+
+    fn with_manifest() -> Vec<u8> {
+        let mut v = SIGNATURE.to_vec();
+        v.extend(chunk(b"IHDR", &[0, 0, 0, 1, 0, 0, 0, 1, 8, 2, 0, 0, 0]));
+        v.extend(chunk(b"IDAT", &[1, 2, 3, 4]));
+        v.extend(chunk(b"caBX", &jumbf_stub(40)));
+        v.extend(chunk(b"IEND", &[]));
+        v
+    }
+
+    #[test]
+    fn new_cabx_stays_ahead_of_apng_fctl() {
         assert_eq!(
-            order_after_set(&v),
+            order_after_set(&apng()),
             ["IHDR", "acTL", "caBX", "fcTL", "IDAT", "IEND"]
         );
     }
 
     #[test]
     fn existing_cabx_is_replaced_in_place() {
-        let mut v = SIGNATURE.to_vec();
-        v.extend(chunk(b"IHDR", &[0, 0, 0, 1, 0, 0, 0, 1, 8, 2, 0, 0, 0]));
-        v.extend(chunk(b"IDAT", &[1, 2, 3, 4]));
-        v.extend(chunk(b"caBX", &jumbf_stub(40)));
-        v.extend(chunk(b"IEND", &[]));
         // Position of an existing manifest is kept; no second one is added.
-        assert_eq!(order_after_set(&v), ["IHDR", "IDAT", "caBX", "IEND"]);
+        assert_eq!(
+            order_after_set(&with_manifest()),
+            ["IHDR", "IDAT", "caBX", "IEND"]
+        );
     }
 
     #[test]
-    fn parse_tiles_file() {
-        let png = sample_png();
-        let s = parse(&mut Cursor::new(png.clone())).unwrap();
-        assert_eq!(s.total_size(), png.len() as u64);
-        let mut next = 0;
-        for r in s.regions() {
-            assert_eq!(r.range.offset(), next);
-            next = r.range.end();
-        }
-        assert_eq!(next, png.len() as u64);
+    fn conforms() {
+        let c = Conformance::new(handler()).jumbf(Some(jumbf_stub(64)));
+        c.check("plain", &sample_png());
+        c.check("with a manifest", &with_manifest());
+        c.check("apng", &apng());
     }
 
     #[test]
@@ -681,31 +570,22 @@ mod tests {
     }
 
     #[test]
-    fn sink_sees_every_output_byte_once_in_order() {
+    fn new_chunks_have_valid_crcs() {
         let png = sample_png();
         let s = parse(&mut Cursor::new(png.clone())).unwrap();
-        let updates = Updates::new().set_jumbf(vec![0xAB; 100]);
-
-        let mut seen: Vec<u8> = Vec::new();
-        let mut expect_off = 0u64;
-        let mut sink = |c: Chunk<'_>| -> Result<()> {
-            assert_eq!(c.offset, expect_off);
-            expect_off += c.data.len() as u64;
-            seen.extend_from_slice(c.data);
-            Ok(())
-        };
+        let updates = Updates::new()
+            .set_jumbf(vec![0xAB; 100])
+            .set_xmp(b"<x/>".to_vec());
         let mut out = Cursor::new(Vec::new());
-        let dest = write(&s, &mut Cursor::new(png), &mut out, &updates, &mut sink).unwrap();
-        let out = out.into_inner();
-        assert_eq!(seen, out);
-        assert_eq!(dest.total_size(), out.len() as u64);
-        verify_crcs(&out);
-
-        let reparsed = parse(&mut Cursor::new(out.clone())).unwrap();
-        let e = reparsed.require_entity(SegmentKind::Jumbf).unwrap();
-        assert_eq!(e.len(), 100);
-        let data = reparsed.read_entity(&mut Cursor::new(out), e).unwrap();
-        assert_eq!(data, vec![0xAB; 100]);
+        write(
+            &s,
+            &mut Cursor::new(png),
+            &mut out,
+            &updates,
+            &mut crate::NullSink,
+        )
+        .unwrap();
+        verify_crcs(&out.into_inner());
     }
 
     #[test]
@@ -752,60 +632,6 @@ mod tests {
         .unwrap();
         let e = dest.require_entity(SegmentKind::Jumbf).unwrap().clone();
         assert!(dest.patch(&mut out, &e, &[1u8; 9]).is_err());
-    }
-
-    /// The hash a consumer builds from the write-side stream equals the hash it
-    /// builds by walking the finished structure: two independent routes agree.
-    #[test]
-    fn sink_hash_equals_region_walk_hash() {
-        let png = sample_png();
-        let s = parse(&mut Cursor::new(png.clone())).unwrap();
-        let updates = Updates::new().set_jumbf(vec![0x5A; 200]);
-
-        // Consumer policy (the sink's business, not asset-io's): skip the
-        // payload and trailer of Jumbf segments.
-        let mut kinds: Vec<SegmentKind> = Vec::new();
-        struct Hash<'k> {
-            h: Sha256,
-            kinds: &'k mut Vec<SegmentKind>,
-        }
-        impl Sink for Hash<'_> {
-            fn begin(&mut self, dest: &Structure) -> Result<()> {
-                self.kinds.extend(dest.segments().iter().map(|s| s.kind()));
-                Ok(())
-            }
-            fn wants(&self, seg: &Segment, role: Role) -> bool {
-                !(seg.kind() == SegmentKind::Jumbf && role != Role::Header)
-            }
-            fn chunk(&mut self, c: Chunk<'_>) -> Result<()> {
-                self.h.update(c.data);
-                Ok(())
-            }
-        }
-        let mut sink = Hash {
-            h: Sha256::new(),
-            kinds: &mut kinds,
-        };
-        let mut out = Cursor::new(Vec::new());
-        let dest = write(&s, &mut Cursor::new(png), &mut out, &updates, &mut sink).unwrap();
-        let streamed = sink.h.finalize();
-
-        let mut walked = Sha256::new();
-        let mut buf = vec![0u8; 16];
-        let mut src = Cursor::new(out.into_inner());
-        for r in dest.regions() {
-            let seg = dest.segment(r.segment).unwrap();
-            if seg.kind() == SegmentKind::Jumbf && r.role != Role::Header {
-                continue;
-            }
-            dest.stream_range(&mut src, r.range, &mut buf, |b| {
-                walked.update(b);
-                Ok(())
-            })
-            .unwrap();
-        }
-        assert_eq!(streamed[..], walked.finalize()[..]);
-        assert_eq!(kinds.len(), dest.segments().len());
     }
 
     #[test]
