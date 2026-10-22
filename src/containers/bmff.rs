@@ -72,10 +72,10 @@ use crate::error::{Error, Result};
 use crate::handler::{ContainerHandler, FormatSpec, ReadSeek};
 use crate::plan::{OffsetMap, Relocate, WritePlan};
 use crate::range::ByteRange;
-use crate::readahead::{ReadAhead, PARSE_WINDOW};
 use crate::segment::SegmentKind;
-use crate::segment::{Name, Role, Segment};
-use crate::structure::{SegmentId, Structure, StructureBuilder};
+use crate::segment::{Name, Role, Segment, MAX_SEGMENT_SIZE};
+use crate::structure::{Entity, SegmentId, Structure, StructureBuilder};
+use crate::task::{block_on, BoxFuture, Io, Task};
 use crate::walk::Node;
 use crate::{MetadataUpdate, Updates};
 use std::borrow::Cow;
@@ -228,18 +228,20 @@ impl ContainerHandler for BmffHandler {
         header.len() >= 12 && header[4..8] == FTYP
     }
 
-    fn parse(self: Arc<Self>, src: &mut dyn ReadSeek) -> Result<Structure> {
-        parse_with(self, src)
+    fn parse_async(self: Arc<Self>, io: Io) -> BoxFuture<'static, Result<Structure>> {
+        Box::pin(parse_with(self, io))
     }
 
-    fn write_plan<'a>(
-        &self,
-        src_structure: &Structure,
-        src: &mut dyn ReadSeek,
+    fn write_plan_async<'f, 'a: 'f>(
+        &'f self,
+        src_structure: &'f Structure,
+        mut io: Io,
         updates: &'a Updates,
-    ) -> Result<WritePlan<'a>> {
-        let (ops, structure, map) = plan(src_structure, src, updates)?;
-        steps(src_structure, src, ops, structure, map)
+    ) -> BoxFuture<'f, Result<WritePlan<'a>>> {
+        Box::pin(async move {
+            let (ops, structure, map) = plan(src_structure, &mut io, updates).await?;
+            steps(src_structure, &mut io, ops, structure, map).await
+        })
     }
 
     // The structure does not depend on the offset tables, so planning alone does not
@@ -250,7 +252,11 @@ impl ContainerHandler for BmffHandler {
         src: &mut dyn ReadSeek,
         updates: &Updates,
     ) -> Result<Structure> {
-        plan(src_structure, src, updates).map(|(_, structure, _)| structure)
+        Task::new(src_structure.total_size(), |mut io| async move {
+            let (_, structure, _) = plan(src_structure, &mut io, updates).await?;
+            Ok(structure)
+        })
+        .run(src)
     }
 
     fn compose(&self, kind: SegmentKind, data: &[u8]) -> Result<Vec<u8>> {
@@ -276,17 +282,16 @@ impl ContainerHandler for BmffHandler {
         src: &mut dyn ReadSeek,
         f: &mut dyn FnMut(&Node<'_>) -> Result<()>,
     ) -> Result<()> {
-        let mut ahead = ReadAhead::new(src, PARSE_WINDOW);
-        let src: &mut dyn ReadSeek = &mut ahead;
         let total = src.seek(SeekFrom::End(0))?;
-        let mut path = String::new();
-        walk_level(src, 0, total, 1, &mut path, f)
+        block_on(total, src, |mut io| async move {
+            walk(&mut io, 0, total, f).await
+        })
     }
 }
 
 /// Parse the top-level boxes of a BMFF file into a validated structure.
 pub fn parse<R: Read + Seek>(src: &mut R) -> Result<Structure> {
-    parse_with(handler(), src)
+    handler().parse(src)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -305,25 +310,19 @@ fn bad(offset: u64, reason: &str) -> Error {
     }
 }
 
-fn read_at(src: &mut (impl ReadSeek + ?Sized), at: u64, buf: &mut [u8]) -> Result<()> {
-    src.seek(SeekFrom::Start(at))?;
-    src.read_exact(buf)?;
-    Ok(())
-}
-
 /// Read the box header at `at`, inside a region ending at `end` (`at < end`).
 ///
 /// - `Ok(None)`: fewer than 8 bytes remain; some files carry trailing bytes.
 /// - size 0 means the box runs to `end`.
 /// - a box larger than the region is an error, except `mdat`, which is clamped to
 ///   the region (truncated media files are common and still hashable).
-fn read_header(src: &mut (impl ReadSeek + ?Sized), at: u64, end: u64) -> Result<Option<BoxHeader>> {
+async fn read_header(io: &mut Io, at: u64, end: u64) -> Result<Option<BoxHeader>> {
     let remaining = end - at;
     if remaining < 8 {
         return Ok(None);
     }
     let mut h = [0u8; 8];
-    read_at(src, at, &mut h)?;
+    io.read_at(at, &mut h).await?;
     let size32 = u32::from_be_bytes([h[0], h[1], h[2], h[3]]);
     let ty = [h[4], h[5], h[6], h[7]];
     let (mut size, header_len) = match size32 {
@@ -333,7 +332,7 @@ fn read_header(src: &mut (impl ReadSeek + ?Sized), at: u64, end: u64) -> Result<
                 return Err(bad(at, "extended box size truncated"));
             }
             let mut l = [0u8; 8];
-            src.read_exact(&mut l)?;
+            io.read_at(at + 8, &mut l).await?;
             (u64::from_be_bytes(l), 16u32)
         }
         n => (n as u64, 8u32),
@@ -364,35 +363,48 @@ fn is_full_box(ty: &[u8; 4]) -> bool {
 }
 
 /// QuickTime writes `meta` without version and flags; its first child is `hdlr`.
-fn meta_lacks_full_box_header(
-    src: &mut (impl ReadSeek + ?Sized),
-    content: u64,
-    box_end: u64,
-) -> bool {
+async fn meta_lacks_full_box_header(io: &mut Io, content: u64, box_end: u64) -> bool {
     if box_end - content < 8 {
         return false;
     }
     let mut b = [0u8; 8];
-    read_at(src, content, &mut b).is_ok() && b[4..8] == HDLR[..]
+    io.read_at(content, &mut b).await.is_ok() && b[4..8] == HDLR[..]
 }
 
-fn walk_level(
-    src: &mut dyn ReadSeek,
-    mut at: u64,
+/// One level of boxes being walked: where the next box is, where the level ends, and
+/// how much of the path belongs to the levels above.
+#[derive(Clone, Copy)]
+struct Level {
+    at: u64,
     end: u64,
-    depth: u32,
-    path: &mut String,
-    f: &mut dyn FnMut(&Node<'_>) -> Result<()>,
-) -> Result<()> {
-    if depth > MAX_BOX_DEPTH {
-        return Err(Error::LimitExceeded {
-            what: "box nesting depth",
-            limit: MAX_BOX_DEPTH as u64,
-        });
-    }
-    while at < end {
-        let Some(h) = read_header(src, at, end)? else {
-            break;
+    mark: usize,
+}
+
+/// Visit the boxes in `[start, end)` and the boxes nested in the containers among
+/// them, in file order, a parent before its children. Reads only box headers (and
+/// the few bytes after one that say what it is).
+async fn walk<F>(io: &mut Io, start: u64, end: u64, f: &mut F) -> Result<()>
+where
+    F: FnMut(&Node<'_>) -> Result<()> + ?Sized,
+{
+    let mut path = String::new();
+    let mut levels = vec![Level {
+        at: start,
+        end,
+        mark: 0,
+    }];
+    while let Some(&Level { at, end, mark }) = levels.last() {
+        let depth = levels.len() as u32;
+        let Some(h) = (if at < end {
+            read_header(io, at, end).await?
+        } else {
+            None
+        }) else {
+            // The level is done: no more boxes, or only trailing bytes too short
+            // to be one.
+            path.truncate(mark);
+            levels.pop();
+            continue;
         };
         let box_end = at + h.size; // read_header guarantees <= end
         let mut content = at + h.header_len as u64;
@@ -404,11 +416,11 @@ fn walk_level(
                 return Err(bad(at, "uuid box too small for its type"));
             }
             let mut u = [0u8; 16];
-            read_at(src, content, &mut u)?;
+            io.read_at(content, &mut u).await?;
             content += 16;
             full = u == C2PA_UUID;
             user_type = Some(u);
-        } else if h.ty == META && full && meta_lacks_full_box_header(src, content, box_end) {
+        } else if h.ty == META && full && meta_lacks_full_box_header(io, content, box_end).await {
             full = false;
         }
         let header_len = (content - at) as u32;
@@ -419,17 +431,17 @@ fn walk_level(
                 return Err(bad(at, "FullBox too small for version and flags"));
             }
             let mut vf = [0u8; 4];
-            read_at(src, content, &mut vf)?;
+            io.read_at(content, &mut vf).await?;
             content += 4;
             version = Some(vf[0]);
             flags = Some(u32::from_be_bytes([0, vf[1], vf[2], vf[3]]));
         }
 
-        let mark = path.len();
+        let here = path.len();
         path.push('/');
         path.push_str(&String::from_utf8_lossy(&h.ty));
         f(&Node {
-            path,
+            path: &path,
             name: Name::FourCC(h.ty),
             extent: crate::ByteRange::new(at, h.size)?,
             header_len,
@@ -438,25 +450,38 @@ fn walk_level(
             flags,
             user_type,
         })?;
-        if is_container(&h.ty) && content < box_end {
-            walk_level(src, content, box_end, depth + 1, path, f)?;
+        if let Some(level) = levels.last_mut() {
+            level.at = box_end;
         }
-        path.truncate(mark);
-        at = box_end;
+        if is_container(&h.ty) && content < box_end {
+            if depth + 1 > MAX_BOX_DEPTH {
+                return Err(Error::LimitExceeded {
+                    what: "box nesting depth",
+                    limit: MAX_BOX_DEPTH as u64,
+                });
+            }
+            levels.push(Level {
+                at: content,
+                end: box_end,
+                mark: here,
+            });
+        } else {
+            path.truncate(here);
+        }
     }
     Ok(())
 }
 
 /// Media type implied by the major brand of a leading `ftyp` box.
-fn media_type(src: &mut dyn ReadSeek, total: u64) -> Result<&'static str> {
-    let Some(h) = read_header(src, 0, total)? else {
+async fn media_type(io: &mut Io, total: u64) -> Result<&'static str> {
+    let Some(h) = read_header(io, 0, total).await? else {
         return Ok("video/mp4");
     };
     if h.ty != FTYP || h.size < h.header_len as u64 + 4 {
         return Ok("video/mp4");
     }
     let mut brand = [0u8; 4];
-    read_at(src, h.header_len as u64, &mut brand)?;
+    io.read_at(h.header_len as u64, &mut brand).await?;
     Ok(match &brand {
         b"avif" | b"avis" => "image/avif",
         b"heic" | b"heix" | b"hevc" | b"hevx" => "image/heic",
@@ -492,7 +517,7 @@ fn purpose_label(p: &[u8]) -> Option<&'static str> {
     }
 }
 
-fn classify(src: &mut dyn ReadSeek, at: u64, h: &BoxHeader) -> Result<Classified> {
+async fn classify(io: &mut Io, at: u64, h: &BoxHeader) -> Result<Classified> {
     let plain = |kind| Classified {
         kind,
         header_len: h.header_len,
@@ -511,7 +536,7 @@ fn classify(src: &mut dyn ReadSeek, at: u64, h: &BoxHeader) -> Result<Classified
         return Err(bad(at, "uuid box too small for its type"));
     }
     let mut u = [0u8; 16];
-    read_at(src, body, &mut u)?;
+    io.read_at(body, &mut u).await?;
     let after_uuid = body + 16;
     if u == XMP_UUID {
         return Ok(Classified {
@@ -535,7 +560,7 @@ fn classify(src: &mut dyn ReadSeek, at: u64, h: &BoxHeader) -> Result<Classified
     }
     let n = (box_end - purpose_at).min(MAX_PURPOSE_LEN as u64 + 1) as usize;
     let mut buf = [0u8; MAX_PURPOSE_LEN + 1];
-    read_at(src, purpose_at, &mut buf[..n])?;
+    io.read_at(purpose_at, &mut buf[..n]).await?;
     let nul = buf[..n]
         .iter()
         .position(|&b| b == 0)
@@ -593,14 +618,13 @@ impl StoreCounts {
     }
 }
 
-fn parse_with(handler: Arc<dyn ContainerHandler>, src: &mut dyn ReadSeek) -> Result<Structure> {
-    let mut ahead = ReadAhead::new(src, PARSE_WINDOW);
-    let src: &mut dyn ReadSeek = &mut ahead;
-    let total = src.seek(SeekFrom::End(0))?;
+async fn parse_with(handler: Arc<dyn ContainerHandler>, mut io: Io) -> Result<Structure> {
+    let io = &mut io;
+    let total = io.len();
     if total < 8 {
         return Err(Error::InvalidFormat("BMFF too small".into()));
     }
-    let mut b = StructureBuilder::new(handler, media_type(src, total)?, total);
+    let mut b = StructureBuilder::new(handler, media_type(io, total).await?, total);
     let mut counts = StoreCounts::default();
     // Top-level segments in order (for placing item data), and file-level `meta`
     // boxes (where HEIF items are listed).
@@ -609,12 +633,12 @@ fn parse_with(handler: Arc<dyn ContainerHandler>, src: &mut dyn ReadSeek) -> Res
 
     let mut at = 0u64;
     while at < total {
-        let Some(h) = read_header(src, at, total)? else {
+        let Some(h) = read_header(io, at, total).await? else {
             // Fewer than 8 bytes cannot be a box: keep them as unnamed trailing data.
             b.push_span(SegmentKind::Other, Name::None, 0, total - at, 0)?;
             break;
         };
-        let c = classify(src, at, &h)?;
+        let c = classify(io, at, &h).await?;
         let id = b.push_span(
             c.kind,
             Name::FourCC(h.ty),
@@ -626,7 +650,7 @@ fn parse_with(handler: Arc<dyn ContainerHandler>, src: &mut dyn ReadSeek) -> Res
         if h.ty == META {
             let content = at + c.header_len as u64;
             let end = at + h.size;
-            let body = if meta_lacks_full_box_header(src, content, end) {
+            let body = if meta_lacks_full_box_header(io, content, end).await {
                 content
             } else {
                 content + 4
@@ -650,11 +674,11 @@ fn parse_with(handler: Arc<dyn ContainerHandler>, src: &mut dyn ReadSeek) -> Res
     for (body, end) in metas {
         // Items are optional metadata: a `meta` box that cannot be read as HEIF
         // items does not make the file unreadable.
-        let Ok(found) = read_items(src, body, end) else {
+        let Ok(found) = read_items(io, body, end).await else {
             continue;
         };
         for f in &found {
-            item_entity(&mut b, src, &placed, f)?;
+            item_entity(&mut b, io, &placed, f).await?;
         }
     }
     b.finish()
@@ -663,7 +687,7 @@ fn parse_with(handler: Arc<dyn ContainerHandler>, src: &mut dyn ReadSeek) -> Res
 /// Largest `meta` box read to look for items.
 const MAX_META_BOX: u64 = 16 << 20;
 
-fn read_items(src: &mut dyn ReadSeek, body: u64, end: u64) -> Result<Vec<heif_items::Found>> {
+async fn read_items(io: &mut Io, body: u64, end: u64) -> Result<Vec<heif_items::Found>> {
     let len = end - body;
     if len > MAX_META_BOX {
         return Err(Error::LimitExceeded {
@@ -671,8 +695,7 @@ fn read_items(src: &mut dyn ReadSeek, body: u64, end: u64) -> Result<Vec<heif_it
             limit: MAX_META_BOX,
         });
     }
-    let mut buf = vec![0u8; len as usize];
-    read_at(src, body, &mut buf)?;
+    let buf = io.read_vec(body, len as usize).await?;
     heif_items::find(&buf, body)
 }
 
@@ -703,9 +726,9 @@ fn split_over_segments(
 
 /// Add the entity for one HEIF item. An item that cannot be located in the file is
 /// skipped.
-fn item_entity(
+async fn item_entity(
     b: &mut StructureBuilder,
-    src: &mut dyn ReadSeek,
+    io: &mut Io,
     placed: &[(SegmentId, u64, u64)],
     f: &heif_items::Found,
 ) -> Result<()> {
@@ -715,7 +738,7 @@ fn item_entity(
         // field; the entity is the TIFF data.
         let (at, len) = extents[0];
         let mut h = [0u8; 4];
-        if len < 4 || read_at(src, at, &mut h).is_err() {
+        if len < 4 || io.read_at(at, &mut h).await.is_err() {
             return Ok(());
         }
         let skip = 4u64.saturating_add(u32::from_be_bytes(h) as u64);
@@ -808,21 +831,18 @@ struct Candidate {
     flags: u32,
 }
 
-fn read_u32_at(src: &mut dyn ReadSeek, at: u64) -> Result<u32> {
+async fn read_u32_at(io: &mut Io, at: u64) -> Result<u32> {
     let mut b = [0u8; 4];
-    read_at(src, at, &mut b)?;
+    io.read_at(at, &mut b).await?;
     Ok(u32::from_be_bytes(b))
 }
 
 /// Find the offset-bearing boxes inside one top-level box by reading box headers,
 /// then read just their table headers.
-fn collect_patches(src: &mut dyn ReadSeek, seg: &Segment, map: &OffsetMap) -> Result<Vec<Patch>> {
-    let mut ahead = ReadAhead::new(src, PARSE_WINDOW);
-    let src: &mut dyn ReadSeek = &mut ahead;
+async fn collect_patches(io: &mut Io, seg: &Segment, map: &OffsetMap) -> Result<Vec<Patch>> {
     let mut cands: Vec<Candidate> = Vec::new();
-    let mut path = String::new();
     let ext = seg.extent();
-    walk_level(src, ext.offset(), ext.end(), 1, &mut path, &mut |n| {
+    walk(io, ext.offset(), ext.end(), &mut |n: &Node<'_>| {
         let table = match n.path {
             "/moov/trak/mdia/minf/stbl/stco" => Table::Stco,
             "/moov/trak/mdia/minf/stbl/co64" => Table::Co64,
@@ -849,11 +869,12 @@ fn collect_patches(src: &mut dyn ReadSeek, seg: &Segment, map: &OffsetMap) -> Re
             flags,
         });
         Ok(())
-    })?;
+    })
+    .await?;
 
     let mut patches = Vec::with_capacity(cands.len());
     for c in cands {
-        if let Some(p) = build_patch(src, &c, map)? {
+        if let Some(p) = build_patch(io, &c, map).await? {
             patches.push(p);
         }
     }
@@ -890,7 +911,7 @@ fn table(
     }))
 }
 
-fn build_patch(src: &mut dyn ReadSeek, c: &Candidate, map: &OffsetMap) -> Result<Option<Patch>> {
+async fn build_patch(io: &mut Io, c: &Candidate, map: &OffsetMap) -> Result<Option<Patch>> {
     let room = |need: u64| -> Result<()> {
         if c.end.saturating_sub(c.content) < need {
             return Err(bad(c.content, "offset table box is truncated"));
@@ -901,13 +922,13 @@ fn build_patch(src: &mut dyn ReadSeek, c: &Candidate, map: &OffsetMap) -> Result
         Table::Stco | Table::Co64 => {
             room(4)?;
             let w: u8 = if matches!(c.table, Table::Stco) { 4 } else { 8 };
-            let count = read_u32_at(src, c.content)? as u64;
+            let count = read_u32_at(io, c.content).await? as u64;
             table(c.content + 4, count, w as u32, 0, w, c.end)
         }
         Table::Saio => {
             let skip = if c.flags & 1 == 1 { 8 } else { 0 };
             room(skip + 4)?;
-            let count = read_u32_at(src, c.content + skip)? as u64;
+            let count = read_u32_at(io, c.content + skip).await? as u64;
             let w: u8 = if c.version == 0 { 4 } else { 8 };
             table(c.content + skip + 4, count, w as u32, 0, w, c.end)
         }
@@ -920,8 +941,8 @@ fn build_patch(src: &mut dyn ReadSeek, c: &Candidate, map: &OffsetMap) -> Result
         }
         Table::Tfra => {
             room(12)?;
-            let info = read_u32_at(src, c.content + 4)?;
-            let count = read_u32_at(src, c.content + 8)? as u64;
+            let info = read_u32_at(io, c.content + 4).await?;
+            let count = read_u32_at(io, c.content + 8).await? as u64;
             let w: u32 = if c.version == 1 { 8 } else { 4 };
             let sizes = ((info >> 4) & 3) + ((info >> 2) & 3) + (info & 3) + 3;
             table(c.content + 12, count, 2 * w + sizes, w, w as u8, c.end)
@@ -934,8 +955,7 @@ fn build_patch(src: &mut dyn ReadSeek, c: &Candidate, map: &OffsetMap) -> Result
                     limit: MAX_IN_MEMORY_BOX,
                 });
             }
-            let mut data = vec![0u8; len as usize];
-            read_at(src, c.content, &mut data)?;
+            let mut data = io.read_vec(c.content, len as usize).await?;
             adjust_iloc(&mut data, c.version, map)?;
             Ok(Some(Patch::Bytes {
                 at: c.content,
@@ -1147,6 +1167,28 @@ fn new_xmp(d: &[u8]) -> Result<Op<'_>> {
     })
 }
 
+/// The bytes of `entity`, its parts joined, read through `io`.
+async fn read_entity(src: &Structure, io: &mut Io, entity: &Entity) -> Result<Vec<u8>> {
+    let mut out = Vec::new();
+    for part in entity.parts() {
+        let r = part.range();
+        if r.end() > src.total_size() {
+            return Err(Error::InvalidSegment {
+                offset: r.offset(),
+                reason: "range outside the asset".into(),
+            });
+        }
+        if (out.len() as u64).saturating_add(r.len()) > MAX_SEGMENT_SIZE {
+            return Err(Error::LimitExceeded {
+                what: "read size",
+                limit: MAX_SEGMENT_SIZE,
+            });
+        }
+        out.extend(io.read_vec(r.offset(), r.len() as usize).await?);
+    }
+    Ok(out)
+}
+
 fn op_len(op: &Op<'_>, src: &Structure) -> Result<u64> {
     Ok(match op {
         Op::Copy(id) | Op::Scan(id) | Op::Relabel { id, .. } => src.segment(*id)?.extent().len(),
@@ -1158,9 +1200,9 @@ fn op_len(op: &Op<'_>, src: &Structure) -> Result<u64> {
 
 /// Decide what the output contains: the single source of truth for both the
 /// destination structure and the bytes written.
-fn plan<'a, R: Read + Seek + ?Sized>(
+async fn plan<'a>(
     src: &Structure,
-    stream: &mut R,
+    io: &mut Io,
     updates: &'a Updates,
 ) -> Result<(Vec<Op<'a>>, Structure, OffsetMap)> {
     let segs = src.segments();
@@ -1184,7 +1226,7 @@ fn plan<'a, R: Read + Seek + ?Sized>(
         .or_else(|| src.entities_labelled(SegmentKind::Jumbf, ORIGINAL).next());
     let mut addition: Option<Vec<u8>> = match (&updates.jumbf, updates.jumbf_is_update, frozen) {
         (MetadataUpdate::Set(full), true, Some(e)) => {
-            let existing = src.read_entity(stream, e)?;
+            let existing = read_entity(src, io, e).await?;
             super::jumbf::addition_to(&existing, full)?
         }
         _ => None,
@@ -1424,9 +1466,9 @@ fn plan<'a, R: Read + Seek + ?Sized>(
 
 /// The steps that write the planned `ops`. Reads the source for what the plan
 /// needs to know: the offset tables to rewrite and the header of a relabelled box.
-fn steps<'a>(
+async fn steps<'a>(
     src: &Structure,
-    stream: &mut dyn ReadSeek,
+    io: &mut Io,
     ops: Vec<Op<'a>>,
     structure: Structure,
     map: OffsetMap,
@@ -1441,7 +1483,7 @@ fn steps<'a>(
             }
             Op::Scan(sid) => {
                 let seg = src.segment(sid)?;
-                let mut patches = collect_patches(stream, seg, &map)?;
+                let mut patches = collect_patches(io, seg, &map).await?;
                 for (role, range) in seg.regions() {
                     patched_steps(&mut plan, dest, role, range, &mut patches, &map)?;
                 }
@@ -1456,7 +1498,7 @@ fn steps<'a>(
                     .filter(|p| *p == 8 || *p == 16)
                     .ok_or_else(|| bad(header.offset(), "unexpected C2PA box header"))?;
                 let mut h = vec![0u8; header.len() as usize];
-                read_at(stream, header.offset(), &mut h)?;
+                io.read_at(header.offset(), &mut h).await?;
                 let at = prefix + 16 + 4;
                 if &h[at..at + from.len()] != from.as_bytes() || h[at + from.len()] != 0 {
                     return Err(bad(

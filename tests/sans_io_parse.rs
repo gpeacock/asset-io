@@ -14,7 +14,7 @@
 //! Parsing through a `Task`, with the I/O done by the test: the same structure as
 //! the blocking parse, from a few small requests.
 
-#![cfg(all(feature = "png", feature = "riff", feature = "jpeg"))]
+#![cfg(all(feature = "png", feature = "riff", feature = "jpeg", feature = "bmff"))]
 
 use asset_io::{Error, HandlerRegistry, NullSink, Progress, Result, Structure, Task, Updates};
 use std::io::Cursor;
@@ -298,4 +298,148 @@ fn a_jpeg_write_plan_task_gives_the_same_plan() {
         checked += 1;
     }
     assert!(checked > 0, "no fixtures found");
+}
+
+#[test]
+fn bmff_parses_through_a_task_like_the_blocking_parse() {
+    let reg = HandlerRegistry::builtin();
+    let mut checked = 0;
+    for (name, ext) in [
+        ("sample1.heic", "heic"),
+        ("sample1.avif", "avif"),
+        ("sample1.m4a", "m4a"),
+    ] {
+        let Some(bytes) = fixture(name) else { continue };
+        let want = reg.parse(ext, &mut Cursor::new(&bytes)).unwrap();
+        let (got, requests) = drive(reg.parse_task(ext, bytes.len() as u64).unwrap(), &bytes);
+        assert_eq!(shape(&got.unwrap()), shape(&want), "{name}");
+        assert!(requests < 100, "{name}: {requests} requests");
+        let (got, _) = drive(reg.parse_detect_task(bytes.len() as u64), &bytes);
+        assert_eq!(shape(&got.unwrap()), shape(&want), "{name} (detected)");
+
+        for cut in (0..bytes.len().min(300)).chain(bytes.len() - 30..bytes.len()) {
+            let part = &bytes[..cut];
+            let a = reg.parse(ext, &mut Cursor::new(part));
+            let (b, _) = drive(reg.parse_task(ext, part.len() as u64).unwrap(), part);
+            match (&a, &b) {
+                (Ok(x), Ok(y)) => assert_eq!(shape(x), shape(y), "{name} cut {cut}"),
+                (Err(x), Err(y)) => assert_eq!(x.to_string(), y.to_string(), "{name} cut {cut}"),
+                _ => panic!("{name} cut {cut}: {a:?} vs {b:?}"),
+            }
+        }
+        checked += 1;
+    }
+    assert!(checked > 0, "no fixtures found");
+}
+
+fn bx(ty: &[u8; 4], data: &[u8]) -> Vec<u8> {
+    let mut v = ((data.len() + 8) as u32).to_be_bytes().to_vec();
+    v.extend(ty);
+    v.extend(data);
+    v
+}
+
+fn full(ty: &[u8; 4], version: u8, flags: u32, data: &[u8]) -> Vec<u8> {
+    let mut b = vec![version];
+    b.extend(&flags.to_be_bytes()[1..]);
+    b.extend(data);
+    bx(ty, &b)
+}
+
+/// A fragmented MP4: `fragments` pairs of `moof` (with an absolute `tfhd` base
+/// data offset) and `mdat`, then an `mfra` listing every `moof`.
+fn fragmented(fragments: usize) -> Vec<u8> {
+    let mut ftyp = b"isom".to_vec();
+    ftyp.extend([0u8; 4]);
+    ftyp.extend(b"isom");
+    let mut v = bx(b"ftyp", &ftyp);
+    v.extend(bx(b"moov", &bx(b"mvex", &full(b"trex", 0, 0, &[0u8; 20]))));
+    let mut at = Vec::new();
+    for i in 0..fragments {
+        let here = v.len() as u64;
+        let mut tfhd = 1u32.to_be_bytes().to_vec();
+        tfhd.extend(here.to_be_bytes());
+        let traf = bx(b"traf", &full(b"tfhd", 0, 1, &tfhd));
+        v.extend(bx(
+            b"moof",
+            &[full(b"mfhd", 0, 0, &(i as u32).to_be_bytes()), traf].concat(),
+        ));
+        v.extend(bx(b"mdat", &[i as u8; 200]));
+        at.push(here);
+    }
+    let mut tfra = 1u32.to_be_bytes().to_vec();
+    tfra.extend(0u32.to_be_bytes());
+    tfra.extend((fragments as u32).to_be_bytes());
+    for (i, here) in at.iter().enumerate() {
+        tfra.extend((i as u32).to_be_bytes());
+        tfra.extend((*here as u32).to_be_bytes());
+        tfra.extend([1, 1, 1]);
+    }
+    v.extend(bx(b"mfra", &full(b"tfra", 0, 0, &tfra)));
+    v
+}
+
+#[test]
+fn a_fragmented_file_plans_through_a_task_and_every_fragment_is_relocated() {
+    use asset_io::Step;
+    let reg = HandlerRegistry::builtin();
+    let f = fragmented(300);
+    let s = reg.parse("mp4", &mut Cursor::new(&f)).unwrap();
+    let u = Updates::new().set_jumbf({
+        let mut j = 100u32.to_be_bytes().to_vec();
+        j.extend(b"jumb");
+        j.extend([0u8; 92]);
+        j
+    });
+    let want = s.write_plan(&mut Cursor::new(&f), &u).unwrap();
+    let (got, requests) = drive(s.write_plan_task(&u), &f);
+    let got = got.unwrap();
+    assert_eq!(execute(&got, &f), execute(&want, &f));
+    // One rewritten base offset per fragment, plus the index of them.
+    let relocated = got
+        .steps()
+        .iter()
+        .filter(|st| matches!(st, Step::Relocate { .. }))
+        .count();
+    assert_eq!(relocated, 300 + 1);
+    // The reads are headers and table heads, a window apiece at most.
+    assert!(requests <= 2 * 300 + 20, "{requests} requests");
+
+    // The offsets in the output point at the moof boxes that moved.
+    let out = execute(&got, &f);
+    let moved = reg.parse("mp4", &mut Cursor::new(&out)).unwrap();
+    assert_eq!(moved.total_size(), out.len() as u64);
+    let first_moof = moved
+        .segments()
+        .iter()
+        .find(|g| g.name() == asset_io::Name::FourCC(*b"moof"))
+        .unwrap();
+    let at = first_moof.extent().offset() as usize;
+    let tfhd_base = |moof: usize| {
+        // moof header 8, mfhd 16, traf header 8, tfhd header 8 + version/flags 4 +
+        // track id 4, then the 8-byte base data offset.
+        let p = moof + 8 + 16 + 8 + 8 + 4 + 4;
+        u64::from_be_bytes(out[p..p + 8].try_into().unwrap())
+    };
+    assert_eq!(tfhd_base(at), at as u64);
+}
+
+#[test]
+fn walking_boxes_works_with_a_callback_that_is_not_send() {
+    use std::rc::Rc;
+    let reg = HandlerRegistry::builtin();
+    let f = fragmented(3);
+    let s = reg.parse("mp4", &mut Cursor::new(&f)).unwrap();
+    // An `Rc` cannot move between threads; the blocking walk does not need it to.
+    let seen = Rc::new(std::cell::RefCell::new(Vec::new()));
+    let sink = seen.clone();
+    s.walk(&mut Cursor::new(&f), |n| {
+        sink.borrow_mut().push(n.path.to_owned());
+        Ok(())
+    })
+    .unwrap();
+    let seen = seen.borrow();
+    assert!(seen.contains(&"/moov/mvex/trex".to_string()));
+    assert!(seen.contains(&"/moof/traf/tfhd".to_string()));
+    assert_eq!(seen.iter().filter(|p| *p == "/moof").count(), 3);
 }

@@ -69,9 +69,6 @@ mod handler;
 mod mapped;
 pub mod plan;
 mod range;
-// Used by the handlers not yet parsing through `Io`.
-#[cfg(feature = "bmff")]
-mod readahead;
 mod registry;
 mod segment;
 mod sink;
@@ -99,7 +96,7 @@ pub use sink::{Chunk, NullSink, Sink};
 pub use structure::{
     Entity, Part, Region, SegmentId, Structure, StructureBuilder, SubAsset, MAX_SEGMENTS,
 };
-pub use task::{BoxFuture, Io, Progress, ReadRequest, Reader, Task, DEFAULT_WINDOW};
+pub use task::{block_on, BoxFuture, Io, Progress, ReadRequest, Reader, Task, DEFAULT_WINDOW};
 pub use thumbnail::Thumbnail;
 #[cfg(feature = "exif")]
 pub use tiff::ExifInfo;

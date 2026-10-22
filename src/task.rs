@@ -444,6 +444,42 @@ impl<'f, T> Task<'f, T> {
     }
 }
 
+/// Run code that reads a stream to completion on this thread, reading from `src`.
+///
+/// This is `Task::new(total, make).run(src)` for code that does not need to be
+/// [`Send`]: it holds a callback that is not, say. The code is not boxed, and
+/// nothing outlives the call.
+pub fn block_on<R, T, F>(total: u64, src: &mut R, make: impl FnOnce(Io) -> F) -> Result<T>
+where
+    R: Read + Seek + ?Sized,
+    F: Future<Output = Result<T>>,
+{
+    let link = Arc::new(Link::default());
+    let io = Io {
+        link: link.clone(),
+        total,
+        win: Vec::new(),
+        start: 0,
+    };
+    let mut fut = std::pin::pin!(make(io));
+    let mut cx = Context::from_waker(Waker::noop());
+    let mut pos = None;
+    loop {
+        match fut.as_mut().poll(&mut cx) {
+            Poll::Ready(done) => return done,
+            Poll::Pending => {
+                let slot = link.lock();
+                if slot.request.is_none() {
+                    return Err(Error::InvalidFormat(
+                        "task suspended on something other than a read".into(),
+                    ));
+                }
+                pos = Some(ReadRequest { slot }.fill_from(src, pos)?);
+            }
+        }
+    }
+}
+
 /// What [`Task::resume`] found.
 #[derive(Debug)]
 #[non_exhaustive]
