@@ -22,10 +22,12 @@
 //! that does no I/O itself), because the plan is plain data.
 
 use crate::error::{Error, Result};
+use crate::execute::{Action, Execution};
 use crate::range::ByteRange;
 use crate::segment::{Role, Segment};
-use crate::sink::{flush_run, write_buffer_len, Emitter, Piece, Sink, RUN_WINDOWS};
+use crate::sink::Sink;
 use crate::structure::{SegmentId, Structure};
+use crate::task::Task;
 use std::borrow::Cow;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::sync::Arc;
@@ -112,7 +114,7 @@ impl Relocate {
     }
 
     /// Rewrite the offset in each whole entry of `block`.
-    fn apply(&self, block: &mut [u8]) -> Result<()> {
+    pub(crate) fn apply(&self, block: &mut [u8]) -> Result<()> {
         let (off, w) = (self.field_off as usize, self.width as usize);
         for entry in block.chunks_exact_mut(self.stride as usize) {
             let f = &mut entry[off..off + w];
@@ -218,6 +220,10 @@ impl<'a> WritePlan<'a> {
         }
     }
 
+    pub(crate) fn from_parts(structure: Structure, steps: Vec<Step<'a>>) -> Self {
+        Self { structure, steps }
+    }
+
     /// Append a step that copies `src` of the source asset into `role` of `dest`.
     pub fn copy(&mut self, dest: SegmentId, role: Role, src: ByteRange) -> &mut Self {
         self.steps.push(Step::Copy { dest, role, src });
@@ -257,6 +263,33 @@ impl<'a> WritePlan<'a> {
         self
     }
 
+    /// Replace the steps that write `role` of `dest` with one that writes `data`,
+    /// for bytes that depend on the rest of the output. It must be as long as what
+    /// it replaces. Fails if `dest` has no step for `role`.
+    pub fn replace(
+        &mut self,
+        dest: SegmentId,
+        role: Role,
+        data: impl Into<Cow<'a, [u8]>>,
+    ) -> Result<&mut Self> {
+        let hit = |s: &Step<'_>| s.dest() == dest && s.role() == role;
+        let at = self
+            .steps
+            .iter()
+            .position(hit)
+            .ok_or(Error::NotFound { what: "step" })?;
+        self.steps.retain(|s| !hit(s));
+        self.steps.insert(
+            at,
+            Step::Put {
+                dest,
+                role,
+                data: data.into(),
+            },
+        );
+        Ok(self)
+    }
+
     /// Append the steps that copy the source segment `src` unchanged into `dest`.
     pub fn copy_segment(&mut self, dest: SegmentId, src: &Segment) -> &mut Self {
         for (role, range) in src.regions() {
@@ -280,6 +313,12 @@ impl<'a> WritePlan<'a> {
         self.structure
     }
 
+    /// Start carrying the plan out, step by step, with the I/O left to the caller;
+    /// see [`Execution`].
+    pub fn start(&self) -> Execution<'_, 'a> {
+        Execution::new(self)
+    }
+
     /// Perform the write: run every step against `src`, write the bytes to `out`
     /// and deliver them to `sink`. `out` is written from its current position;
     /// offsets reported to the sink are relative to the first byte written.
@@ -287,108 +326,34 @@ impl<'a> WritePlan<'a> {
     /// Fails, and may leave partial output, if the steps do not produce exactly
     /// the structure: bytes at the wrong offset, in the wrong role, or too few or too
     /// many of them.
+    ///
+    /// This drives [`start`](Self::start) with blocking reads and writes.
     pub fn execute<R, W, S>(&self, src: &mut R, out: &mut W, sink: &mut S) -> Result<()>
     where
         R: Read + Seek + ?Sized,
         W: Write + ?Sized,
         S: Sink + ?Sized,
     {
-        sink.begin(&self.structure)?;
-
-        let chunk = write_buffer_len(self.structure.total_size());
-        let mut buf = vec![0u8; chunk];
-        // Source regions that are contiguous in `src` are read and written as one
-        // run (see `Emitter::copy_run`). A run is flushed at a gap, at bytes the
-        // handler supplies, or, between segments, once it spans RUN_WINDOWS
-        // buffers, which bounds `pieces` however many small segments there are.
-        let run_limit = (chunk as u64).saturating_mul(RUN_WINDOWS);
-        let mut pieces: Vec<Piece> = Vec::new();
-        let mut run_len = 0u64;
-
-        let mut em = Emitter::new(out, sink, &self.structure);
-        for step in &self.steps {
-            match step {
-                Step::Copy {
-                    dest,
-                    role,
-                    src: range,
-                } => {
-                    if range.is_empty() {
-                        continue;
+        let mut run = self.start();
+        // Where the source stream is, so that a read that continues the last one
+        // does not seek.
+        let mut at: Option<u64> = None;
+        loop {
+            match run.step(sink)? {
+                Action::Read { offset, buf } => {
+                    if at != Some(offset) {
+                        src.seek(SeekFrom::Start(offset))?;
                     }
-                    if let Some(last) = pieces.last() {
-                        let gap = last.range.end() != range.offset();
-                        if gap || (last.dest != *dest && run_len >= run_limit) {
-                            flush_run(&mut em, src, &mut pieces, &mut buf)?;
-                            run_len = 0;
-                        }
-                    }
-                    run_len = run_len.saturating_add(range.len());
-                    pieces.push(Piece {
-                        dest: *dest,
-                        role: *role,
-                        range: *range,
-                    });
+                    src.read_exact(buf)?;
+                    at = Some(offset + buf.len() as u64);
                 }
-                Step::Put { dest, role, data } => {
-                    flush_run(&mut em, src, &mut pieces, &mut buf)?;
-                    run_len = 0;
-                    em.enter_segment(*dest)?;
-                    em.put(*role, data)?;
-                }
-                Step::Relocate {
-                    dest,
-                    role,
-                    src: range,
-                    rule,
-                } => {
-                    flush_run(&mut em, src, &mut pieces, &mut buf)?;
-                    run_len = 0;
-                    em.enter_segment(*dest)?;
-                    relocate(&mut em, src, *role, *range, rule, &mut buf)?;
-                }
+                Action::Write(bytes) => out.write_all(bytes)?,
+                Action::Done => break,
             }
         }
-        flush_run(&mut em, src, &mut pieces, &mut buf)?;
-        em.finish()
+        out.flush()?;
+        Ok(())
     }
-}
-
-/// Copy `range` through `buf`, rewriting the offsets in it.
-fn relocate<R, W, S>(
-    em: &mut Emitter<'_, W, S>,
-    src: &mut R,
-    role: Role,
-    range: ByteRange,
-    rule: &Relocate,
-    buf: &mut [u8],
-) -> Result<()>
-where
-    R: Read + Seek + ?Sized,
-    W: Write + ?Sized,
-    S: Sink + ?Sized,
-{
-    let stride = rule.stride as usize;
-    if !range.len().is_multiple_of(stride as u64) {
-        return Err(Error::InvalidSegment {
-            offset: range.offset(),
-            reason: "offset table is not a whole number of entries".into(),
-        });
-    }
-    let per_block = (buf.len() / stride).max(1);
-    let mut left = range.len() / stride as u64;
-    src.seek(SeekFrom::Start(range.offset()))?;
-    while left > 0 {
-        let n = left.min(per_block as u64) as usize;
-        let block = buf
-            .get_mut(..n * stride)
-            .ok_or_else(|| Error::InvalidFormat("copy buffer smaller than a table entry".into()))?;
-        src.read_exact(block)?;
-        rule.apply(block)?;
-        em.put(role, block)?;
-        left -= n as u64;
-    }
-    Ok(())
 }
 
 impl Structure {
@@ -402,6 +367,21 @@ impl Structure {
         updates: &'a crate::Updates,
     ) -> Result<WritePlan<'a>> {
         self.handler().write_plan(self, src, updates)
+    }
+}
+
+impl Structure {
+    /// A task that builds the plan for writing this asset with `updates`, for a
+    /// caller that does its own I/O; see [`Task`]. The task reads the source (a
+    /// stream of [`total_size`](Self::total_size) bytes), which it asks for as it
+    /// needs it. The result is the plan [`write_plan`](Self::write_plan) returns.
+    pub fn write_plan_task<'f, 'a: 'f>(
+        &'f self,
+        updates: &'a crate::Updates,
+    ) -> Task<'f, WritePlan<'a>> {
+        Task::new(self.total_size(), move |io| {
+            self.handler().write_plan_async(self, io, updates)
+        })
     }
 }
 
@@ -425,41 +405,41 @@ pub fn validate(plan: &WritePlan<'_>, source_len: u64) -> Result<()> {
         let end = pos.checked_add(step.len());
         let fits = region.offset() <= pos && end.is_some_and(|e| e <= region.end());
         if !fits {
-            return Err(Error::InvalidSegment {
-                offset: pos,
-                reason: format!(
+            return Err(Error::invalid_segment(
+                pos,
+                format!(
                     "step of {} bytes does not fit the {:?} of its segment",
                     step.len(),
                     step.role()
                 ),
-            });
+            ));
         }
         if let Step::Relocate { src, rule, .. } = step {
             if !src.len().is_multiple_of(rule.stride() as u64) {
-                return Err(Error::InvalidSegment {
-                    offset: src.offset(),
-                    reason: "offset table is not a whole number of entries".into(),
-                });
+                return Err(Error::invalid_segment(
+                    src.offset(),
+                    "offset table is not a whole number of entries",
+                ));
             }
         }
         if let Step::Copy { src, .. } | Step::Relocate { src, .. } = step {
             if src.end() > source_len {
-                return Err(Error::InvalidSegment {
-                    offset: src.offset(),
-                    reason: "copy reads past the end of the source".into(),
-                });
+                return Err(Error::invalid_segment(
+                    src.offset(),
+                    "copy reads past the end of the source",
+                ));
             }
         }
         pos += step.len();
     }
     if pos != structure.total_size() {
-        return Err(Error::InvalidSegment {
-            offset: pos,
-            reason: format!(
+        return Err(Error::invalid_segment(
+            pos,
+            format!(
                 "steps write {pos} bytes, structure is {}",
                 structure.total_size()
             ),
-        });
+        ));
     }
     Ok(())
 }

@@ -36,6 +36,7 @@ case "${1:-help}" in
         echo "  - fuzz_write   : Write operations with updates"
         echo "  - fuzz_xmp     : XMP metadata parsing and modification"
         echo "  - fuzz_mpf     : Multi-Picture Format index parsing and rewriting"
+        echo "  - fuzz_conform : What parses must keep the promises of every handler"
         ;;
 
     parse)
@@ -53,6 +54,10 @@ case "${1:-help}" in
     xmp)
         run_fuzz fuzz_xmp ${2:-60}
         ;;
+
+    conform)
+        run_fuzz fuzz_conform ${2:-60}
+        ;;
     
     all)
         echo "Running all fuzz targets for ${2:-60} seconds each..."
@@ -60,6 +65,7 @@ case "${1:-help}" in
         run_fuzz fuzz_write ${2:-60}
         run_fuzz fuzz_xmp ${2:-60}
         run_fuzz fuzz_mpf ${2:-60}
+        run_fuzz fuzz_conform ${2:-60}
         ;;
     
     build)
@@ -68,6 +74,7 @@ case "${1:-help}" in
         cargo +nightly fuzz build fuzz_write
         cargo +nightly fuzz build fuzz_xmp
         cargo +nightly fuzz build fuzz_mpf
+        cargo +nightly fuzz build fuzz_conform
         echo "✅ All fuzz targets built successfully"
         ;;
     

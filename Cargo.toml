@@ -22,6 +22,7 @@ memmap2 = { version = "0.9", optional = true }
 sha2 = "0.11"
 tempfile = "3"
 criterion = "0.5"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util"] }
 
 [features]
 default = ["jpeg", "png"]
@@ -29,14 +30,19 @@ jpeg = ["md5", "memchr"]
 png = []
 bmff = []
 riff = []
+svg = ["quick-xml"]
 exif = []
 xmp = ["quick-xml", "md5"]
 memory-mapped = ["memmap2"]
-all-formats = ["jpeg", "png", "bmff", "riff"]
+all-formats = ["jpeg", "png", "bmff", "riff", "svg"]
 
 [[example]]
 name = "inspect"
 required-features = ["all-formats", "xmp", "exif"]
+
+[[example]]
+name = "tokio_client"
+required-features = ["all-formats"]
 
 [[bench]]
 name = "io"

@@ -25,10 +25,11 @@ use crate::plan::WritePlan;
 use crate::segment::{Name, Segment, SegmentKind};
 use crate::sink::Sink;
 use crate::structure::{SegmentId, Structure};
+use crate::task::{BoxFuture, Io, Task};
 use crate::walk::Node;
 use crate::Updates;
 use std::borrow::Cow;
-use std::io::{Read, Seek, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::sync::Arc;
 
 /// A readable, seekable stream. Blanket-implemented, so any `Read + Seek` works.
@@ -119,32 +120,68 @@ pub trait ContainerHandler: std::fmt::Debug + Send + Sync {
         false
     }
 
-    /// Parse the whole structure of an asset.
+    /// Parse the whole structure of an asset, reading it through `io`.
+    ///
+    /// It is `async` so that the same code can be run by any I/O: see
+    /// [`Task`](crate::Task). Read with [`Io`], whose reads are `.await`ed;
+    /// everything else is ordinary code. [`parse`](Self::parse) and
+    /// [`HandlerRegistry::parse_task`](crate::HandlerRegistry::parse_task) run it.
     ///
     /// The result must tile the stream (see [`StructureBuilder`](crate::StructureBuilder))
     /// and must be built with `self` as its handler, which is why this takes the
-    /// `Arc`: `StructureBuilder::new(self, ...)`.
-    fn parse(self: Arc<Self>, src: &mut dyn ReadSeek) -> Result<Structure>;
+    /// `Arc`: `StructureBuilder::new(self, ...)`. Return
+    /// `Box::pin(async move { ... })`.
+    fn parse_async(self: Arc<Self>, io: Io) -> BoxFuture<'static, Result<Structure>>;
+
+    /// Parse the whole structure of an asset from a stream, reading it with
+    /// blocking calls. This runs [`parse_async`](Self::parse_async); there is no
+    /// need to implement it.
+    fn parse(self: Arc<Self>, src: &mut dyn ReadSeek) -> Result<Structure> {
+        let total = src.seek(SeekFrom::End(0))?;
+        src.seek(SeekFrom::Start(0))?;
+        Task::new(total, |io| self.parse_async(io)).run(src)
+    }
 
     /// Describe the write of the asset with `updates` applied: the structure of the
-    /// output and the steps that produce it. Nothing is written.
+    /// output and the steps that produce it. Nothing is written. The source is
+    /// read through `io`, which holds the stream `src_structure` was parsed from.
     ///
-    /// This is the method most handlers implement for writing. The default
+    /// This is the method to implement for writing; it is `async` for the same
+    /// reason as [`parse_async`](Self::parse_async). A handler that cannot write
+    /// leaves the default, which reports [`Error::UnsupportedFormat`]. The default
     /// [`write`](Self::write) executes the plan, and the default
-    /// [`plan`](Self::plan) returns its structure. `src` must be the stream
-    /// `src_structure` was parsed from; a handler that needs nothing from it ignores
-    /// it. The default reports [`Error::UnsupportedFormat`].
+    /// [`plan`](Self::plan) returns its structure. A handler that needs nothing
+    /// from the source ignores `io`. The default reports
+    /// [`Error::UnsupportedFormat`].
+    fn write_plan_async<'f, 'a: 'f>(
+        &'f self,
+        _src_structure: &'f Structure,
+        _io: Io,
+        _updates: &'a Updates,
+    ) -> BoxFuture<'f, Result<WritePlan<'a>>> {
+        Box::pin(async { Err(Error::UnsupportedFormat) })
+    }
+
+    /// Like [`write_plan_async`](Self::write_plan_async), reading the source from
+    /// `src` with blocking calls. This runs that method; there is no need to
+    /// implement it.
     fn write_plan<'a>(
         &self,
-        _src_structure: &Structure,
-        _src: &mut dyn ReadSeek,
-        _updates: &'a Updates,
+        src_structure: &Structure,
+        src: &mut dyn ReadSeek,
+        updates: &'a Updates,
     ) -> Result<WritePlan<'a>> {
-        Err(Error::UnsupportedFormat)
+        Task::new(src_structure.total_size(), |io| {
+            self.write_plan_async(src_structure, io, updates)
+        })
+        .run(src)
     }
 
     /// Write the asset with `updates` applied, delivering every output byte to
     /// `sink`, and return the structure of what was written.
+    ///
+    /// `out` is only written to, from its current position, so a file, a buffer, a
+    /// socket or a hashing writer will do.
     ///
     /// The default executes [`write_plan`](Self::write_plan). Override it only to
     /// write some other way, such as a container whose output cannot be described
@@ -153,7 +190,7 @@ pub trait ContainerHandler: std::fmt::Debug + Send + Sync {
         &self,
         src_structure: &Structure,
         src: &mut dyn ReadSeek,
-        out: &mut dyn ReadWriteSeek,
+        out: &mut dyn Write,
         updates: &Updates,
         sink: &mut dyn Sink,
     ) -> Result<Structure> {
@@ -183,12 +220,12 @@ pub trait ContainerHandler: std::fmt::Debug + Send + Sync {
     /// The asset's XMP packet, or `None` if it has none. Called through
     /// [`Structure::xmp`](crate::Structure::xmp).
     ///
-    /// The default reads the single XMP entity. Containers that split XMP over
+    /// The default reads the single XMP entity, decoded. Containers that split XMP over
     /// several elements and must reassemble it (JPEG extended XMP) override this.
     fn read_xmp(&self, structure: &Structure, src: &mut dyn ReadSeek) -> Result<Option<Vec<u8>>> {
         let mut src = src;
         match structure.entity(SegmentKind::Xmp)? {
-            Some(e) => structure.read_entity(&mut src, e).map(Some),
+            Some(e) => structure.read_decoded(&mut src, e).map(Some),
             None => Ok(None),
         }
     }
@@ -204,6 +241,29 @@ pub trait ContainerHandler: std::fmt::Debug + Send + Sync {
     /// which the item is stored as it is returns `data` unchanged.
     fn compose(&self, _kind: SegmentKind, _data: &[u8]) -> Result<Vec<u8>> {
         Err(Error::UnsupportedFormat)
+    }
+
+    /// The item an entity of `kind` holds, from the bytes the container stores for
+    /// it. The default returns them as they are; a container that stores an item
+    /// in another form overrides this and [`encode_entity`](Self::encode_entity):
+    /// SVG holds JUMBF as base64 text.
+    ///
+    /// [`Structure::store`](crate::Structure::store) and
+    /// [`Structure::xmp`](crate::Structure::xmp) decode, so callers get the item
+    /// whatever the container. [`Structure::read_entity`](crate::Structure::read_entity)
+    /// does not: it reads what is in the file, which is what a hash covers.
+    fn decode_entity(&self, _kind: SegmentKind, stored: Vec<u8>) -> Result<Vec<u8>> {
+        Ok(stored)
+    }
+
+    /// The bytes the container stores for `data` of `kind`: the inverse of
+    /// [`decode_entity`](Self::decode_entity), without any framing (that is
+    /// [`compose`](Self::compose)). The default returns `data` as it is.
+    ///
+    /// [`Structure::patch_exact`](crate::Structure::patch_exact) uses it to size and
+    /// write a replacement.
+    fn encode_entity<'a>(&self, _kind: SegmentKind, data: &'a [u8]) -> Result<Cow<'a, [u8]>> {
+        Ok(Cow::Borrowed(data))
     }
 
     /// Split a segment flagged [`Segment::subdivides`] into its finer elements, in

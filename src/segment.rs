@@ -171,20 +171,17 @@ impl Segment {
         name: Name,
     ) -> Result<Self> {
         if extent.is_empty() {
-            return Err(Error::InvalidSegment {
-                offset: extent.offset(),
-                reason: "empty segment".into(),
-            });
+            return Err(Error::invalid_segment(extent.offset(), "empty segment"));
         }
         let overhead = header_len as u64 + trailer_len as u64;
         if overhead > extent.len() {
-            return Err(Error::InvalidSegment {
-                offset: extent.offset(),
-                reason: format!(
+            return Err(Error::invalid_segment(
+                extent.offset(),
+                format!(
                     "header ({header_len}) + trailer ({trailer_len}) exceed extent ({})",
                     extent.len()
                 ),
-            });
+            ));
         }
         Ok(Self {
             extent,

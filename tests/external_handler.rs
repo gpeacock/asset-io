@@ -16,10 +16,11 @@
 //! handler would too.
 
 use asset_io::plan::validate;
+use asset_io::testing::Conformance;
 use asset_io::{
-    ByteRange, Chunk, ContainerHandler, Error, FormatSpec, HandlerRegistry, MetadataUpdate, Name,
-    ReadSeek, Result, Role, SegmentId, SegmentKind, Sink, Step, Structure, StructureBuilder,
-    Updates, WritePlan,
+    BoxFuture, ByteRange, Chunk, ContainerHandler, Error, Existing, FormatSpec, HandlerRegistry,
+    Io, MetadataSlot, Name, PlanBuilder, Result, Role, SegmentId, SegmentKind, Step, Structure,
+    StructureBuilder, Updates, WritePlan,
 };
 use std::io::Cursor;
 use std::sync::Arc;
@@ -42,117 +43,85 @@ impl ContainerHandler for Toy {
         header.starts_with(b"TOY!")
     }
 
-    fn parse(self: Arc<Self>, src: &mut dyn ReadSeek) -> Result<Structure> {
-        let mut data = Vec::new();
-        src.seek(std::io::SeekFrom::Start(0))?;
-        src.read_to_end(&mut data)?;
-        if !data.starts_with(b"TOY!") {
-            return Err(Error::InvalidFormat("not a toy".into()));
-        }
-        let mut b = StructureBuilder::new(self, "application/x-toy", data.len() as u64);
-        b.push_span(SegmentKind::Header, Name::FourCC(*b"TOY!"), 4, 0, 0)?;
-        let (mut at, mut idx) = (4usize, 0u64);
-        while at < data.len() {
-            let (kind, len) = match data[at..] {
-                [k, l, ..] => (k, l as usize),
-                _ => return Err(Error::InvalidFormat("truncated record".into())),
-            };
-            if at + 2 + len > data.len() {
-                return Err(Error::InvalidFormat("record overruns".into()));
-            }
-            let seg_kind = if kind == b'X' {
-                SegmentKind::Xmp
-            } else {
-                SegmentKind::Other
-            };
-            let id = b.push_span(seg_kind, Name::Id(idx), 2, len as u64, 0)?;
-            if kind == b'X' {
-                b.entity_of_segments(SegmentKind::Xmp, &[id])?;
-            }
-            at += 2 + len;
-            idx += 1;
-        }
-        b.finish()
+    fn parse_async(self: Arc<Self>, mut io: Io) -> BoxFuture<'static, Result<Structure>> {
+        Box::pin(async move {
+            // Read the whole stream; a real handler reads only what it needs.
+            let data = io.read_vec(0, io.len() as usize).await?;
+            parse_toy(self, &data)
+        })
     }
 
-    fn write_plan<'a>(
-        &self,
-        src: &Structure,
-        _: &mut dyn ReadSeek,
+    fn write_plan_async<'f, 'a: 'f>(
+        &'f self,
+        src: &'f Structure,
+        _io: Io,
         updates: &'a Updates,
-    ) -> Result<WritePlan<'a>> {
-        // What each output record is: a source segment to copy, or new XMP.
-        enum Rec<'a> {
-            Copy(SegmentId),
-            Xmp(&'a [u8]),
-        }
-        let mut recs = Vec::new();
-        let mut xmp_done = false;
-        for (i, seg) in src.segments().iter().enumerate() {
-            let id = SegmentId::from_index(i)?;
-            if seg.kind() != SegmentKind::Xmp {
-                recs.push(Rec::Copy(id));
-                continue;
-            }
-            match updates.xmp() {
-                MetadataUpdate::Set(d) if !xmp_done => {
-                    recs.push(Rec::Xmp(d));
-                    xmp_done = true;
-                }
-                MetadataUpdate::Remove | MetadataUpdate::Set(_) => {}
-                _ => recs.push(Rec::Copy(id)),
-            }
-        }
-        if let (MetadataUpdate::Set(d), false) = (updates.xmp(), xmp_done) {
-            recs.push(Rec::Xmp(d));
-        }
-
-        let len_of = |r: &Rec| match r {
-            Rec::Copy(id) => src.segment(*id).map(|s| s.extent().len()),
-            Rec::Xmp(d) => Ok(2 + d.len() as u64),
-        };
-        let mut total = 0;
-        for r in &recs {
-            total += len_of(r)?;
-        }
-        let mut b = StructureBuilder::new(src.handler().clone(), "application/x-toy", total);
-        for r in &recs {
-            match r {
-                Rec::Copy(id) => {
-                    let s = src.segment(*id)?;
-                    let new = b.push_span(
-                        s.kind(),
-                        s.name(),
-                        s.header().len() as u32,
-                        s.payload().len(),
-                        s.trailer().len() as u16,
-                    )?;
-                    if s.kind() == SegmentKind::Xmp {
-                        b.entity_of_segments(SegmentKind::Xmp, &[new])?;
-                    }
-                }
-                Rec::Xmp(d) => {
-                    let new = b.push_span(SegmentKind::Xmp, Name::None, 2, d.len() as u64, 0)?;
-                    b.entity_of_segments(SegmentKind::Xmp, &[new])?;
-                }
-            }
-        }
-
-        let mut plan = WritePlan::new(b.finish()?);
-        for (i, r) in recs.iter().enumerate() {
-            let dest = SegmentId::from_index(i)?;
-            match r {
-                Rec::Copy(id) => {
-                    plan.copy_segment(dest, src.segment(*id)?);
-                }
-                Rec::Xmp(d) => {
-                    plan.put(dest, Role::Header, vec![b'X', d.len() as u8]);
-                    plan.put(dest, Role::Payload, *d);
-                }
-            }
-        }
-        Ok(plan)
+    ) -> BoxFuture<'f, Result<WritePlan<'a>>> {
+        Box::pin(async move { write_toy_plan(src, updates) })
     }
+}
+
+fn write_toy_plan<'a>(src: &Structure, updates: &'a Updates) -> Result<WritePlan<'a>> {
+    // Describe the output one segment at a time, in order.
+    let mut b = PlanBuilder::new(src);
+    let mut xmp = MetadataSlot::new(updates.xmp());
+    for (i, seg) in src.segments().iter().enumerate() {
+        let id = SegmentId::from_index(i)?;
+        if seg.kind() != SegmentKind::Xmp {
+            b.copy_segment(id)?;
+            continue;
+        }
+        match xmp.existing() {
+            Existing::Keep => {
+                b.copy_segment(id)?;
+            }
+            Existing::Replace(d) => new_xmp(&mut b, d)?,
+            _ => {}
+        }
+    }
+    // Nothing to replace: add it at the end.
+    if let Some(d) = xmp.pending() {
+        new_xmp(&mut b, d)?;
+    }
+    // The entities of the segments that were copied follow them.
+    b.carry_entities(|_| true);
+    b.finish()
+}
+
+fn new_xmp<'a>(b: &mut PlanBuilder<'_, 'a>, d: &'a [u8]) -> Result<()> {
+    let header = vec![b'X', d.len() as u8];
+    let id = b.put_segment(SegmentKind::Xmp, Name::Id(b'X' as u64), header, d, &[][..])?;
+    b.entity_for(id)
+}
+
+fn parse_toy(handler: Arc<dyn ContainerHandler>, data: &[u8]) -> Result<Structure> {
+    if !data.starts_with(b"TOY!") {
+        return Err(Error::InvalidFormat("not a toy".into()));
+    }
+    let mut b = StructureBuilder::new(handler, "application/x-toy", data.len() as u64);
+    b.push_span(SegmentKind::Header, Name::FourCC(*b"TOY!"), 4, 0, 0)?;
+    let mut at = 4usize;
+    while at < data.len() {
+        let (kind, len) = match data[at..] {
+            [k, l, ..] => (k, l as usize),
+            _ => return Err(Error::InvalidFormat("truncated record".into())),
+        };
+        if at + 2 + len > data.len() {
+            return Err(Error::InvalidFormat("record overruns".into()));
+        }
+        let seg_kind = if kind == b'X' {
+            SegmentKind::Xmp
+        } else {
+            SegmentKind::Other
+        };
+        // Named by kind, not position, so a record keeps its name when others move.
+        let id = b.push_span(seg_kind, Name::Id(kind as u64), 2, len as u64, 0)?;
+        if kind == b'X' {
+            b.entity_of_segments(SegmentKind::Xmp, &[id])?;
+        }
+        at += 2 + len;
+    }
+    b.finish()
 }
 
 fn toy_bytes() -> Vec<u8> {
@@ -178,14 +147,6 @@ fn write(updates: &Updates, bytes: &[u8]) -> (Vec<u8>, Structure) {
 }
 
 #[test]
-fn default_write_runs_the_plan() {
-    let bytes = toy_bytes();
-    let (out, structure) = write(&Updates::new(), &bytes);
-    assert_eq!(out, bytes);
-    assert_eq!(structure.total_size(), bytes.len() as u64);
-}
-
-#[test]
 fn set_replaces_in_place_and_remove_drops() {
     let bytes = toy_bytes();
     let (out, _) = write(&Updates::new().set_xmp(b"new!".to_vec()), &bytes);
@@ -199,27 +160,6 @@ fn set_replaces_in_place_and_remove_drops() {
     let mut want = b"TOY!".to_vec();
     want.extend([b'A', 3, 1, 2, 3, b'B', 1, 9]);
     assert_eq!(out, want);
-}
-
-#[test]
-fn output_parses_back_to_the_structure_that_was_planned() {
-    let bytes = toy_bytes();
-    let updates = Updates::new().set_xmp(b"packet".to_vec());
-    let (out, structure) = write(&updates, &bytes);
-
-    let mut c = Cursor::new(out);
-    let reparsed = registry().parse("toy", &mut c).unwrap();
-    assert_eq!(reparsed.total_size(), structure.total_size());
-    assert_eq!(reparsed.segments().len(), structure.segments().len());
-    assert_eq!(
-        reparsed.xmp(&mut c).unwrap().as_deref(),
-        Some(&b"packet"[..])
-    );
-
-    let mut src = Cursor::new(bytes);
-    let s = registry().parse("toy", &mut src).unwrap();
-    let planned = s.plan(&mut src, &updates).unwrap();
-    assert_eq!(planned.total_size(), structure.total_size());
 }
 
 #[test]
@@ -241,31 +181,47 @@ fn plan_is_data_that_can_be_checked_and_inspected() {
 }
 
 #[test]
-fn sink_sees_every_byte_once_with_segment_and_role() {
-    let bytes = toy_bytes();
-    let mut src = Cursor::new(bytes.clone());
-    let s = registry().parse("toy", &mut src).unwrap();
+fn the_toy_conforms() {
+    Conformance::new(Arc::new(Toy)).check("toy", &toy_bytes());
+}
 
-    struct Collect(Vec<u8>, Vec<(usize, Role)>);
-    impl Sink for Collect {
-        fn chunk(&mut self, c: Chunk<'_>) -> Result<()> {
-            assert_eq!(c.offset as usize, self.0.len());
-            self.0.extend_from_slice(c.data);
-            self.1.push((c.segment.index(), c.role));
-            Ok(())
-        }
+/// Parses like the toy, but its writes ignore what it is asked to change.
+#[derive(Debug)]
+struct Deaf;
+
+impl ContainerHandler for Deaf {
+    fn id(&self) -> &'static str {
+        "deaf"
     }
-    let mut sink = Collect(Vec::new(), Vec::new());
-    s.write(
-        &mut src,
-        &mut Cursor::new(Vec::new()),
-        &Updates::new(),
-        &mut sink,
-    )
-    .unwrap();
-    assert_eq!(sink.0, bytes);
-    assert!(sink.1.contains(&(2, Role::Header)));
-    assert!(sink.1.contains(&(2, Role::Payload)));
+
+    fn formats(&self) -> &[FormatSpec] {
+        const F: &[FormatSpec] = &[FormatSpec::new("application/x-deaf", "deaf")];
+        F
+    }
+
+    fn parse_async(self: Arc<Self>, mut io: Io) -> BoxFuture<'static, Result<Structure>> {
+        Box::pin(async move {
+            let data = io.read_vec(0, io.len() as usize).await?;
+            parse_toy(self, &data)
+        })
+    }
+
+    fn write_plan_async<'f, 'a: 'f>(
+        &'f self,
+        src: &'f Structure,
+        _io: Io,
+        _updates: &'a Updates,
+    ) -> BoxFuture<'f, Result<WritePlan<'a>>> {
+        static NOTHING: std::sync::OnceLock<Updates> = std::sync::OnceLock::new();
+        let keep = NOTHING.get_or_init(Updates::new);
+        Box::pin(async move { write_toy_plan(src, keep) })
+    }
+}
+
+#[test]
+#[should_panic(expected = "XMP is not what was set")]
+fn conformance_catches_a_handler_that_ignores_updates() {
+    Conformance::new(Arc::new(Deaf)).check("deaf", &toy_bytes());
 }
 
 #[test]
@@ -299,4 +255,60 @@ fn executor_rejects_steps_that_do_not_match_the_structure() {
             ()
         ))
         .is_err());
+}
+
+/// Run `task` to the end, answering each request from `source` by hand.
+fn run_by_hand<T>(mut task: asset_io::Task<'_, T>, source: &[u8]) -> (Result<T>, usize) {
+    let mut requests = 0;
+    loop {
+        match task.resume() {
+            Ok(asset_io::Progress::Read(mut req)) => {
+                requests += 1;
+                let from = (req.offset() as usize).min(source.len());
+                let to = (from + req.window_len()).min(source.len());
+                req.buffer().extend_from_slice(&source[from..to]);
+            }
+            Ok(asset_io::Progress::Done(v)) => return (Ok(v), requests),
+            Ok(_) => unreachable!(),
+            Err(e) => return (Err(e), requests),
+        }
+    }
+}
+
+#[test]
+fn a_third_party_handler_runs_under_a_task_with_no_changes() {
+    let bytes = toy_bytes();
+    let reg = registry();
+
+    // Parsing, with the I/O done here.
+    let (parsed, requests) =
+        run_by_hand(reg.parse_task("toy", bytes.len() as u64).unwrap(), &bytes);
+    let s = parsed.unwrap();
+    assert_eq!(s.total_size(), bytes.len() as u64);
+    assert_eq!(requests, 1); // the whole of a small stream, in one window
+
+    // Detection by content, then the same parse.
+    let (parsed, _) = run_by_hand(reg.parse_detect_task(bytes.len() as u64), &bytes);
+    assert_eq!(parsed.unwrap().segments().len(), s.segments().len());
+
+    // Planning a write, and running the plan step by step.
+    let u = Updates::new().set_xmp(b"new!".to_vec());
+    let (plan, _) = run_by_hand(s.write_plan_task(&u), &bytes);
+    let plan = plan.unwrap();
+    validate(&plan, bytes.len() as u64).unwrap();
+    let mut run = plan.start();
+    let mut out = Vec::new();
+    loop {
+        match run.step(&mut asset_io::NullSink).unwrap() {
+            asset_io::Action::Read { offset, buf } => {
+                let at = offset as usize;
+                buf.copy_from_slice(&bytes[at..at + buf.len()]);
+            }
+            asset_io::Action::Write(b) => out.extend_from_slice(b),
+            asset_io::Action::Done => break,
+            _ => unreachable!(),
+        }
+    }
+    let (want, _) = write(&u, &bytes);
+    assert_eq!(out, want);
 }

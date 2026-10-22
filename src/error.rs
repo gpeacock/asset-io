@@ -60,3 +60,14 @@ pub enum Error {
     #[error("XML error: {0}")]
     Xml(#[from] quick_xml::Error),
 }
+
+impl Error {
+    /// [`Error::InvalidSegment`]: the data at `offset` is not a valid element of the
+    /// container, for the given `reason`.
+    pub fn invalid_segment(offset: u64, reason: impl Into<String>) -> Self {
+        Error::InvalidSegment {
+            offset,
+            reason: reason.into(),
+        }
+    }
+}

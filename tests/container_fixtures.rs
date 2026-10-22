@@ -58,11 +58,8 @@ fn write(
 ) -> asset_io::Result<(Vec<u8>, asset_io::Structure)> {
     let mut out = Cursor::new(Vec::new());
     let mut src = Cursor::new(bytes.to_vec());
-    let dest = if jpeg {
-        containers::jpeg::write(s, &mut src, &mut out, u, &mut NullSink)?
-    } else {
-        containers::png::write(s, &mut src, &mut out, u, &mut NullSink)?
-    };
+    let _ = jpeg;
+    let dest = s.write(&mut src, &mut out, u, &mut NullSink)?;
     Ok((out.into_inner(), dest))
 }
 
@@ -447,11 +444,7 @@ fn real_files_sink_sees_exactly_the_output() {
         let mut out = Cursor::new(Vec::new());
         let mut src = Cursor::new(bytes.clone());
         let u = Updates::new().set_jumbf(manifest(20_000));
-        if jpeg {
-            containers::jpeg::write(&s, &mut src, &mut out, &u, &mut sink).unwrap();
-        } else {
-            containers::png::write(&s, &mut src, &mut out, &u, &mut sink).unwrap();
-        }
+        s.write(&mut src, &mut out, &u, &mut sink).unwrap();
         assert!(seen == out.into_inner(), "{}", path.display());
     }
 }

@@ -19,9 +19,15 @@ use std::io::Cursor;
 
 fuzz_target!(|data: &[u8]| {
     // Any input must parse or return an error; never panic.
+    let registry = HandlerRegistry::builtin();
     let mut src = Cursor::new(data);
-    let Ok(structure) = HandlerRegistry::builtin().parse_detect(&mut src) else {
-        return;
+    // SVG is not detected by content, so ask for it by name when nothing else fits.
+    let structure = match registry.parse_detect(&mut src) {
+        Ok(s) => s,
+        Err(_) => match registry.parse("svg", &mut src) {
+            Ok(s) => s,
+            Err(_) => return,
+        },
     };
 
     // Read what the structure describes.

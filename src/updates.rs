@@ -32,6 +32,84 @@ pub enum MetadataUpdate {
     Set(Vec<u8>),
 }
 
+/// What to do with an item of metadata the asset already has; see
+/// [`MetadataSlot::existing`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Existing<'a> {
+    /// Write the item as it is.
+    Keep,
+    /// Leave the item out.
+    Drop,
+    /// Write these bytes in its place.
+    Replace(&'a [u8]),
+}
+
+/// Applies a [`MetadataUpdate`] to the items of one kind of metadata (XMP, JUMBF)
+/// as a handler meets them, and says what is left to insert.
+///
+/// A handler asks [`existing`](Self::existing) for each item of that kind in the
+/// source, in order. A new value replaces the first and drops the rest, so the
+/// output never holds two. After the point where new metadata belongs, whether
+/// that is a place the format prefers or the end, it asks [`pending`](Self::pending)
+/// for a value that no existing item took.
+///
+/// ```
+/// use asset_io::{Existing, MetadataSlot, Updates};
+///
+/// let updates = Updates::new().set_xmp(b"new".to_vec());
+/// let mut xmp = MetadataSlot::new(updates.xmp());
+/// assert_eq!(xmp.existing(), Existing::Replace(&b"new"[..]));
+/// assert_eq!(xmp.existing(), Existing::Drop);
+/// assert_eq!(xmp.pending(), None);
+/// ```
+#[derive(Debug, Clone, Copy)]
+pub struct MetadataSlot<'a> {
+    update: &'a MetadataUpdate,
+    done: bool,
+}
+
+impl<'a> MetadataSlot<'a> {
+    /// A slot that applies `update`.
+    pub fn new(update: &'a MetadataUpdate) -> Self {
+        Self {
+            update,
+            done: false,
+        }
+    }
+
+    /// What to do with the next item the source has.
+    pub fn existing(&mut self) -> Existing<'a> {
+        match self.update {
+            MetadataUpdate::Keep => {
+                self.done = true;
+                Existing::Keep
+            }
+            MetadataUpdate::Set(d) if !self.done => {
+                self.done = true;
+                Existing::Replace(d)
+            }
+            _ => Existing::Drop,
+        }
+    }
+
+    /// The bytes still to insert, once: a new value no existing item replaced.
+    pub fn pending(&mut self) -> Option<&'a [u8]> {
+        match self.update {
+            MetadataUpdate::Set(d) if !self.done => {
+                self.done = true;
+                Some(d)
+            }
+            _ => None,
+        }
+    }
+
+    /// Whether a new value is still waiting for a place.
+    pub fn is_pending(&self) -> bool {
+        matches!(self.update, MetadataUpdate::Set(_)) && !self.done
+    }
+}
+
 /// Updates to apply when writing a file
 ///
 /// This struct uses a builder pattern where the default is to keep all existing

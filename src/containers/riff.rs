@@ -41,17 +41,17 @@
 //! is created from the `VP8` or `VP8L` image size if the file has none.
 
 use crate::error::{Error, Result};
-use crate::handler::{ContainerHandler, FormatSpec, ReadSeek};
+use crate::handler::{ContainerHandler, FormatSpec};
 use crate::plan::WritePlan;
-use crate::readahead::{ReadAhead, PARSE_WINDOW};
+use crate::plan_builder::PlanBuilder;
 use crate::segment::SegmentKind;
 use crate::segment::{Name, Role, Segment};
-use crate::sink::Sink;
 use crate::structure::{SegmentId, Structure, StructureBuilder};
-use crate::{MetadataUpdate, Updates};
+use crate::task::{BoxFuture, Io};
+use crate::{Existing, MetadataSlot, MetadataUpdate, Updates};
 use std::borrow::Cow;
-use std::io::{Read, Seek, SeekFrom, Write};
-use std::sync::{Arc, OnceLock};
+use std::io::{Read, Seek};
+use std::sync::Arc;
 
 const RIFF: [u8; 4] = *b"RIFF";
 const LIST: [u8; 4] = *b"LIST";
@@ -92,8 +92,7 @@ pub struct RiffHandler;
 
 /// The shared RIFF handler.
 pub fn handler() -> Arc<dyn ContainerHandler> {
-    static H: OnceLock<Arc<RiffHandler>> = OnceLock::new();
-    H.get_or_init(|| Arc::new(RiffHandler)).clone()
+    Arc::new(RiffHandler)
 }
 
 /// The RIFF container's [`ContainerHandler::id`].
@@ -125,54 +124,36 @@ impl ContainerHandler for RiffHandler {
         header.len() >= 12 && header.starts_with(&RIFF) && media_type_of(&header[8..12]).is_some()
     }
 
-    fn parse(self: Arc<Self>, mut src: &mut dyn ReadSeek) -> Result<Structure> {
-        parse_with(self, &mut src)
+    fn parse_async(self: Arc<Self>, io: Io) -> BoxFuture<'static, Result<Structure>> {
+        Box::pin(parse_with(self, io))
     }
 
-    fn write_plan<'a>(
-        &self,
-        src_structure: &Structure,
-        src: &mut dyn ReadSeek,
+    fn write_plan_async<'f, 'a: 'f>(
+        &'f self,
+        src_structure: &'f Structure,
+        mut io: Io,
         updates: &'a Updates,
-    ) -> Result<WritePlan<'a>> {
-        plan(src_structure, src, updates)
+    ) -> BoxFuture<'f, Result<WritePlan<'a>>> {
+        Box::pin(async move { plan(src_structure, &mut io, updates).await })
     }
 }
 
 /// Parse a RIFF file into a validated structure.
 pub fn parse<R: Read + Seek>(src: &mut R) -> Result<Structure> {
-    parse_with(handler(), src)
-}
-
-fn bad(offset: u64, reason: &str) -> Error {
-    Error::InvalidSegment {
-        offset,
-        reason: reason.into(),
-    }
-}
-
-fn read_at<R: Read + Seek + ?Sized>(src: &mut R, at: u64, buf: &mut [u8]) -> Result<()> {
-    src.seek(SeekFrom::Start(at))?;
-    src.read_exact(buf)?;
-    Ok(())
+    handler().parse(src)
 }
 
 fn le32(b: &[u8]) -> u32 {
     u32::from_le_bytes([b[0], b[1], b[2], b[3]])
 }
 
-fn parse_with<R: Read + Seek>(
-    handler: Arc<dyn ContainerHandler>,
-    src: &mut R,
-) -> Result<Structure> {
-    let mut ahead = ReadAhead::new(src, PARSE_WINDOW);
-    let src = &mut ahead;
-    let total = src.seek(SeekFrom::End(0))?;
+async fn parse_with(handler: Arc<dyn ContainerHandler>, mut io: Io) -> Result<Structure> {
+    let total = io.len();
     if total < 12 {
         return Err(Error::InvalidFormat("RIFF too small".into()));
     }
     let mut head = [0u8; 12];
-    read_at(src, 0, &mut head)?;
+    io.read_at(0, &mut head).await?;
     if head[..4] != RIFF {
         return Err(Error::InvalidFormat("Not a RIFF file".into()));
     }
@@ -186,41 +167,47 @@ fn parse_with<R: Read + Seek>(
         let remaining = total - at;
         if remaining < 8 {
             // Too short to be a chunk: keep it as unnamed trailing data.
-            b.push_span(SegmentKind::Other, Name::None, 0, remaining, 0)?;
+            b.push_tail()?;
             break;
         }
         let mut h = [0u8; 8];
-        read_at(src, at, &mut h)?;
+        io.read_at(at, &mut h).await?;
         let id = [h[0], h[1], h[2], h[3]];
         let size = le32(&h[4..8]) as u64;
 
         if id == RIFF {
             if remaining < 12 {
-                return Err(bad(at, "RIFF chunk has no form type"));
+                return Err(Error::invalid_segment(at, "RIFF chunk has no form type"));
             }
             let end = at + 8 + size;
             if size < 4 {
-                return Err(bad(at, "RIFF chunk too small for its form type"));
+                return Err(Error::invalid_segment(
+                    at,
+                    "RIFF chunk too small for its form type",
+                ));
             }
             if end > total {
-                return Err(bad(at, "RIFF chunk declared size exceeds file size"));
+                return Err(Error::invalid_segment(
+                    at,
+                    "RIFF chunk declared size exceeds file size",
+                ));
             }
             b.push_span(SegmentKind::Header, Name::FourCC(RIFF), 12, 0, 0)?;
-            parse_children(&mut b, src, at + 12, end, first, webp)?;
+            parse_children(&mut b, &mut io, at + 12, end, first, webp).await?;
             at = end;
             first = false;
         } else {
             // Something other than a RIFF chunk at top level: one opaque chunk.
-            let next = parse_chunk(&mut b, src, at, total, false, false)?;
+            let next = parse_chunk(&mut b, &mut io, at, total, false, false).await?;
             at = next;
         }
     }
     b.finish()
 }
 
-fn parse_children<R: Read + Seek>(
+async fn parse_children(
     b: &mut StructureBuilder,
-    src: &mut R,
+    io: &mut Io,
     start: u64,
     end: u64,
     first: bool,
@@ -228,31 +215,34 @@ fn parse_children<R: Read + Seek>(
 ) -> Result<()> {
     let mut at = start;
     while at < end {
-        at = parse_chunk(b, src, at, end, first, webp)?;
+        at = parse_chunk(b, io, at, end, first, webp).await?;
     }
     Ok(())
 }
 
 /// One chunk starting at `at` inside a region ending at `end`. Returns the offset
 /// after it (and its pad byte, when present).
-fn parse_chunk<R: Read + Seek>(
+async fn parse_chunk(
     b: &mut StructureBuilder,
-    src: &mut R,
+    io: &mut Io,
     at: u64,
     end: u64,
     classify: bool,
     webp: bool,
 ) -> Result<u64> {
     if end - at < 8 {
-        return Err(bad(at, "truncated chunk header"));
+        return Err(Error::invalid_segment(at, "truncated chunk header"));
     }
     let mut h = [0u8; 8];
-    read_at(src, at, &mut h)?;
+    io.read_at(at, &mut h).await?;
     let id = [h[0], h[1], h[2], h[3]];
     let size = le32(&h[4..8]) as u64;
     let data_end = at + 8 + size;
     if data_end > end {
-        return Err(bad(at, "chunk extends past the end of its container"));
+        return Err(Error::invalid_segment(
+            at,
+            "chunk extends past the end of its container",
+        ));
     }
     // An odd-sized chunk has a pad byte unless it is the very last thing.
     let pad = u16::from(size & 1 == 1 && data_end < end);
@@ -267,7 +257,7 @@ fn parse_chunk<R: Read + Seek>(
             DATA | VP8 | VP8L | ALPH | ANMF => SegmentKind::ImageData,
             LIST if size >= 4 => {
                 let mut t = [0u8; 4];
-                read_at(src, at + 8, &mut t)?;
+                io.read_at(at + 8, &mut t).await?;
                 if t == MOVI {
                     SegmentKind::ImageData
                 } else {
@@ -277,13 +267,7 @@ fn parse_chunk<R: Read + Seek>(
             _ => SegmentKind::Other,
         }
     };
-    let sid = b.push_span(kind, Name::FourCC(id), 8, size, pad)?;
-    if matches!(
-        kind,
-        SegmentKind::Jumbf | SegmentKind::Xmp | SegmentKind::Exif
-    ) {
-        b.entity_of_segments(kind, &[sid])?;
-    }
+    b.push_item(kind, Name::FourCC(id), 8, size, pad)?;
     Ok(data_end + pad as u64)
 }
 
@@ -294,8 +278,6 @@ fn parse_chunk<R: Read + Seek>(
 enum Op<'a> {
     /// Copy a source segment unchanged.
     Copy(SegmentId),
-    /// The first `RIFF` header, with its new size.
-    Riff { size: u32, form: [u8; 4] },
     /// A `VP8X` chunk with new flags.
     Flags { id: SegmentId, flags: u32 },
     /// A new chunk (with its pad byte, when odd).
@@ -304,56 +286,6 @@ enum Op<'a> {
         id: [u8; 4],
         payload: Cow<'a, [u8]>,
     },
-    /// The wrapped op followed by the pad byte its chunk lacked because it was last.
-    WithPad(Box<Op<'a>>),
-}
-
-struct Dims {
-    kind: SegmentKind,
-    name: Name,
-    header_len: u32,
-    payload_len: u64,
-    trailer_len: u16,
-}
-
-impl Dims {
-    fn len(&self) -> u64 {
-        self.header_len as u64 + self.payload_len + self.trailer_len as u64
-    }
-}
-
-fn dims(op: &Op<'_>, src: &Structure) -> Result<Dims> {
-    Ok(match op {
-        Op::Copy(id) | Op::Flags { id, .. } => {
-            let s = src.segment(*id)?;
-            Dims {
-                kind: s.kind(),
-                name: s.name(),
-                header_len: s.header().len() as u32,
-                payload_len: s.payload().len(),
-                trailer_len: s.trailer().len() as u16,
-            }
-        }
-        Op::Riff { .. } => Dims {
-            kind: SegmentKind::Header,
-            name: Name::FourCC(RIFF),
-            header_len: 12,
-            payload_len: 0,
-            trailer_len: 0,
-        },
-        Op::Chunk { kind, id, payload } => Dims {
-            kind: *kind,
-            name: Name::FourCC(*id),
-            header_len: 8,
-            payload_len: payload.len() as u64,
-            trailer_len: (payload.len() & 1) as u16,
-        },
-        Op::WithPad(inner) => {
-            let mut d = dims(inner, src)?;
-            d.trailer_len += 1;
-            d
-        }
-    })
 }
 
 fn new_chunk(kind: SegmentKind, id: [u8; 4], payload: Cow<'_, [u8]>) -> Result<Op<'_>> {
@@ -367,14 +299,17 @@ fn new_chunk(kind: SegmentKind, id: [u8; 4], payload: Cow<'_, [u8]>) -> Result<O
 }
 
 /// Canvas size of a WebP from its `VP8L` or `VP8 ` chunk.
-fn webp_size<R: Read + Seek + ?Sized>(src: &mut R, segs: &[Segment]) -> Result<(u32, u32)> {
+async fn webp_size(io: &mut Io, segs: &[Segment]) -> Result<(u32, u32)> {
     let find = |id: [u8; 4]| segs.iter().find(|s| s.name() == Name::FourCC(id));
     if let Some(s) = find(VP8L) {
         let mut d = [0u8; 5];
         if s.payload().len() < d.len() as u64 {
-            return Err(bad(s.extent().offset(), "VP8L chunk too small"));
+            return Err(Error::invalid_segment(
+                s.extent().offset(),
+                "VP8L chunk too small",
+            ));
         }
-        read_at(src, s.payload().offset(), &mut d)?;
+        io.read_at(s.payload().offset(), &mut d).await?;
         let first = u16::from_le_bytes([d[1], d[2]]) as u32;
         let second = u16::from_le_bytes([d[3], d[4]]) as u32;
         let width = 1 + (first & 0x3fff);
@@ -384,9 +319,12 @@ fn webp_size<R: Read + Seek + ?Sized>(src: &mut R, segs: &[Segment]) -> Result<(
     if let Some(s) = find(VP8) {
         let mut d = [0u8; 10];
         if s.payload().len() < d.len() as u64 {
-            return Err(bad(s.extent().offset(), "VP8 chunk too small"));
+            return Err(Error::invalid_segment(
+                s.extent().offset(),
+                "VP8 chunk too small",
+            ));
         }
-        read_at(src, s.payload().offset(), &mut d)?;
+        io.read_at(s.payload().offset(), &mut d).await?;
         let width = (u16::from_le_bytes([d[6], d[7]]) & 0x3fff) as u32;
         let height = (u16::from_le_bytes([d[8], d[9]]) & 0x3fff) as u32;
         return Ok((width, height));
@@ -421,14 +359,10 @@ fn lacks_pad(op: &Op<'_>, src: &Structure) -> Result<bool> {
 
 /// Decide what the output contains: the single source of truth for both the
 /// destination structure and the bytes written.
-fn plan<'a, R: Read + Seek + ?Sized>(
-    src: &Structure,
-    stream: &mut R,
-    updates: &'a Updates,
-) -> Result<WritePlan<'a>> {
+async fn plan<'a>(src: &Structure, io: &mut Io, updates: &'a Updates) -> Result<WritePlan<'a>> {
     let segs = src.segments();
     let mut head = [0u8; 12];
-    read_at(stream, 0, &mut head)?;
+    io.read_at(0, &mut head).await?;
     let riff_end = 8 + le32(&head[4..8]) as u64;
     let form = [head[8], head[9], head[10], head[11]];
     // Children of the first RIFF chunk are segments 1.. up to where it ends.
@@ -439,31 +373,24 @@ fn plan<'a, R: Read + Seek + ?Sized>(
     let webp = src.media_type() == "image/webp";
 
     let mut ops: Vec<Op<'a>> = Vec::with_capacity(segs.len() + 3);
-    ops.push(Op::Riff { size: 0, form });
-    let (mut xmp_done, mut jumbf_done, mut saw_vp8x) = (false, false, false);
+    let mut xmp = MetadataSlot::new(updates.xmp());
+    let mut jumbf = MetadataSlot::new(updates.jumbf());
+    let mut saw_vp8x = false;
 
     for (i, seg) in segs.iter().enumerate().take(kids_end).skip(1) {
         let id = SegmentId::from_index(i)?;
         match seg.kind() {
-            SegmentKind::Xmp => match &updates.xmp {
-                MetadataUpdate::Keep => {
-                    ops.push(Op::Copy(id));
-                    xmp_done = true;
-                }
-                MetadataUpdate::Set(d) if !xmp_done => {
-                    ops.push(new_chunk(SegmentKind::Xmp, XMP, Cow::Borrowed(d))?);
-                    xmp_done = true;
+            SegmentKind::Xmp => match xmp.existing() {
+                Existing::Keep => ops.push(Op::Copy(id)),
+                Existing::Replace(d) => {
+                    ops.push(new_chunk(SegmentKind::Xmp, XMP, Cow::Borrowed(d))?)
                 }
                 _ => {}
             },
-            SegmentKind::Jumbf => match &updates.jumbf {
-                MetadataUpdate::Keep => {
-                    ops.push(Op::Copy(id));
-                    jumbf_done = true;
-                }
-                MetadataUpdate::Set(d) if !jumbf_done => {
-                    ops.push(new_chunk(SegmentKind::Jumbf, C2PA, Cow::Borrowed(d))?);
-                    jumbf_done = true;
+            SegmentKind::Jumbf => match jumbf.existing() {
+                Existing::Keep => ops.push(Op::Copy(id)),
+                Existing::Replace(d) => {
+                    ops.push(new_chunk(SegmentKind::Jumbf, C2PA, Cow::Borrowed(d))?)
                 }
                 _ => {}
             },
@@ -477,10 +404,13 @@ fn plan<'a, R: Read + Seek + ?Sized>(
                 let mut op = Op::Copy(id);
                 if let Some(want) = want {
                     if seg.payload().len() < 4 {
-                        return Err(bad(seg.extent().offset(), "VP8X chunk too small"));
+                        return Err(Error::invalid_segment(
+                            seg.extent().offset(),
+                            "VP8X chunk too small",
+                        ));
                     }
                     let mut f = [0u8; 4];
-                    read_at(stream, seg.payload().offset(), &mut f)?;
+                    io.read_at(seg.payload().offset(), &mut f).await?;
                     let flags = u32::from_le_bytes(f);
                     let new = if want {
                         flags | VP8X_XMP_FLAG
@@ -500,154 +430,115 @@ fn plan<'a, R: Read + Seek + ?Sized>(
     // What was not replaced in place goes at the end, XMP first, with the pad byte
     // the last source chunk may be missing.
     let mut tail: Vec<Op<'a>> = Vec::new();
-    if !xmp_done {
-        if let MetadataUpdate::Set(d) = &updates.xmp {
-            tail.push(new_chunk(SegmentKind::Xmp, XMP, Cow::Borrowed(d))?);
-        }
+    if let Some(d) = xmp.pending() {
+        tail.push(new_chunk(SegmentKind::Xmp, XMP, Cow::Borrowed(d))?);
     }
-    if !jumbf_done {
-        if let MetadataUpdate::Set(d) = &updates.jumbf {
-            tail.push(new_chunk(SegmentKind::Jumbf, C2PA, Cow::Borrowed(d))?);
-        }
-    }
-    if !tail.is_empty() {
-        if let Some(last) = ops.pop() {
-            ops.push(if lacks_pad(&last, src)? {
-                Op::WithPad(Box::new(last))
-            } else {
-                last
-            });
-        }
-        ops.extend(tail);
+    if let Some(d) = jumbf.pending() {
+        tail.push(new_chunk(SegmentKind::Jumbf, C2PA, Cow::Borrowed(d))?);
     }
 
     // WebP needs VP8X to say the file has XMP.
     if webp && matches!(updates.xmp, MetadataUpdate::Set(_)) && !saw_vp8x {
-        let (w, h) = webp_size(stream, &segs[1..kids_end])?;
-        ops.insert(1, new_vp8x(w, h, VP8X_XMP_FLAG)?);
+        let (w, h) = webp_size(io, &segs[1..kids_end]).await?;
+        ops.insert(0, new_vp8x(w, h, VP8X_XMP_FLAG)?);
     }
 
-    // Size of the first RIFF chunk.
-    let mut kids = 4u64; // form type
-    for op in &ops[1..] {
-        kids = kids
-            .checked_add(dims(op, src)?.len())
-            .ok_or(Error::LimitExceeded {
-                what: "output size",
-                limit: u64::MAX,
-            })?;
+    let mut unpadded = None;
+    if !tail.is_empty() {
+        if let Some(last) = ops.last() {
+            if lacks_pad(last, src)? {
+                unpadded = Some(ops.len() - 1);
+            }
+        }
+        ops.extend(tail);
     }
-    let size = u32::try_from(kids).map_err(|_| Error::LimitExceeded {
+
+    let mut b = PlanBuilder::new(src);
+    let riff = b.put_segment(
+        SegmentKind::Header,
+        Name::FourCC(RIFF),
+        riff_header(0, form),
+        &[][..],
+        &[][..],
+    )?;
+    for (i, op) in ops.iter().enumerate() {
+        let id = emit(&mut b, op, unpadded == Some(i))?;
+        b.entity_for(id)?;
+    }
+    // Size of the first RIFF chunk: everything after its own 8-byte header.
+    let size = u32::try_from(b.len() - 8).map_err(|_| Error::LimitExceeded {
         what: "RIFF chunk size",
         limit: u32::MAX as u64,
     })?;
-    ops[0] = Op::Riff { size, form };
 
     // Whatever follows the first RIFF chunk (AVIX, ...) is copied.
-    for (i, _) in segs.iter().enumerate().skip(kids_end) {
-        ops.push(Op::Copy(SegmentId::from_index(i)?));
+    for i in kids_end..segs.len() {
+        let id = b.copy_segment(SegmentId::from_index(i)?)?;
+        b.entity_for(id)?;
     }
-
-    // Destination structure.
-    let mut all = Vec::with_capacity(ops.len());
-    let mut total = 0u64;
-    for op in &ops {
-        let d = dims(op, src)?;
-        total = total.checked_add(d.len()).ok_or(Error::LimitExceeded {
-            what: "output size",
-            limit: u64::MAX,
-        })?;
-        all.push(d);
-    }
-    let mut b = StructureBuilder::new(src.handler().clone(), src.media_type().to_owned(), total);
-    for d in &all {
-        let id = b.push_span(d.kind, d.name, d.header_len, d.payload_len, d.trailer_len)?;
-        if matches!(
-            d.kind,
-            SegmentKind::Xmp | SegmentKind::Jumbf | SegmentKind::Exif
-        ) {
-            b.entity_of_segments(d.kind, &[id])?;
-        }
-    }
-    let mut plan = WritePlan::new(b.finish()?);
-    for (i, op) in ops.iter().enumerate() {
-        add_steps(&mut plan, src, SegmentId::from_index(i)?, op)?;
-    }
+    let mut plan = b.finish()?;
+    plan.replace(riff, Role::Header, riff_header(size, form))?;
     Ok(plan)
 }
 
-/// The steps that write `op` as the output segment `dest`.
-fn add_steps<'a>(
-    plan: &mut WritePlan<'a>,
-    src: &Structure,
-    dest: SegmentId,
-    op: &Op<'a>,
-) -> Result<()> {
-    match op {
-        Op::Copy(sid) => {
-            plan.copy_segment(dest, src.segment(*sid)?);
-        }
-        Op::Riff { size, form } => {
-            let mut h = [0u8; 12];
-            h[..4].copy_from_slice(&RIFF);
-            h[4..8].copy_from_slice(&size.to_le_bytes());
-            h[8..].copy_from_slice(form);
-            plan.put(dest, Role::Header, h.to_vec());
-        }
-        Op::Flags { id, flags } => {
-            let s = src.segment(*id)?;
-            plan.copy(dest, Role::Header, s.header());
-            plan.put(dest, Role::Payload, flags.to_le_bytes().to_vec());
-            plan.copy(
-                dest,
-                Role::Payload,
-                s.payload().sub(4, s.payload().len() - 4)?,
-            );
-            plan.copy(dest, Role::Trailer, s.trailer());
-        }
-        Op::Chunk { id, payload, .. } => {
-            let mut h = [0u8; 8];
-            h[..4].copy_from_slice(id);
-            h[4..].copy_from_slice(&(payload.len() as u32).to_le_bytes()); // bounded by new_chunk
-            plan.put(dest, Role::Header, h.to_vec());
-            plan.put(dest, Role::Payload, payload.clone());
-            if payload.len() & 1 == 1 {
-                plan.put(dest, Role::Trailer, vec![0]);
-            }
-        }
-        Op::WithPad(inner) => {
-            add_steps(plan, src, dest, inner)?;
-            plan.put(dest, Role::Trailer, vec![0]);
-        }
-    }
-    Ok(())
+fn riff_header(size: u32, form: [u8; 4]) -> Vec<u8> {
+    let mut h = Vec::with_capacity(12);
+    h.extend_from_slice(&RIFF);
+    h.extend_from_slice(&size.to_le_bytes());
+    h.extend_from_slice(&form);
+    h
 }
 
-/// Write `src` with `updates` applied, delivering every output byte to `sink`.
-///
-/// `out` is written from its current start; offsets reported to the sink are
-/// relative to the first byte written. Returns the structure of the output.
-pub fn write<R, W, S>(
-    src_structure: &Structure,
-    src: &mut R,
-    out: &mut W,
-    updates: &Updates,
-    sink: &mut S,
-) -> Result<Structure>
-where
-    R: Read + Seek + ?Sized,
-    W: Write + ?Sized,
-    S: Sink + ?Sized,
-{
-    let plan = plan(src_structure, src, updates)?;
-    plan.execute(src, out, sink)?;
-    Ok(plan.into_structure())
+/// Add `op` to the output. `pad` is set for a source chunk of odd size that was
+/// last, and now has a chunk after it, so needs the pad byte it lacked.
+fn emit<'a>(b: &mut PlanBuilder<'_, 'a>, op: &Op<'a>, pad: bool) -> Result<SegmentId> {
+    let src = b.source();
+    match op {
+        Op::Copy(sid) if !pad => b.copy_segment(*sid),
+        Op::Copy(sid) | Op::Flags { id: sid, .. } => {
+            let s = src.segment(*sid)?;
+            let id = b.shape(
+                s.kind(),
+                s.name(),
+                s.header().len() as u32,
+                s.payload().len(),
+                s.trailer().len() as u16 + pad as u16,
+            )?;
+            b.copy(id, Role::Header, s.header());
+            match op {
+                Op::Flags { flags, .. } => {
+                    b.put(id, Role::Payload, flags.to_le_bytes().to_vec());
+                    b.copy(
+                        id,
+                        Role::Payload,
+                        s.payload().sub(4, s.payload().len() - 4)?,
+                    );
+                }
+                _ => {
+                    b.copy(id, Role::Payload, s.payload());
+                }
+            }
+            b.copy(id, Role::Trailer, s.trailer());
+            if pad {
+                b.put(id, Role::Trailer, vec![0]);
+            }
+            Ok(id)
+        }
+        Op::Chunk { kind, id, payload } => {
+            let mut h = Vec::with_capacity(8);
+            h.extend_from_slice(id);
+            h.extend_from_slice(&(payload.len() as u32).to_le_bytes()); // bounded by new_chunk
+            let trailer: &[u8] = if payload.len() & 1 == 1 { &[0] } else { &[] };
+            b.put_segment(*kind, Name::FourCC(*id), h, payload.clone(), trailer)
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Chunk, NullSink};
+    use crate::testing::Conformance;
+    use crate::NullSink;
     use std::io::Cursor;
 
     fn chunk(id: &[u8; 4], data: &[u8]) -> Vec<u8> {
@@ -766,9 +657,27 @@ mod tests {
     }
 
     #[test]
-    fn keep_is_byte_identical() {
-        let f = wav(&[chunk(b"XMP ", b"<x/>"), chunk(b"C2PA", b"STORE")]);
-        assert_eq!(rewrite(&f, &Updates::new()).unwrap(), f);
+    fn conforms() {
+        let c = Conformance::new(handler()).jumbf(Some(b"STORE".to_vec()));
+        c.check(
+            "wav",
+            &wav(&[chunk(b"XMP ", b"<x/>"), chunk(b"C2PA", b"STORE")]),
+        );
+        // The last chunk is odd and has no pad byte.
+        let mut unpadded = wav(&[chunk(b"junk", b"abc")]);
+        unpadded.pop();
+        let n = unpadded.len() as u32 - 8;
+        unpadded[4..8].copy_from_slice(&n.to_le_bytes());
+        c.check("unpadded", &unpadded);
+        let lossless = chunk(b"VP8L", &[0x2f, 0, 0, 0, 0, 0]);
+        c.check("webp", &riff(b"WEBP", std::slice::from_ref(&lossless)));
+        let vp8x = chunk(b"VP8X", &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        c.check("webp with VP8X", &riff(b"WEBP", &[vp8x, lossless]));
+        let more = [
+            riff(b"AVI ", &[chunk(b"junk", b"x")]),
+            riff(b"AVIX", &[chunk(b"junk", b"y")]),
+        ];
+        c.check("avi with AVIX", &more.concat());
     }
 
     #[test]
@@ -978,31 +887,6 @@ mod tests {
         // Too short, and not RIFF.
         assert!(parse(&mut Cursor::new(b"RIFF")).is_err());
         assert!(parse(&mut Cursor::new(b"RIFX\0\0\0\0WAVE")).is_err());
-    }
-
-    #[test]
-    fn sink_sees_every_output_byte_once_in_order() {
-        let f = wav(&[chunk(b"C2PA", b"STORE")]);
-        let s = parse(&mut Cursor::new(&f)).unwrap();
-        let mut next = 0u64;
-        let mut seen = Vec::new();
-        let mut sink = |c: Chunk<'_>| -> Result<()> {
-            assert_eq!(c.offset, next);
-            next += c.data.len() as u64;
-            seen.extend_from_slice(c.data);
-            Ok(())
-        };
-        let mut out = Cursor::new(Vec::new());
-        s.handler()
-            .write(
-                &s,
-                &mut Cursor::new(&f),
-                &mut out,
-                &Updates::new().set_xmp(b"<x/>".to_vec()),
-                &mut sink,
-            )
-            .unwrap();
-        assert_eq!(seen, out.into_inner());
     }
 
     #[test]

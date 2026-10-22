@@ -63,17 +63,19 @@
 pub mod containers;
 mod crc;
 mod error;
+mod execute;
 mod handler;
 #[cfg(feature = "memory-mapped")]
 mod mapped;
 pub mod plan;
+mod plan_builder;
 mod range;
-#[cfg(any(feature = "jpeg", feature = "png", feature = "bmff", feature = "riff"))]
-mod readahead;
 mod registry;
 mod segment;
 mod sink;
 mod structure;
+mod task;
+pub mod testing;
 mod thumbnail;
 #[cfg(feature = "exif")]
 mod tiff;
@@ -84,10 +86,12 @@ mod xmp;
 
 pub use crc::Crc32;
 pub use error::{Error, Result};
+pub use execute::{Action, Execution};
 pub use handler::{ContainerHandler, FormatSpec, ReadSeek, ReadWriteSeek, DETECT_LEN};
 #[cfg(feature = "memory-mapped")]
 pub use mapped::MappedFile;
 pub use plan::{Step, WritePlan};
+pub use plan_builder::PlanBuilder;
 pub use range::ByteRange;
 pub use registry::HandlerRegistry;
 pub use segment::{labels, Name, Role, Segment, SegmentKind, AFTER_BOX};
@@ -95,10 +99,11 @@ pub use sink::{Chunk, NullSink, Sink};
 pub use structure::{
     Entity, Part, Region, SegmentId, Structure, StructureBuilder, SubAsset, MAX_SEGMENTS,
 };
+pub use task::{block_on, BoxFuture, Io, Progress, ReadRequest, Reader, Task, DEFAULT_WINDOW};
 pub use thumbnail::Thumbnail;
 #[cfg(feature = "exif")]
 pub use tiff::ExifInfo;
-pub use updates::{MetadataUpdate, Updates};
+pub use updates::{Existing, MetadataSlot, MetadataUpdate, Updates};
 pub use walk::Node;
 #[cfg(feature = "xmp")]
 pub use xmp::MiniXmp;

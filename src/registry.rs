@@ -21,6 +21,7 @@
 use crate::error::{Error, Result};
 use crate::handler::{ContainerHandler, FormatSpec, ReadSeek, DETECT_LEN};
 use crate::structure::Structure;
+use crate::task::Task;
 use std::collections::HashMap;
 use std::io::SeekFrom;
 use std::sync::{Arc, OnceLock};
@@ -77,6 +78,8 @@ impl HandlerRegistry {
                 r.add_arc(crate::containers::bmff::handler());
                 #[cfg(feature = "riff")]
                 r.add_arc(crate::containers::riff::handler());
+                #[cfg(feature = "svg")]
+                r.add_arc(crate::containers::svg::handler());
                 Arc::new(r)
             })
             .clone()
@@ -170,6 +173,25 @@ impl HandlerRegistry {
         Arc::clone(h).parse(src)
     }
 
+    /// A task that parses a stream of `total` bytes as `format`, for a caller that
+    /// does its own I/O; see [`Task`]. Reports [`Error::UnsupportedFormat`] for a
+    /// format nobody claims.
+    pub fn parse_task(&self, format: &str, total: u64) -> Result<Task<'static, Structure>> {
+        let h = Arc::clone(self.handler(format).ok_or(Error::UnsupportedFormat)?);
+        Ok(Task::new(total, move |io| h.parse_async(io)))
+    }
+
+    /// Like [`parse_task`](Self::parse_task), identifying the container from the
+    /// leading bytes of the stream, which the task asks for first.
+    pub fn parse_detect_task(&self, total: u64) -> Task<'_, Structure> {
+        Task::new(total, move |mut io| async move {
+            let n = (DETECT_LEN as u64).min(total) as usize;
+            let head = io.fetch(0, n).await?.to_vec();
+            let h = Arc::clone(self.detect(&head).ok_or(Error::UnsupportedFormat)?);
+            h.parse_async(io).await
+        })
+    }
+
     /// Parse a stream, identifying the container from its leading bytes. The stream
     /// is rewound before parsing.
     pub fn parse_detect(&self, src: &mut dyn ReadSeek) -> Result<Structure> {
@@ -208,7 +230,7 @@ mod tests {
     use super::*;
     use crate::segment::SegmentKind;
     use crate::Updates;
-    use crate::{ContainerHandler, Name, ReadWriteSeek, Sink, StructureBuilder};
+    use crate::{BoxFuture, ContainerHandler, Io, Name, Sink, StructureBuilder};
     use std::borrow::Cow;
     use std::io::Cursor;
 
@@ -228,30 +250,30 @@ mod tests {
         fn detect(&self, header: &[u8]) -> bool {
             header.starts_with(b"TOY!")
         }
-        fn parse(self: Arc<Self>, src: &mut dyn ReadSeek) -> Result<Structure> {
-            let mut data = Vec::new();
-            src.seek(SeekFrom::Start(0))?;
-            src.read_to_end(&mut data)?;
-            let mut b = StructureBuilder::new(self, "application/x-toy", data.len() as u64);
-            b.push_span(SegmentKind::Header, Name::FourCC(*b"TOY!"), 4, 0, 0)?;
-            let mut at = 4usize;
-            let mut idx = 0u64;
-            while at < data.len() {
-                let len = data[at] as usize;
-                if at + 1 + len > data.len() {
-                    return Err(Error::InvalidFormat("toy record overruns".into()));
+        fn parse_async(self: Arc<Self>, mut io: Io) -> BoxFuture<'static, Result<Structure>> {
+            Box::pin(async move {
+                let data = io.read_vec(0, io.len() as usize).await?;
+                let mut b = StructureBuilder::new(self, "application/x-toy", data.len() as u64);
+                b.push_span(SegmentKind::Header, Name::FourCC(*b"TOY!"), 4, 0, 0)?;
+                let mut at = 4usize;
+                let mut idx = 0u64;
+                while at < data.len() {
+                    let len = data[at] as usize;
+                    if at + 1 + len > data.len() {
+                        return Err(Error::InvalidFormat("toy record overruns".into()));
+                    }
+                    b.push_span(SegmentKind::Other, Name::Id(idx), 1, len as u64, 0)?;
+                    at += 1 + len;
+                    idx += 1;
                 }
-                b.push_span(SegmentKind::Other, Name::Id(idx), 1, len as u64, 0)?;
-                at += 1 + len;
-                idx += 1;
-            }
-            b.finish()
+                b.finish()
+            })
         }
         fn write(
             &self,
             _: &Structure,
             _: &mut dyn ReadSeek,
-            _: &mut dyn ReadWriteSeek,
+            _: &mut dyn std::io::Write,
             _: &Updates,
             _: &mut dyn Sink,
         ) -> Result<Structure> {
@@ -331,14 +353,14 @@ mod tests {
                 const F: &[FormatSpec] = &[FormatSpec::new("application/x-toy2", "toy")];
                 F
             }
-            fn parse(self: Arc<Self>, _: &mut dyn ReadSeek) -> Result<Structure> {
-                Err(Error::InvalidFormat("toy2".into()))
+            fn parse_async(self: Arc<Self>, _: Io) -> BoxFuture<'static, Result<Structure>> {
+                Box::pin(async { Err(Error::InvalidFormat("toy2".into())) })
             }
             fn write(
                 &self,
                 _: &Structure,
                 _: &mut dyn ReadSeek,
-                _: &mut dyn ReadWriteSeek,
+                _: &mut dyn std::io::Write,
                 _: &Updates,
                 _: &mut dyn Sink,
             ) -> Result<Structure> {

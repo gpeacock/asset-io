@@ -18,15 +18,24 @@ use asset_io::{HandlerRegistry, NullSink, Updates};
 use libfuzzer_sys::fuzz_target;
 use std::io::Cursor;
 
+const XPACKET: &[u8] = b"<?xpacket begin=\"\" id=\"W5M0MpCehiHzreSzNTczkc9d\"?>\
+<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"/><?xpacket end=\"w\"?>";
+
 fuzz_target!(|data: &[u8]| {
+    let registry = HandlerRegistry::builtin();
     let mut src = Cursor::new(data);
-    let Ok(structure) = HandlerRegistry::builtin().parse_detect(&mut src) else {
-        return;
+    let structure = match registry.parse_detect(&mut src) {
+        Ok(s) => s,
+        Err(_) => match registry.parse("svg", &mut src) {
+            Ok(s) => s,
+            Err(_) => return,
+        },
     };
 
     let cases = [
         Updates::new(),
         Updates::new().set_xmp(b"<test>fuzz</test>".to_vec()),
+        Updates::new().set_xmp(XPACKET.to_vec()),
         Updates::new().set_jumbf(b"jumbf".to_vec()),
         Updates::new().set_jumbf(b"jumbf".to_vec()).as_update(),
         Updates::new().set_merkle(vec![vec![0u8; 8]; 2]),
