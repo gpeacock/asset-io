@@ -32,8 +32,8 @@
 //! kept is copied, so nothing is re-serialized, and only the new elements and, when a
 //! manifest is written, the `xmlns:c2pa` declaration on the root element are new bytes.
 //!
-//! The manifest is stored as base64, so [`decode_entity`](ContainerHandler::decode_entity)
-//! and [`encode_entity`](ContainerHandler::encode_entity) turn it from and into the
+//! The manifest is stored as base64, so [`decode_item`](ContainerHandler::decode_item)
+//! and [`encode_item`](ContainerHandler::encode_item) turn it from and into the
 //! JUMBF itself. [`Structure::store`](crate::Structure::store) does that for you.
 //!
 //! The whole document is read to parse it (up to 256 MiB), since an XML parser needs
@@ -43,7 +43,7 @@
 use crate::jumbf::superbox_type;
 use crate::plan::WritePlan;
 use crate::{
-    BoxFuture, ByteRange, ContainerHandler, Entity, Error, Existing, FormatSpec, Io, MetadataSlot,
+    BoxFuture, ByteRange, ContainerHandler, Error, Existing, FormatSpec, Io, Item, MetadataSlot,
     MetadataUpdate, Name, PlanBuilder, Result, Role, SegmentId, SegmentKind, Structure,
     StructureBuilder, Updates, MAX_SEGMENT_SIZE,
 };
@@ -126,25 +126,20 @@ impl ContainerHandler for SvgHandler {
         }
     }
 
-    fn decode_entity(
-        &self,
-        _structure: &Structure,
-        entity: &Entity,
-        stored: Vec<u8>,
-    ) -> Result<Vec<u8>> {
-        match entity.kind() {
+    fn decode_item(&self, _structure: &Structure, item: &Item, stored: Vec<u8>) -> Result<Vec<u8>> {
+        match item.kind() {
             SegmentKind::Jumbf => base64::decode(&stored),
             _ => Ok(stored),
         }
     }
 
-    fn encode_entity<'a>(
+    fn encode_item<'a>(
         &self,
         _structure: &Structure,
-        entity: &Entity,
+        item: &Item,
         data: &'a [u8],
     ) -> Result<Cow<'a, [u8]>> {
-        match entity.kind() {
+        match item.kind() {
             SegmentKind::Jumbf => Ok(Cow::Owned(base64::encode(data))),
             _ => Ok(Cow::Borrowed(data)),
         }
@@ -467,7 +462,7 @@ async fn parse_with(handler: Arc<dyn ContainerHandler>, mut io: Io) -> Result<St
             if p > 0 {
                 let text = &data[(s.el.start + s.el.header) as usize..][..p as usize];
                 let ty = base64_head(text).and_then(|head| superbox_type(&head));
-                b.entity_of_segments_typed(SegmentKind::Jumbf, ty, &[id])?;
+                b.item_of_segments_typed(SegmentKind::Jumbf, ty, &[id])?;
             }
         }
         at = s.el.end();
@@ -573,12 +568,12 @@ fn put_manifest<'a>(b: &mut PlanBuilder<'_, 'a>, jumbf: &[u8]) -> Result<()> {
         base64::encode(jumbf),
         MANIFEST_CLOSE,
     )?;
-    b.entity_typed(SegmentKind::Jumbf, superbox_type(jumbf), &[id])
+    b.item_typed(SegmentKind::Jumbf, superbox_type(jumbf), &[id])
 }
 
 fn put_xmp<'a>(b: &mut PlanBuilder<'_, 'a>, packet: &'a [u8]) -> Result<()> {
     let id = b.put_segment(SegmentKind::Xmp, Name::None, &[][..], packet, &[][..])?;
-    b.entity_for(id)
+    b.item_for(id)
 }
 
 /// Decide what the output contains, and describe how to write it.
@@ -752,7 +747,7 @@ async fn plan<'a>(src: &Structure, io: &mut Io, updates: &'a Updates) -> Result<
         Name::None,
         Role::Payload,
     )?;
-    b.carry_entities(|_| true);
+    b.carry_items(|_| true);
     b.finish()
 }
 
@@ -988,11 +983,11 @@ mod tests {
         assert_eq!(at(seg.payload()), text.as_bytes());
         assert_eq!(at(seg.trailer()), MANIFEST_CLOSE);
 
-        // The entity is the text; the item is what it decodes to.
-        let e = s.require_entity(SegmentKind::Jumbf).unwrap();
+        // The item is the text; the item is what it decodes to.
+        let e = s.require_item(SegmentKind::Jumbf).unwrap();
         assert_eq!(e.jumbf_type(), Some([0xC2; 16]));
         assert_eq!(
-            s.read_entity(&mut Cursor::new(svg.as_bytes()), e).unwrap(),
+            s.read_item(&mut Cursor::new(svg.as_bytes()), e).unwrap(),
             text.as_bytes()
         );
         assert_eq!(store(&svg).unwrap(), j);
@@ -1082,7 +1077,7 @@ mod tests {
             r#"<svg xmlns="{NS}" xmlns:c2pa="http://c2pa.org/manifest"><metadata><?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?><x:xmpmeta><?xpacket end="w"?><c2pa:manifest>QUJD</c2pa:manifest>"#
         );
         let s = parsed(&svg);
-        assert!(s.entities(SegmentKind::Xmp).next().is_none());
+        assert!(s.items(SegmentKind::Xmp).next().is_none());
         let c = Conformance::new(handler()).jumbf(Some(jumbf(64)));
         c.check("unbalanced xpacket", svg.as_bytes());
 
@@ -1090,7 +1085,7 @@ mod tests {
         let svg = format!(
             r#"<svg xmlns="{NS}"><g><metadata/><?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?></g><g><?xpacket end="w"?></g></svg>"#
         );
-        assert!(parsed(&svg).entities(SegmentKind::Xmp).next().is_none());
+        assert!(parsed(&svg).items(SegmentKind::Xmp).next().is_none());
         c.check("packet across elements", svg.as_bytes());
 
         // Found by fuzzing: a packet that never ends swallows what follows it, so a
@@ -1098,7 +1093,7 @@ mod tests {
         let svg = format!(
             r#"<svg xmlns="{NS}"><g><?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?></g><metadata></metadata></svg>"#
         );
-        assert!(parsed(&svg).entities(SegmentKind::Xmp).next().is_none());
+        assert!(parsed(&svg).items(SegmentKind::Xmp).next().is_none());
         c.check("packet that never ends", svg.as_bytes());
 
         // Nor is one inside a packet that ends but is not an item.
@@ -1109,7 +1104,7 @@ mod tests {
         let svg = format!(
             r#"<svg xmlns="{NS}"><g><?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?></g><metadata></metadata><g><?xpacket end="w"?></g></svg>"#
         );
-        assert!(parsed(&svg).entities(SegmentKind::Xmp).next().is_none());
+        assert!(parsed(&svg).items(SegmentKind::Xmp).next().is_none());
         c.check(
             "packet across elements, with metadata inside",
             svg.as_bytes(),
@@ -1122,14 +1117,14 @@ mod tests {
         let p = r#"<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?><a/><?xpacket end="w"?>"#;
         let svg = format!(r#"<svg xmlns="{NS}">{p}<g/>{p}</svg>"#);
         let s = parsed(&svg);
-        assert_eq!(s.entities(SegmentKind::Xmp).count(), 2);
+        assert_eq!(s.items(SegmentKind::Xmp).count(), 2);
         assert!(matches!(
             s.xmp(&mut Cursor::new(svg.as_bytes())),
             Err(Error::Ambiguous { count: 2, .. })
         ));
         let out = rewrite(&svg, &Updates::new().remove_xmp()).unwrap();
         assert_eq!(out, format!(r#"<svg xmlns="{NS}"><g/></svg>"#));
-        assert_eq!(parsed(&out).entities(SegmentKind::Xmp).count(), 0);
+        assert_eq!(parsed(&out).items(SegmentKind::Xmp).count(), 0);
         Conformance::new(handler()).check("two packets", svg.as_bytes());
 
         // A manifest inside a packet is part of the packet; a packet inside a
@@ -1138,8 +1133,8 @@ mod tests {
             r#"<svg xmlns="{NS}" xmlns:c2pa="http://c2pa.org/manifest"><metadata><?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?><c2pa:manifest>QUJD</c2pa:manifest><?xpacket end="w"?></metadata></svg>"#
         );
         let s = parsed(&svg);
-        assert_eq!(s.entities(SegmentKind::Xmp).count(), 1);
-        assert_eq!(s.entities(SegmentKind::Jumbf).count(), 0);
+        assert_eq!(s.items(SegmentKind::Xmp).count(), 1);
+        assert_eq!(s.items(SegmentKind::Jumbf).count(), 0);
         let c = Conformance::new(handler()).jumbf(Some(jumbf(64)));
         c.check("manifest inside a packet", svg.as_bytes());
 
@@ -1147,7 +1142,7 @@ mod tests {
             r#"<svg xmlns="{NS}" xmlns:c2pa="http://c2pa.org/manifest"><metadata><c2pa:manifest><?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?><?xpacket end="w"?></c2pa:manifest></metadata></svg>"#
         );
         let s = parsed(&svg);
-        assert_eq!(s.entities(SegmentKind::Xmp).count(), 0);
+        assert_eq!(s.items(SegmentKind::Xmp).count(), 0);
         c.check("packet inside a manifest", svg.as_bytes());
 
         // A packet that holds the whole document, or the first metadata, hides them.
@@ -1181,7 +1176,7 @@ mod tests {
             r#"<svg xmlns="{NS}" xmlns:c2pa="http://c2pa.org/manifest"><g><metadata><c2pa:manifest>QUJD</c2pa:manifest></metadata></g></svg>"#
         );
         assert!(store(&svg).is_none());
-        assert!(parsed(&svg).require_entity(SegmentKind::Jumbf).is_err());
+        assert!(parsed(&svg).require_item(SegmentKind::Jumbf).is_err());
     }
 
     #[test]
@@ -1189,7 +1184,7 @@ mod tests {
         let placeholder = jumbf(90);
         let svg = with_manifest(&b64(&placeholder));
         let s = parsed(&svg);
-        let e = s.require_entity(SegmentKind::Jumbf).unwrap();
+        let e = s.require_item(SegmentKind::Jumbf).unwrap();
         let signed = jumbf(90).iter().map(|b| b ^ 0x55).collect::<Vec<_>>();
         let mut cur = Cursor::new(svg.clone().into_bytes());
         s.patch_exact(&mut cur, e, &signed).unwrap();
@@ -1235,7 +1230,7 @@ mod tests {
         let j = jumbf(100);
         let svg = with_manifest(&b64(&j));
         let s = parsed(&svg);
-        let e = s.require_entity(SegmentKind::Jumbf).unwrap();
+        let e = s.require_item(SegmentKind::Jumbf).unwrap();
         let r = e.parts().next().unwrap().range();
         let before = &svg.as_bytes()[..r.offset() as usize];
         assert!(before.ends_with(MANIFEST_OPEN));

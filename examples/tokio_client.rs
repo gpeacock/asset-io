@@ -83,8 +83,8 @@ async fn inspect(path: String) -> Result<String> {
         structure.segments().len()
     );
     for kind in [SegmentKind::Xmp, SegmentKind::Jumbf, SegmentKind::Exif] {
-        for e in structure.entities(kind) {
-            // The parts of an entity are plain byte ranges; read them however you like.
+        for e in structure.items(kind) {
+            // The parts of an item are plain byte ranges; read them however you like.
             let mut bytes = Vec::with_capacity(e.len() as usize);
             for part in e.parts() {
                 let r = part.range();
@@ -138,9 +138,9 @@ async fn edit(input: String, output: String, xmp: Vec<u8>) -> Result<(Structure,
 
     // The layout of what was written is known without parsing it again.
     let written = plan.into_structure();
-    let xmp_entities = written.entities(SegmentKind::Xmp).count();
+    let xmp_items = written.items(SegmentKind::Xmp).count();
     println!(
-        "  wrote {} bytes, {xmp_entities} XMP packet(s)",
+        "  wrote {} bytes, {xmp_items} XMP packet(s)",
         written.total_size()
     );
     let digest: String = hash.finalize().iter().map(|b| format!("{b:02x}")).collect();

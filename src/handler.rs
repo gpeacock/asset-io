@@ -24,7 +24,7 @@ use crate::error::{Error, Result};
 use crate::plan::WritePlan;
 use crate::segment::{Name, Segment, SegmentKind};
 use crate::sink::Sink;
-use crate::structure::{Entity, SegmentId, Structure};
+use crate::structure::{Item, SegmentId, Structure};
 use crate::task::{BoxFuture, Io, Task};
 use crate::walk::Node;
 use crate::Updates;
@@ -220,11 +220,11 @@ pub trait ContainerHandler: std::fmt::Debug + Send + Sync {
     /// The asset's XMP packet, or `None` if it has none. Called through
     /// [`Structure::xmp`](crate::Structure::xmp).
     ///
-    /// The default reads the single XMP entity, decoded. Containers that split XMP over
+    /// The default reads the single XMP item, decoded. Containers that split XMP over
     /// several elements and must reassemble it (JPEG extended XMP) override this.
     fn read_xmp(&self, structure: &Structure, src: &mut dyn ReadSeek) -> Result<Option<Vec<u8>>> {
         let mut src = src;
-        match structure.entity(SegmentKind::Xmp)? {
+        match structure.item(SegmentKind::Xmp)? {
             Some(e) => structure.read_decoded(&mut src, e).map(Some),
             None => Ok(None),
         }
@@ -243,45 +243,45 @@ pub trait ContainerHandler: std::fmt::Debug + Send + Sync {
         Err(Error::UnsupportedFormat)
     }
 
-    /// The item `entity` holds, from the bytes the container stores for it. The default returns them as they are; a container that stores an item
-    /// in another form overrides this and [`encode_entity`](Self::encode_entity):
+    /// The item `item` holds, from the bytes the container stores for it. The default returns them as they are; a container that stores an item
+    /// in another form overrides this and [`encode_item`](Self::encode_item):
     /// SVG holds JUMBF as base64 text, and a PDF stream may be compressed. The
-    /// structure is given so that the handler can look up how this entity is stored
+    /// structure is given so that the handler can look up how this item is stored
     /// (see [`Structure::attachment`]).
     ///
     /// [`Structure::store`](crate::Structure::store) and
     /// [`Structure::xmp`](crate::Structure::xmp) decode, so callers get the item
-    /// whatever the container. [`Structure::read_entity`](crate::Structure::read_entity)
+    /// whatever the container. [`Structure::read_item`](crate::Structure::read_item)
     /// does not: it reads what is in the file, which is what a hash covers.
-    fn decode_entity(
+    fn decode_item(
         &self,
         _structure: &Structure,
-        _entity: &Entity,
+        _item: &Item,
         stored: Vec<u8>,
     ) -> Result<Vec<u8>> {
         Ok(stored)
     }
 
-    /// The bytes the container stores for `data` as `entity`: the inverse of
-    /// [`decode_entity`](Self::decode_entity), without any framing (that is
+    /// The bytes the container stores for `data` as `item`: the inverse of
+    /// [`decode_item`](Self::decode_item), without any framing (that is
     /// [`compose`](Self::compose)). The default returns `data` as it is.
     ///
     /// [`Structure::patch_exact`](crate::Structure::patch_exact) uses it to size and
     /// write a replacement.
-    fn encode_entity<'a>(
+    fn encode_item<'a>(
         &self,
         _structure: &Structure,
-        _entity: &Entity,
+        _item: &Item,
         data: &'a [u8],
     ) -> Result<Cow<'a, [u8]>> {
         Ok(Cow::Borrowed(data))
     }
 
-    /// Whether `entity`'s payload may be overwritten in place with `len` bytes (see
+    /// Whether `item`'s payload may be overwritten in place with `len` bytes (see
     /// [`Structure::patch`](crate::Structure::patch)). The default allows it, as long as
     /// the bytes fit. A container that cannot take a short payload, or an edit at all
     /// (a compressed stream, a signed document), refuses here.
-    fn check_patch(&self, _structure: &Structure, _entity: &Entity, _len: usize) -> Result<()> {
+    fn check_patch(&self, _structure: &Structure, _item: &Item, _len: usize) -> Result<()> {
         Ok(())
     }
 

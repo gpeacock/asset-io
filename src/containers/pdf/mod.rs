@@ -22,10 +22,10 @@
 //! [`Other`](crate::SegmentKind::Other) bytes, so the structure tiles the file and a
 //! hash can skip exactly a store.
 //!
-//! A Flate-compressed store is an entity whose bytes are the encoded ones;
+//! A Flate-compressed store is an item whose bytes are the encoded ones;
 //! [`Structure::xmp`](crate::Structure::xmp) and
 //! [`Structure::store`](crate::Structure::store) decode them (through the handler's
-//! [`decode_entity`](ContainerHandler::decode_entity)). See `PDF.md` for the rules and
+//! [`decode_item`](ContainerHandler::decode_item)). See `PDF.md` for the rules and
 //! the limits.
 
 mod flate;
@@ -34,7 +34,7 @@ mod write;
 
 use crate::plan::WritePlan;
 use crate::{
-    BoxFuture, ByteRange, ContainerHandler, Entity, Error, FormatSpec, Io, MetadataUpdate, Name,
+    BoxFuture, ByteRange, ContainerHandler, Error, FormatSpec, Io, Item, MetadataUpdate, Name,
     PlanBuilder, Result, Role, SegmentId, SegmentKind, Structure, StructureBuilder, Updates,
     MAX_SEGMENT_SIZE,
 };
@@ -89,11 +89,11 @@ impl PdfState {
             .ok_or_else(|| invalid("structure was not parsed by the PDF handler"))
     }
 
-    fn decode_of(structure: &Structure, entity: &Entity) -> Result<Option<Decode>> {
-        let part = entity
+    fn decode_of(structure: &Structure, item: &Item) -> Result<Option<Decode>> {
+        let part = item
             .parts()
             .next()
-            .ok_or_else(|| invalid("entity has no parts"))?;
+            .ok_or_else(|| invalid("item has no parts"))?;
         Ok(Self::of(structure)?
             .decodes
             .get(&part.segment().index())
@@ -132,17 +132,17 @@ impl ContainerHandler for PdfHandler {
         Box::pin(async move { plan(src_structure, io.len(), updates) })
     }
 
-    fn check_patch(&self, structure: &Structure, entity: &Entity, len: usize) -> Result<()> {
+    fn check_patch(&self, structure: &Structure, item: &Item, len: usize) -> Result<()> {
         let state = PdfState::of(structure)?;
         if let Some(refusal) = state.edit.refusal() {
             return Err(refusal);
         }
-        if PdfState::decode_of(structure, entity)?.is_some() {
+        if PdfState::decode_of(structure, item)?.is_some() {
             return Err(Error::UnsupportedFeature(
                 "cannot patch compressed PDF metadata in place",
             ));
         }
-        if len as u64 != entity.len() {
+        if len as u64 != item.len() {
             return Err(invalid(
                 "PDF in-place updates require exact-length payloads",
             ));
@@ -150,13 +150,8 @@ impl ContainerHandler for PdfHandler {
         Ok(())
     }
 
-    fn decode_entity(
-        &self,
-        structure: &Structure,
-        entity: &Entity,
-        stored: Vec<u8>,
-    ) -> Result<Vec<u8>> {
-        match PdfState::decode_of(structure, entity)? {
+    fn decode_item(&self, structure: &Structure, item: &Item, stored: Vec<u8>) -> Result<Vec<u8>> {
+        match PdfState::decode_of(structure, item)? {
             None => Ok(stored),
             Some(decode) => {
                 let data = inflate(&stored, MAX_DECODED_METADATA, None)?;
@@ -1048,7 +1043,7 @@ fn plan<'a>(src: &Structure, source_len: u64, updates: &'a Updates) -> Result<Wr
         for i in 0..segments.len() {
             b.copy_segment(SegmentId::from_index(i)?)?;
         }
-        b.carry_entities(|_| true);
+        b.carry_items(|_| true);
         b.attach(state.clone());
         return b.finish();
     }
@@ -1104,13 +1099,13 @@ fn plan<'a>(src: &Structure, source_len: u64, updates: &'a Updates) -> Result<Wr
                 if !data.is_empty() {
                     flush(&mut b, &mut run)?;
                     let id = b.put_segment(kind, Name::None, &[][..], data, &[][..])?;
-                    b.entity_for(id)?;
+                    b.item_for(id)?;
                 }
             }
         }
     }
     flush(&mut b, &mut run)?;
-    b.carry_entities(|_| true);
+    b.carry_items(|_| true);
     b.attach(PdfState {
         decodes,
         edit: write::State::Ready(Arc::new(revision.context)),

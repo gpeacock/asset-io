@@ -17,7 +17,7 @@
 //! the [`bmff`](super::bmff) handler calls when it parses a file, and only that
 //! handler uses it. The handler turns what it finds into
 //! [`Exif`](crate::SegmentKind::Exif) and
-//! [`Thumbnail`](crate::SegmentKind::Thumbnail) entities, which the
+//! [`Thumbnail`](crate::SegmentKind::Thumbnail) items, which the
 //! container-agnostic code (`Structure::exif_info`, `Structure::embedded_thumbnail`)
 //! then reads without knowing the format.
 //!

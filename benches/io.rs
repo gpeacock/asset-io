@@ -313,22 +313,22 @@ fn bench_write(c: &mut Criterion) {
     g.finish();
 }
 
-fn bench_entities(c: &mut Criterion) {
+fn bench_items(c: &mut Criterion) {
     let Some(bytes) = fixture("FireflyTrain.jpg") else {
         return;
     };
     let s = HandlerRegistry::builtin()
         .parse("jpg", &mut Cursor::new(&bytes))
         .unwrap();
-    let Some(e) = s.entities(SegmentKind::Xmp).next() else {
+    let Some(e) = s.items(SegmentKind::Xmp).next() else {
         return;
     };
-    let mut g = group(c, "entity");
-    g.bench_function("read_entity", |b| {
-        b.iter(|| black_box(s.read_entity(&mut Cursor::new(&bytes), e).unwrap()))
+    let mut g = group(c, "item");
+    g.bench_function("read_item", |b| {
+        b.iter(|| black_box(s.read_item(&mut Cursor::new(&bytes), e).unwrap()))
     });
-    g.bench_function("slice_entity", |b| {
-        b.iter(|| black_box(s.slice_entity(&bytes, e).unwrap()))
+    g.bench_function("slice_item", |b| {
+        b.iter(|| black_box(s.slice_item(&bytes, e).unwrap()))
     });
     g.finish();
 }
@@ -389,7 +389,7 @@ criterion_group!(
     bench_parse,
     bench_read,
     bench_write,
-    bench_entities,
+    bench_items,
     bench_mmap
 );
 criterion_main!(benches);

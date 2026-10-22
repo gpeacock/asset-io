@@ -61,9 +61,9 @@ fn real_files_round_trip_and_take_metadata() {
             (SegmentKind::Jumbf, vec![0xAB; 1001]),
             (SegmentKind::Xmp, b"<x:xmpmeta/>".to_vec()),
         ] {
-            let e = t.require_entity(kind).unwrap();
+            let e = t.require_item(kind).unwrap();
             assert_eq!(
-                t.read_entity(&mut Cursor::new(&out), e).unwrap(),
+                t.read_item(&mut Cursor::new(&out), e).unwrap(),
                 want,
                 "{path}"
             );
@@ -75,8 +75,8 @@ fn real_files_round_trip_and_take_metadata() {
         let b = HandlerRegistry::builtin()
             .parse_detect(&mut Cursor::new(&back))
             .unwrap();
-        assert!(b.entity(SegmentKind::Jumbf).unwrap().is_none(), "{path}");
-        assert!(b.entity(SegmentKind::Xmp).unwrap().is_none(), "{path}");
+        assert!(b.item(SegmentKind::Jumbf).unwrap().is_none(), "{path}");
+        assert!(b.item(SegmentKind::Xmp).unwrap().is_none(), "{path}");
     }
     assert!(ran > 0, "no RIFF fixtures found");
 }

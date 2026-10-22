@@ -83,15 +83,15 @@ fn write_toy_plan<'a>(src: &Structure, updates: &'a Updates) -> Result<WritePlan
     if let Some(d) = xmp.pending() {
         new_xmp(&mut b, d)?;
     }
-    // The entities of the segments that were copied follow them.
-    b.carry_entities(|_| true);
+    // The items of the segments that were copied follow them.
+    b.carry_items(|_| true);
     b.finish()
 }
 
 fn new_xmp<'a>(b: &mut PlanBuilder<'_, 'a>, d: &'a [u8]) -> Result<()> {
     let header = vec![b'X', d.len() as u8];
     let id = b.put_segment(SegmentKind::Xmp, Name::Id(b'X' as u64), header, d, &[][..])?;
-    b.entity_for(id)
+    b.item_for(id)
 }
 
 fn parse_toy(handler: Arc<dyn ContainerHandler>, data: &[u8]) -> Result<Structure> {
@@ -117,7 +117,7 @@ fn parse_toy(handler: Arc<dyn ContainerHandler>, data: &[u8]) -> Result<Structur
         // Named by kind, not position, so a record keeps its name when others move.
         let id = b.push_span(seg_kind, Name::Id(kind as u64), 2, len as u64, 0)?;
         if kind == b'X' {
-            b.entity_of_segments(SegmentKind::Xmp, &[id])?;
+            b.item_of_segments(SegmentKind::Xmp, &[id])?;
         }
         at += 2 + len;
     }

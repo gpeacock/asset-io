@@ -32,8 +32,8 @@ fuzz_target!(|data: &[u8]| {
 
     // Read what the structure describes.
     for kind in [SegmentKind::Xmp, SegmentKind::Jumbf, SegmentKind::Exif] {
-        for e in structure.entities(kind) {
-            let _ = structure.read_entity(&mut src, e);
+        for e in structure.items(kind) {
+            let _ = structure.read_item(&mut src, e);
         }
     }
     // Hierarchical traversal.

@@ -62,13 +62,13 @@ fn store(uuid: u8, children: &[&[u8]]) -> Vec<u8> {
     boxed(b"jumb", &body)
 }
 
-/// An entity as a caller observes it: kind, label, and its parts as
+/// An item as a caller observes it: kind, label, and its parts as
 /// (segment index, offset, length).
-type EntityShape = (SegmentKind, Option<String>, Vec<(usize, u64, u64)>);
+type ItemShape = (SegmentKind, Option<String>, Vec<(usize, u64, u64)>);
 
 /// Everything about a structure a caller can observe.
-fn shape(s: &Structure) -> (u64, Vec<asset_io::Segment>, Vec<EntityShape>) {
-    let mut entities = Vec::new();
+fn shape(s: &Structure) -> (u64, Vec<asset_io::Segment>, Vec<ItemShape>) {
+    let mut items = Vec::new();
     for kind in [
         SegmentKind::Jumbf,
         SegmentKind::Xmp,
@@ -76,15 +76,15 @@ fn shape(s: &Structure) -> (u64, Vec<asset_io::Segment>, Vec<EntityShape>) {
         SegmentKind::Thumbnail,
         SegmentKind::Other,
     ] {
-        for e in s.entities(kind) {
+        for e in s.items(kind) {
             let parts = e
                 .parts()
                 .map(|p| (p.segment().index(), p.range().offset(), p.range().len()))
                 .collect();
-            entities.push((kind, e.label().map(str::to_owned), parts));
+            items.push((kind, e.label().map(str::to_owned), parts));
         }
     }
-    (s.total_size(), s.segments().to_vec(), entities)
+    (s.total_size(), s.segments().to_vec(), items)
 }
 
 #[test]
@@ -139,13 +139,13 @@ fn plan_places_a_manifest_that_is_not_there_yet() {
         let Ok(s) = reg.parse_detect(&mut Cursor::new(&bytes)) else {
             continue;
         };
-        if s.entity(SegmentKind::Jumbf).ok().flatten().is_some() {
+        if s.item(SegmentKind::Jumbf).ok().flatten().is_some() {
             continue;
         }
         let Ok(dest) = s.plan(&mut Cursor::new(&bytes), &u) else {
             continue;
         };
-        let e = dest.require_entity(SegmentKind::Jumbf).unwrap();
+        let e = dest.require_item(SegmentKind::Jumbf).unwrap();
         assert_eq!(e.len(), store(1, &[b"one"]).len() as u64, "{name}");
         assert!(dest.total_size() > s.total_size(), "{name}");
         ran += 1;
@@ -202,18 +202,18 @@ fn a_reader_sees_original_and_update_as_one_store() {
     let b = b.into_inner();
     let s2 = reg.parse_detect(&mut Cursor::new(&b)).unwrap();
     // Two stores are in the file, and a reader sees them as the one that was set.
-    assert_eq!(s2.entities(SegmentKind::Jumbf).count(), 2);
+    assert_eq!(s2.items(SegmentKind::Jumbf).count(), 2);
     assert_eq!(s2.store(&mut Cursor::new(&b)).unwrap(), Some(second));
 }
 
-/// The bytes of the segments an entity lives in, in order.
-fn entity_segments(s: &Structure, out: &[u8], kind: SegmentKind) -> Vec<u8> {
+/// The bytes of the segments an item lives in, in order.
+fn item_segments(s: &Structure, out: &[u8], kind: SegmentKind) -> Vec<u8> {
     // A JPEG that already holds a store of another type keeps it, so choose the
     // one just written, which these tests give the type `[1; 16]`.
     let e = s
-        .entities(kind)
+        .items(kind)
         .find(|e| e.jumbf_type() == Some([1; 16]))
-        .or_else(|| s.entities(kind).next())
+        .or_else(|| s.items(kind).next())
         .unwrap();
     let mut ids: Vec<_> = e.parts().map(|p| p.segment()).collect();
     ids.dedup();
@@ -252,7 +252,7 @@ fn compose_is_what_write_inserts() {
             let out = out.into_inner();
             assert_eq!(
                 composed,
-                entity_segments(&dest, &out, kind),
+                item_segments(&dest, &out, kind),
                 "{name} {kind:?}"
             );
             checked.insert((s.container_id().to_owned(), kind));
@@ -290,7 +290,7 @@ fn compose_splits_a_large_jpeg_store_like_write() {
         .unwrap();
     assert_eq!(
         composed,
-        entity_segments(&dest, &out.into_inner(), SegmentKind::Jumbf)
+        item_segments(&dest, &out.into_inner(), SegmentKind::Jumbf)
     );
 }
 

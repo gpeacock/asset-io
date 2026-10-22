@@ -322,7 +322,7 @@ fn plan<'a>(src: &Structure, updates: &'a Updates) -> Result<WritePlan<'a>> {
                 )?
             }
         };
-        b.entity_for(id)?;
+        b.item_for(id)?;
     }
     b.finish()
 }
@@ -599,14 +599,14 @@ mod tests {
         )
         .unwrap();
 
-        let e = dest.require_entity(SegmentKind::Jumbf).unwrap().clone();
+        let e = dest.require_item(SegmentKind::Jumbf).unwrap().clone();
         dest.patch(&mut out, &e, b"signed manifest").unwrap();
         let bytes = out.into_inner();
         verify_crcs(&bytes);
 
         let re = parse(&mut Cursor::new(bytes.clone())).unwrap();
-        let e = re.require_entity(SegmentKind::Jumbf).unwrap();
-        let data = re.read_entity(&mut Cursor::new(bytes), e).unwrap();
+        let e = re.require_item(SegmentKind::Jumbf).unwrap();
+        let data = re.read_item(&mut Cursor::new(bytes), e).unwrap();
         assert_eq!(&data[..15], b"signed manifest");
         assert!(data[15..].iter().all(|&b| b == 0));
         assert_eq!(data.len(), 64);
@@ -626,7 +626,7 @@ mod tests {
             &mut crate::NullSink,
         )
         .unwrap();
-        let e = dest.require_entity(SegmentKind::Jumbf).unwrap().clone();
+        let e = dest.require_item(SegmentKind::Jumbf).unwrap().clone();
         assert!(dest.patch(&mut out, &e, &[1u8; 9]).is_err());
     }
 
@@ -647,8 +647,8 @@ mod tests {
         let bytes = out.into_inner();
         verify_crcs(&bytes);
         let re = parse(&mut Cursor::new(bytes.clone())).unwrap();
-        let e = re.require_entity(SegmentKind::Xmp).unwrap();
-        assert_eq!(re.read_entity(&mut Cursor::new(bytes), e).unwrap(), b"<x/>");
+        let e = re.require_item(SegmentKind::Xmp).unwrap();
+        assert_eq!(re.read_item(&mut Cursor::new(bytes), e).unwrap(), b"<x/>");
 
         // Same keyword but compression flag set: must not be treated as XMP.
         let mut prefix = XMP_ITXT_PREFIX.to_vec();
@@ -659,6 +659,6 @@ mod tests {
         p.extend(chunk(b"iTXt", &data));
         p.extend(chunk(b"IEND", &[]));
         let s = parse(&mut Cursor::new(p)).unwrap();
-        assert!(s.entity(SegmentKind::Xmp).unwrap().is_none());
+        assert!(s.item(SegmentKind::Xmp).unwrap().is_none());
     }
 }

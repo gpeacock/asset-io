@@ -709,9 +709,9 @@ fn mmap_exposes_borrowed_metadata_bytes() {
     let file = std::fs::File::open(&path).unwrap();
     let mapped = unsafe { asset_io::MappedFile::map(&file) }.unwrap();
     let structure = mapped.parse_detect(&HandlerRegistry::builtin()).unwrap();
-    let xmp = structure.require_entity(SegmentKind::Xmp).unwrap();
+    let xmp = structure.require_item(SegmentKind::Xmp).unwrap();
     assert_eq!(
-        &*structure.slice_entity(mapped.as_bytes(), xmp).unwrap(),
+        &*structure.slice_item(mapped.as_bytes(), xmp).unwrap(),
         b"<xmp/>"
     );
 }
@@ -855,7 +855,7 @@ fn a_sink_that_skips_the_store_sees_exactly_the_rest() {
     let mut asset = Asset::from_source(Cursor::new(pdf.bytes.clone())).unwrap();
     let store = asset
         .structure()
-        .require_entity(SegmentKind::Jumbf)
+        .require_item(SegmentKind::Jumbf)
         .unwrap()
         .parts()
         .next()

@@ -423,8 +423,8 @@ impl Expect {
         src: &Structure,
         source: &[u8],
     ) -> std::result::Result<(), String> {
-        type Item = std::result::Result<Option<Vec<u8>>, String>;
-        let read = |s: &Structure, b: &[u8]| -> (Item, Item) {
+        type Read = std::result::Result<Option<Vec<u8>>, String>;
+        let read = |s: &Structure, b: &[u8]| -> (Read, Read) {
             (
                 s.xmp(&mut Cursor::new(b))
                     .map_err(|e| format!("reading XMP: {e}")),
@@ -489,13 +489,13 @@ fn describe(s: &Structure) -> String {
         s.total_size(),
         s.media_type()
     ));
-    // Entities in file order: how a handler declares them is not part of what a
+    // Items in file order: how a handler declares them is not part of what a
     // structure says.
-    let mut entities: Vec<_> = s.entity_list().collect();
-    entities.sort_by_key(|(_, e)| e.parts().next().map(|p| p.range().offset()));
-    for (kind, e) in entities {
+    let mut items: Vec<_> = s.item_list().collect();
+    items.sort_by_key(|(_, e)| e.parts().next().map(|p| p.range().offset()));
+    for (kind, e) in items {
         out.push_str(&format!(
-            "entity {kind:?} {:?} {:?} {:?}",
+            "item {kind:?} {:?} {:?} {:?}",
             e.label(),
             e.media_type(),
             e.jumbf_type()
@@ -509,7 +509,7 @@ fn describe(s: &Structure) -> String {
 }
 
 /// The segments follow one another from the first byte to the last, and an
-/// entity's parts lie in their segments.
+/// item's parts lie in their segments.
 fn tiles(s: &Structure, len: u64) -> std::result::Result<(), String> {
     let mut at = 0u64;
     for (i, seg) in s.segments().iter().enumerate() {
@@ -525,12 +525,12 @@ fn tiles(s: &Structure, len: u64) -> std::result::Result<(), String> {
             s.total_size()
         ));
     }
-    for (kind, e) in s.entity_list() {
+    for (kind, e) in s.item_list() {
         for p in e.parts() {
             let seg = s.segment(p.segment()).map_err(|e| e.to_string())?;
             let (r, x) = (p.range(), seg.extent());
             if r.offset() < x.offset() || r.end() > x.end() {
-                return Err(format!("{kind:?} entity has a part outside its segment"));
+                return Err(format!("{kind:?} item has a part outside its segment"));
             }
         }
     }

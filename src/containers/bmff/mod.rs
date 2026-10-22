@@ -18,19 +18,19 @@
 //! trailer. Boxes nested inside segments are not segments: [`Structure::walk`]
 //! finds them lazily, reading only box headers.
 //!
-//! C2PA's content provenance boxes (`uuid` D8FEC3D6-...) become entities:
-//! `manifest`, `original` and `update` boxes are [`SegmentKind::Jumbf`] entities
+//! C2PA's content provenance boxes (`uuid` D8FEC3D6-...) become items:
+//! `manifest`, `original` and `update` boxes are [`SegmentKind::Jumbf`] items
 //! labelled with their purpose, whose payload is the manifest store itself (the
 //! purpose string and the merkle offset field belong to the header). `merkle` boxes
-//! are [`SegmentKind::Other`] entities labelled `merkle`. XMP `uuid` boxes are
-//! [`SegmentKind::Xmp`] entities.
+//! are [`SegmentKind::Other`] items labelled `merkle`. XMP `uuid` boxes are
+//! [`SegmentKind::Xmp`] items.
 //!
-//! HEIF items found through a file-level `meta` box are entities too: an `Exif`
-//! item is a [`SegmentKind::Exif`] entity (the TIFF data, after the item's offset
-//! field), and an item that a `thmb` reference names as a thumbnail is a
-//! [`SegmentKind::Thumbnail`] entity labelled with its item type. Their bytes lie in
-//! `mdat` or `idat`, so an entity can have several parts, and `Structure::slice_entity`
-//! and `read_entity` work on them as on any other. Items that cannot be located
+//! HEIF items found through a file-level `meta` box become [`Item`]s too: an `Exif`
+//! HEIF item is a [`SegmentKind::Exif`] item (the TIFF data, after the HEIF item's offset
+//! field), and a HEIF item that a `thmb` reference names as a thumbnail is a
+//! [`SegmentKind::Thumbnail`] item labelled with its HEIF item type. Their bytes lie in
+//! `mdat` or `idat`, so an item can have several parts, and `Structure::slice_item`
+//! and `read_item` work on them as on any other. HEIF items that cannot be located
 //! (external data, unsupported construction methods, extents outside the file) are
 //! left out, and a `meta` box that does not parse does not make the file an error.
 //!
@@ -71,7 +71,7 @@ mod heif_items;
 
 use crate::plan::{OffsetMap, Relocate, WritePlan};
 use crate::{
-    block_on, BoxFuture, ByteRange, ContainerHandler, Entity, Error, Existing, FormatSpec, Io,
+    block_on, BoxFuture, ByteRange, ContainerHandler, Error, Existing, FormatSpec, Io, Item,
     MetadataSlot, MetadataUpdate, Name, Node, PlanBuilder, ReadSeek, Result, Role, Segment,
     SegmentId, SegmentKind, Structure, StructureBuilder, Task, Updates, MAX_SEGMENT_SIZE,
 };
@@ -122,7 +122,7 @@ pub trait BmffUpdates: Sized {
     /// the write. Write zeroed payloads of the final length, hash the media through
     /// the [`Sink`](crate::Sink) during the write, then fill each box in place with
     /// [`Structure::patch_exact`](crate::Structure::patch_exact). The boxes are the
-    /// entities labelled [`MERKLE`] of kind [`SegmentKind::Other`].
+    /// items labelled [`MERKLE`] of kind [`SegmentKind::Other`].
     ///
     /// A file that has merkle boxes cannot take a new manifest unless the boxes are
     /// also set or removed, and an update manifest cannot change them.
@@ -497,10 +497,10 @@ struct Classified {
     kind: SegmentKind,
     /// Header length including any `uuid` type and C2PA fields.
     header_len: u32,
-    entity: Option<EntityKind>,
+    item: Option<ItemKind>,
 }
 
-enum EntityKind {
+enum ItemKind {
     /// A C2PA box with this purpose; `merkle` boxes are not JUMBF.
     C2pa(&'static str),
     Xmp,
@@ -520,7 +520,7 @@ async fn classify(io: &mut Io, at: u64, h: &BoxHeader) -> Result<Classified> {
     let plain = |kind| Classified {
         kind,
         header_len: h.header_len,
-        entity: None,
+        item: None,
     };
     match h.ty {
         FTYP => return Ok(plain(SegmentKind::Header)),
@@ -544,14 +544,14 @@ async fn classify(io: &mut Io, at: u64, h: &BoxHeader) -> Result<Classified> {
         return Ok(Classified {
             kind: SegmentKind::Xmp,
             header_len: h.header_len + 16,
-            entity: Some(EntityKind::Xmp),
+            item: Some(ItemKind::Xmp),
         });
     }
     if u != C2PA_UUID {
         return Ok(Classified {
             kind: SegmentKind::Other,
             header_len: h.header_len + 16,
-            entity: None,
+            item: None,
         });
     }
 
@@ -587,7 +587,7 @@ async fn classify(io: &mut Io, at: u64, h: &BoxHeader) -> Result<Classified> {
         kind,
         header_len: u32::try_from(header_len)
             .map_err(|_| Error::invalid_segment(at, "header too long"))?,
-        entity: Some(EntityKind::C2pa(label)),
+        item: Some(ItemKind::C2pa(label)),
     })
 }
 
@@ -665,12 +665,12 @@ async fn parse_with(handler: Arc<dyn ContainerHandler>, mut io: Io) -> Result<St
                 metas.push((body, end));
             }
         }
-        match c.entity {
-            Some(EntityKind::Xmp) => b.entity_of_segments(SegmentKind::Xmp, &[id])?,
-            Some(EntityKind::C2pa(label)) => {
+        match c.item {
+            Some(ItemKind::Xmp) => b.item_of_segments(SegmentKind::Xmp, &[id])?,
+            Some(ItemKind::C2pa(label)) => {
                 counts.add(label);
                 let payload = b.segment(id)?.payload();
-                b.entity_labelled(c.kind, label, &[(id, payload)])?;
+                b.item_labelled(c.kind, label, &[(id, payload)])?;
             }
             None => {}
         }
@@ -684,7 +684,7 @@ async fn parse_with(handler: Arc<dyn ContainerHandler>, mut io: Io) -> Result<St
             continue;
         };
         for f in &found {
-            item_entity(&mut b, io, &placed, f).await?;
+            add_item(&mut b, io, &placed, f).await?;
         }
     }
     b.finish()
@@ -730,9 +730,9 @@ fn split_over_segments(
     Ok(Some(parts))
 }
 
-/// Add the entity for one HEIF item. An item that cannot be located in the file is
+/// Add the [`Item`] for one HEIF item. A HEIF item that cannot be located in the file is
 /// skipped.
-async fn item_entity(
+async fn add_item(
     b: &mut StructureBuilder,
     io: &mut Io,
     placed: &[(SegmentId, u64, u64)],
@@ -741,7 +741,7 @@ async fn item_entity(
     let mut extents = f.extents.clone();
     if f.kind == heif_items::Kind::Exif {
         // The item starts with the offset of the TIFF header from the end of that
-        // field; the entity is the TIFF data.
+        // field; the item is the TIFF data.
         let (at, len) = extents[0];
         let mut h = [0u8; 4];
         if len < 4 || io.read_at(at, &mut h).await.is_err() {
@@ -761,8 +761,8 @@ async fn item_entity(
         return Ok(());
     }
     match f.kind {
-        heif_items::Kind::Exif => b.entity(SegmentKind::Exif, &parts),
-        heif_items::Kind::Thumbnail => b.entity_with_media_type(
+        heif_items::Kind::Exif => b.item(SegmentKind::Exif, &parts),
+        heif_items::Kind::Thumbnail => b.item_with_media_type(
             SegmentKind::Thumbnail,
             Some(String::from_utf8_lossy(&f.item_type).into_owned().into()),
             f.media_type.clone().map(Into::into),
@@ -1174,10 +1174,10 @@ fn new_xmp(d: &[u8]) -> Result<Op<'_>> {
     })
 }
 
-/// The bytes of `entity`, its parts joined, read through `io`.
-async fn read_entity(src: &Structure, io: &mut Io, entity: &Entity) -> Result<Vec<u8>> {
+/// The bytes of `item`, its parts joined, read through `io`.
+async fn read_item(src: &Structure, io: &mut Io, item: &Item) -> Result<Vec<u8>> {
     let mut out = Vec::new();
-    for part in entity.parts() {
+    for part in item.parts() {
         let r = part.range();
         if r.end() > src.total_size() {
             return Err(Error::invalid_segment(
@@ -1214,7 +1214,7 @@ async fn plan<'a>(
 ) -> Result<(Vec<Op<'a>>, Vec<Option<&'static str>>, OffsetMap)> {
     let segs = src.segments();
     let mut labels: Vec<Option<&'static str>> = vec![None; segs.len()];
-    for (_, e) in src.entity_list() {
+    for (_, e) in src.item_list() {
         if let (Some(l), Some(p)) = (e.label(), e.parts().next()) {
             labels[p.segment().index()] = purpose_label(l.as_bytes());
         }
@@ -1228,12 +1228,12 @@ async fn plan<'a>(
     // so that store is left as it is (as the original) and only what follows it is
     // written, as the update. Anything else is written as a whole.
     let frozen = src
-        .entities_labelled(SegmentKind::Jumbf, MANIFEST)
+        .items_labelled(SegmentKind::Jumbf, MANIFEST)
         .next()
-        .or_else(|| src.entities_labelled(SegmentKind::Jumbf, ORIGINAL).next());
+        .or_else(|| src.items_labelled(SegmentKind::Jumbf, ORIGINAL).next());
     let mut addition: Option<Vec<u8>> = match (updates.jumbf(), updates.is_jumbf_update(), frozen) {
         (MetadataUpdate::Set(full), true, Some(e)) => {
-            let existing = read_entity(src, io, e).await?;
+            let existing = read_item(src, io, e).await?;
             crate::jumbf::addition_to(&existing, full)?
         }
         _ => None,
@@ -1512,14 +1512,14 @@ async fn assemble<'a>(
             ),
         };
         match (label, kind) {
-            (Some(l), _) => b.entity_labelled(kind, l, &[id])?,
-            (None, SegmentKind::Xmp) => b.entity(SegmentKind::Xmp, &[id])?,
+            (Some(l), _) => b.item_labelled(kind, l, &[id])?,
+            (None, SegmentKind::Xmp) => b.item(SegmentKind::Xmp, &[id])?,
             _ => {}
         }
     }
     // Items (EXIF, thumbnails) are bytes inside boxes that are copied as they are,
-    // so their entities follow the boxes to wherever those land.
-    b.carry_entities(|k| matches!(k, SegmentKind::Exif | SegmentKind::Thumbnail));
+    // so their items follow the boxes to wherever those land.
+    b.carry_items(|k| matches!(k, SegmentKind::Exif | SegmentKind::Thumbnail));
     b.finish()
 }
 
@@ -1617,12 +1617,12 @@ mod tests {
         assert_eq!(covered, data.len() as u64);
 
         let e = s
-            .entities_labelled(SegmentKind::Jumbf, MANIFEST)
+            .items_labelled(SegmentKind::Jumbf, MANIFEST)
             .next()
             .unwrap();
-        assert_eq!(s.read_entity(&mut Cursor::new(&data), e).unwrap(), b"STORE");
+        assert_eq!(s.read_item(&mut Cursor::new(&data), e).unwrap(), b"STORE");
         assert!(s
-            .entities_labelled(SegmentKind::Jumbf, UPDATE)
+            .items_labelled(SegmentKind::Jumbf, UPDATE)
             .next()
             .is_none());
     }
@@ -1754,16 +1754,13 @@ mod tests {
     }
 
     #[test]
-    fn xmp_uuid_box_is_an_entity() {
+    fn xmp_uuid_box_is_an_item() {
         let mut body = XMP_UUID.to_vec();
         body.extend_from_slice(b"<xmp/>");
         let data = file(&[ftyp(), boxed(b"uuid", &body)]);
         let s = parse(&mut Cursor::new(&data)).unwrap();
-        let e = s.require_entity(SegmentKind::Xmp).unwrap();
-        assert_eq!(
-            s.read_entity(&mut Cursor::new(&data), e).unwrap(),
-            b"<xmp/>"
-        );
+        let e = s.require_item(SegmentKind::Xmp).unwrap();
+        assert_eq!(s.read_item(&mut Cursor::new(&data), e).unwrap(), b"<xmp/>");
     }
 
     #[test]
@@ -1886,10 +1883,10 @@ mod tests {
         let s = parse(&mut Cursor::new(&out)).unwrap();
         assert_eq!(s.segments()[1].name(), Name::FourCC(UUID));
         let e = s
-            .entities_labelled(SegmentKind::Jumbf, MANIFEST)
+            .items_labelled(SegmentKind::Jumbf, MANIFEST)
             .next()
             .unwrap();
-        assert_eq!(s.read_entity(&mut Cursor::new(&out), e).unwrap(), b"STORE");
+        assert_eq!(s.read_item(&mut Cursor::new(&out), e).unwrap(), b"STORE");
         let added = (out.len() - f.len()) as u32;
         assert_eq!(added, 8 + 16 + 4 + 9 + 8 + 5);
         assert_eq!(stco_entry(&out), e0 + added);
@@ -1923,9 +1920,9 @@ mod tests {
         let (f, e0) = media_file(&[c2pa_box(ORIGINAL, b"A")], &[c2pa_box(UPDATE, b"U")], None);
         let out = rewrite(&f, &Updates::new().set_jumbf(b"NEW".to_vec())).unwrap();
         let s = parse(&mut Cursor::new(&out)).unwrap();
-        assert_eq!(s.entities_labelled(SegmentKind::Jumbf, UPDATE).count(), 0);
-        assert_eq!(s.entities_labelled(SegmentKind::Jumbf, ORIGINAL).count(), 0);
-        assert_eq!(s.entities_labelled(SegmentKind::Jumbf, MANIFEST).count(), 1);
+        assert_eq!(s.items_labelled(SegmentKind::Jumbf, UPDATE).count(), 0);
+        assert_eq!(s.items_labelled(SegmentKind::Jumbf, ORIGINAL).count(), 0);
+        assert_eq!(s.items_labelled(SegmentKind::Jumbf, MANIFEST).count(), 1);
         // "NEW" is two bytes longer than "A" in a box of the same shape.
         assert_eq!(stco_entry(&out), e0 + 2);
         assert!(media_at(&out, stco_entry(&out)));
@@ -1945,7 +1942,7 @@ mod tests {
         let removed =
             rewrite(&f, &Updates::new().set_jumbf(b"B".to_vec()).remove_merkle()).unwrap();
         let s = parse(&mut Cursor::new(&removed)).unwrap();
-        assert_eq!(s.entities_labelled(SegmentKind::Other, MERKLE).count(), 0);
+        assert_eq!(s.items_labelled(SegmentKind::Other, MERKLE).count(), 0);
 
         // An update manifest leaves the merkle boxes alone, and cannot change them.
         let extended = jstore(&[m1, m2]);
@@ -1960,8 +1957,8 @@ mod tests {
     }
 
     fn merkle_payloads(s: &Structure, data: &[u8]) -> Vec<Vec<u8>> {
-        s.entities_labelled(SegmentKind::Other, MERKLE)
-            .map(|e| s.read_entity(&mut Cursor::new(data), e).unwrap())
+        s.items_labelled(SegmentKind::Other, MERKLE)
+            .map(|e| s.read_item(&mut Cursor::new(data), e).unwrap())
             .collect()
     }
 
@@ -1974,10 +1971,7 @@ mod tests {
         // Three boxes directly after mdat, before the trailing box; nothing before
         // them moved.
         let (mdat_at, mdat_len, _) = find(&out, "/mdat");
-        let first = s
-            .entities_labelled(SegmentKind::Other, MERKLE)
-            .next()
-            .unwrap();
+        let first = s.items_labelled(SegmentKind::Other, MERKLE).next().unwrap();
         let seg = s.segment(first.parts().next().unwrap().segment()).unwrap();
         assert_eq!(seg.extent().offset(), mdat_at + mdat_len);
         assert_eq!(merkle_payloads(&s, &out).len(), 3);
@@ -1986,7 +1980,7 @@ mod tests {
 
         // Fill each box in place, as after hashing the media.
         let mut cur = Cursor::new(out.clone());
-        for (i, e) in s.entities_labelled(SegmentKind::Other, MERKLE).enumerate() {
+        for (i, e) in s.items_labelled(SegmentKind::Other, MERKLE).enumerate() {
             s.patch_exact(&mut cur, e, &[i as u8 + 1; 12]).unwrap();
         }
         let filled = cur.into_inner();
@@ -2057,7 +2051,7 @@ mod tests {
         assert_eq!(sink.sum, b"MEDIA".iter().map(|&b| b as u64).sum::<u64>());
 
         let e = dest
-            .entities_labelled(SegmentKind::Other, MERKLE)
+            .items_labelled(SegmentKind::Other, MERKLE)
             .next()
             .unwrap();
         dest.patch_exact(&mut out, e, &sink.sum.to_be_bytes())
@@ -2173,8 +2167,8 @@ mod tests {
         let (f, e0) = media_file(&[], &[], None);
         let out = rewrite(&f, &Updates::new().set_xmp(b"<x/>".to_vec())).unwrap();
         let s = parse(&mut Cursor::new(&out)).unwrap();
-        let e = s.require_entity(SegmentKind::Xmp).unwrap();
-        assert_eq!(s.read_entity(&mut Cursor::new(&out), e).unwrap(), b"<x/>");
+        let e = s.require_item(SegmentKind::Xmp).unwrap();
+        assert_eq!(s.read_item(&mut Cursor::new(&out), e).unwrap(), b"<x/>");
         assert_eq!(stco_entry(&out), e0 + 8 + 16 + 4);
         assert!(media_at(&out, stco_entry(&out)));
         assert_eq!(rewrite(&out, &Updates::new().remove_xmp()).unwrap(), f);
@@ -2241,9 +2235,9 @@ mod tests {
     fn payload_of(bytes: &[u8], label: &str) -> Option<Vec<u8>> {
         let s = parse(&mut Cursor::new(bytes)).unwrap();
         let found = s
-            .entities_labelled(SegmentKind::Jumbf, label)
+            .items_labelled(SegmentKind::Jumbf, label)
             .next()
-            .map(|e| s.read_entity(&mut Cursor::new(bytes), e).unwrap());
+            .map(|e| s.read_item(&mut Cursor::new(bytes), e).unwrap());
         found
     }
 
@@ -2365,7 +2359,7 @@ mod tests {
         let (f, e0) = media_file(&[c2pa_box(MANIFEST, &placeholder)], &[], None);
         let s = parse(&mut Cursor::new(&f)).unwrap();
         let e = s
-            .entities_labelled(SegmentKind::Jumbf, MANIFEST)
+            .items_labelled(SegmentKind::Jumbf, MANIFEST)
             .next()
             .unwrap();
         let range = e.parts().next().unwrap().range();
@@ -2426,18 +2420,18 @@ mod tests {
     }
 
     fn item(s: &Structure, bytes: &[u8], kind: SegmentKind) -> Option<(Option<String>, Vec<u8>)> {
-        let e = s.entities(kind).next()?;
+        let e = s.items(kind).next()?;
         Some((
             e.label().map(str::to_owned),
-            s.read_entity(&mut Cursor::new(bytes), e).unwrap(),
+            s.read_item(&mut Cursor::new(bytes), e).unwrap(),
         ))
     }
 
     #[test]
-    fn heif_exif_and_thumbnail_items_are_entities() {
+    fn heif_exif_and_thumbnail_items_are_items() {
         let f = heif(EXIF_ITEM, THUMB);
         let s = parse(&mut Cursor::new(&f)).unwrap();
-        // The EXIF entity starts at the TIFF header, after the offset field and
+        // The EXIF item starts at the TIFF header, after the offset field and
         // the bytes it skips.
         assert_eq!(item(&s, &f, SegmentKind::Exif), Some((None, TIFF.to_vec())));
         assert_eq!(
@@ -2470,7 +2464,7 @@ mod tests {
             };
             let t = s.embedded_thumbnail(&mut Cursor::new(&f)).unwrap().unwrap();
             assert_eq!(t.data, THUMB);
-            let e = s.entities(SegmentKind::Thumbnail).next().unwrap();
+            let e = s.items(SegmentKind::Thumbnail).next().unwrap();
             assert_eq!(e.media_type(), t.media_type());
             t.media_type().map(str::to_owned)
         };
@@ -2528,8 +2522,8 @@ mod tests {
         // A TIFF offset that runs past the item.
         let bad_offset = heif(b"\xFF\xFF\xFF\xFFExif\0\0II*\0", THUMB);
         let s = parse(&mut Cursor::new(&bad_offset)).unwrap();
-        assert!(s.entities(SegmentKind::Exif).next().is_none());
-        assert!(s.entities(SegmentKind::Thumbnail).next().is_some());
+        assert!(s.items(SegmentKind::Exif).next().is_none());
+        assert!(s.items(SegmentKind::Thumbnail).next().is_some());
 
         // A meta box that is not HEIF items at all.
         let junk = file(&[
@@ -2538,7 +2532,7 @@ mod tests {
             boxed(b"mdat", b"x"),
         ]);
         let s = parse(&mut Cursor::new(&junk)).unwrap();
-        assert!(s.entities(SegmentKind::Exif).next().is_none());
+        assert!(s.items(SegmentKind::Exif).next().is_none());
         assert!(s
             .embedded_thumbnail(&mut Cursor::new(&junk))
             .unwrap()
