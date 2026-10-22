@@ -251,11 +251,11 @@ fn scan(data: &[u8]) -> Result<Scan> {
     let mut open: Option<(u64, u64)> = None;
     let mut xmps = Vec::new();
     // Where an xpacket began and how deep, and how shallow the document has been
-    // since. Until it ends we do not know whether it is an item, so the first
-    // `<metadata>` inside it waits in `pending_metadata`.
+    // since. Until it ends we do not know whether it is an item. Whether or not it is
+    // one, nothing can be written inside it: a new packet there would end it
+    // somewhere else, so a `<metadata>` inside one is not a place to write.
     let mut begin: Option<(u64, usize)> = None;
     let mut low = usize::MAX;
-    let mut pending_metadata = None;
 
     loop {
         let before = reader.buffer_position();
@@ -278,12 +278,9 @@ fn scan(data: &[u8]) -> Result<Scan> {
                     }
                     root_end = Some(after);
                 }
-                if depth == 1 && kind == Kind::Metadata {
-                    if begin.is_some() {
-                        pending_metadata.get_or_insert(after);
-                    } else if metadata_end.is_none() {
-                        metadata_end = Some(after);
-                    }
+                if depth == 1 && kind == Kind::Metadata && begin.is_none() && metadata_end.is_none()
+                {
+                    metadata_end = Some(after);
                 }
                 if kind == Kind::Manifest {
                     open = Some((before, after));
@@ -336,7 +333,6 @@ fn scan(data: &[u8]) -> Result<Scan> {
                         if begin.is_none() && open.is_none() && root_end.is_some() {
                             begin = Some((before, depth));
                             low = depth;
-                            pending_metadata = None;
                         }
                     } else if let Some((b, at)) = begin.take() {
                         // Only a packet that opens and closes at one depth and never
@@ -346,10 +342,7 @@ fn scan(data: &[u8]) -> Result<Scan> {
                             xmps.push((b, after));
                             // What is inside an item is part of it, not an item.
                             manifests.retain(|m| m.start < b);
-                        } else if metadata_end.is_none() {
-                            metadata_end = pending_metadata;
                         }
-                        pending_metadata = None;
                     }
                 }
             }
@@ -361,10 +354,6 @@ fn scan(data: &[u8]) -> Result<Scan> {
         return Err(Error::InvalidFormat(
             "SVG: a c2pa:manifest element is not closed".into(),
         ));
-    }
-    // An xpacket that never ended is not an item.
-    if metadata_end.is_none() {
-        metadata_end = pending_metadata;
     }
     Ok(Scan {
         root_end: root_end.ok_or_else(|| Error::InvalidFormat("SVG: no root element".into()))?,
@@ -1106,6 +1095,28 @@ mod tests {
         );
         assert!(parsed(&svg).entities(SegmentKind::Xmp).next().is_none());
         c.check("packet across elements", svg.as_bytes());
+
+        // Found by fuzzing: a packet that never ends swallows what follows it, so a
+        // `<metadata>` after its start is no place to put a new one.
+        let svg = format!(
+            r#"<svg xmlns="{NS}"><g><?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?></g><metadata></metadata></svg>"#
+        );
+        assert!(parsed(&svg).entities(SegmentKind::Xmp).next().is_none());
+        c.check("packet that never ends", svg.as_bytes());
+
+        // Nor is one inside a packet that ends but is not an item.
+        let svg = format!(
+            r#"<svg xmlns="{NS}"><?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?><metadata></metadata></svg><g><?xpacket end="w"?></g>"#
+        );
+        c.check_if_parses("packet that ends elsewhere", svg.as_bytes());
+        let svg = format!(
+            r#"<svg xmlns="{NS}"><g><?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?></g><metadata></metadata><g><?xpacket end="w"?></g></svg>"#
+        );
+        assert!(parsed(&svg).entities(SegmentKind::Xmp).next().is_none());
+        c.check(
+            "packet across elements, with metadata inside",
+            svg.as_bytes(),
+        );
     }
 
     #[test]
