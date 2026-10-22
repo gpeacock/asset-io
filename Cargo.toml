@@ -17,6 +17,7 @@ md5 = { version = "0.7", optional = true }
 memchr = { version = "2", optional = true }
 quick-xml = { version = "0.38", optional = true, default-features = false }
 memmap2 = { version = "0.9", optional = true }
+flate2 = { version = "1", optional = true, default-features = false, features = ["rust_backend"] }
 
 [dev-dependencies]
 sha2 = "0.11"
@@ -31,10 +32,11 @@ png = []
 bmff = []
 riff = []
 svg = ["quick-xml"]
+pdf = ["dep:flate2"]
 exif = []
 xmp = ["quick-xml", "md5"]
 memory-mapped = ["memmap2"]
-all-formats = ["jpeg", "png", "bmff", "riff", "svg"]
+all-formats = ["jpeg", "png", "bmff", "riff", "svg", "pdf"]
 
 [[example]]
 name = "inspect"

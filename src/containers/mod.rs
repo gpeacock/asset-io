@@ -13,7 +13,7 @@
 
 //! Built-in container handlers, one module per format, each behind its feature.
 //!
-//! Each handler module ([`jpeg`], [`png`], [`bmff`], [`riff`], [`svg`]) exposes `handler()`
+//! Each handler module ([`jpeg`], [`png`], [`bmff`], [`riff`], [`svg`], [`pdf`]) exposes `handler()`
 //! for registration plus direct `parse` and `write` functions. Most callers go
 //! through [`HandlerRegistry`](crate::HandlerRegistry) instead.
 //!
@@ -32,6 +32,8 @@ mod heif_items;
 #[cfg(feature = "jpeg")]
 pub mod jpeg;
 pub mod jumbf;
+#[cfg(feature = "pdf")]
+pub mod pdf;
 #[cfg(feature = "png")]
 pub mod png;
 #[cfg(feature = "riff")]

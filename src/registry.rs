@@ -80,6 +80,8 @@ impl HandlerRegistry {
                 r.add_arc(crate::containers::riff::handler());
                 #[cfg(feature = "svg")]
                 r.add_arc(crate::containers::svg::handler());
+                #[cfg(feature = "pdf")]
+                r.add_arc(crate::containers::pdf::handler());
                 Arc::new(r)
             })
             .clone()
