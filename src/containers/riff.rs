@@ -26,9 +26,9 @@
 //! the header, the data is the payload and the pad byte, if any, is the trailer.
 //! `LIST` chunks are not entered: nothing C2PA needs lives inside them.
 //!
-//! The `C2PA` chunk is a [`SegmentKind::Jumbf`] entity and the `XMP ` chunk a
-//! [`SegmentKind::Xmp`] entity, both only when they are children of the first
-//! `RIFF` chunk. In WebP the `EXIF` chunk is a [`SegmentKind::Exif`] entity. WAV and
+//! The `C2PA` chunk is a [`SegmentKind::Jumbf`] item and the `XMP ` chunk a
+//! [`SegmentKind::Xmp`] item, both only when they are children of the first
+//! `RIFF` chunk. In WebP the `EXIF` chunk is a [`SegmentKind::Exif`] item. WAV and
 //! AVI keep their metadata in `LIST INFO` and similar, which is not EXIF.
 //!
 //! # Writing
@@ -460,7 +460,7 @@ async fn plan<'a>(src: &Structure, io: &mut Io, updates: &'a Updates) -> Result<
     )?;
     for (i, op) in ops.iter().enumerate() {
         let id = emit(&mut b, op, unpadded == Some(i))?;
-        b.entity_for(id)?;
+        b.item_for(id)?;
     }
     // Size of the first RIFF chunk: everything after its own 8-byte header.
     let size = u32::try_from(b.len() - 8).map_err(|_| Error::LimitExceeded {
@@ -471,7 +471,7 @@ async fn plan<'a>(src: &Structure, io: &mut Io, updates: &'a Updates) -> Result<
     // Whatever follows the first RIFF chunk (AVIX, ...) is copied.
     for i in kids_end..segs.len() {
         let id = b.copy_segment(SegmentId::from_index(i)?)?;
-        b.entity_for(id)?;
+        b.item_for(id)?;
     }
     let mut plan = b.finish()?;
     plan.replace(riff, Role::Header, riff_header(size, form))?;
@@ -581,9 +581,9 @@ mod tests {
     fn payload(bytes: &[u8], kind: SegmentKind) -> Option<Vec<u8>> {
         let s = parse(&mut Cursor::new(bytes)).unwrap();
         let found = s
-            .entities(kind)
+            .items(kind)
             .next()
-            .map(|e| s.read_entity(&mut Cursor::new(bytes), e).unwrap());
+            .map(|e| s.read_item(&mut Cursor::new(bytes), e).unwrap());
         found
     }
 
@@ -618,7 +618,7 @@ mod tests {
     }
 
     #[test]
-    fn tiles_and_finds_entities() {
+    fn tiles_and_finds_items() {
         let f = wav(&[chunk(b"XMP ", b"<x/>"), chunk(b"C2PA", b"STORE")]);
         let s = parse(&mut Cursor::new(&f)).unwrap();
         let covered: u64 = s.regions().map(|r| r.range.len()).sum();
@@ -635,7 +635,7 @@ mod tests {
     }
 
     #[test]
-    fn exif_is_an_entity_in_webp_only() {
+    fn exif_is_an_item_in_webp_only() {
         let exif = chunk(b"EXIF", b"II*\0\x08\0\0\0");
         let webp = riff(
             b"WEBP",
@@ -647,7 +647,7 @@ mod tests {
             b"II*\0\x08\0\0\0"
         );
         assert_eq!(rewrite(&webp, &Updates::new()).unwrap(), webp);
-        assert_eq!(s.entities(SegmentKind::Exif).count(), 1);
+        assert_eq!(s.items(SegmentKind::Exif).count(), 1);
 
         let wav = wav(&[exif]);
         assert!(payload(&wav, SegmentKind::Exif).is_none());
@@ -802,7 +802,7 @@ mod tests {
     }
 
     #[test]
-    fn avix_chunks_hold_no_entities_and_keep_their_size() {
+    fn avix_chunks_hold_no_items_and_keep_their_size() {
         let avix = riff(
             b"AVIX",
             &[chunk(b"C2PA", b"NOT MINE"), chunk(b"junk", b"zz")],
@@ -811,7 +811,7 @@ mod tests {
         let first_len = f.len();
         f.extend_from_slice(&avix);
         let s = parse(&mut Cursor::new(&f)).unwrap();
-        assert!(s.entities(SegmentKind::Jumbf).next().is_none());
+        assert!(s.items(SegmentKind::Jumbf).next().is_none());
 
         let mut out = Cursor::new(Vec::new());
         s.handler()
@@ -827,7 +827,7 @@ mod tests {
         let grown = 8 + 6; // C2PA header, "STORE" and its pad
         assert_eq!(le32(&out[4..8]) as usize, first_len - 8 + grown);
         assert_eq!(&out[first_len + grown..], &avix[..]);
-        // The new store is the entity, not the C2PA chunk inside AVIX.
+        // The new store is the item, not the C2PA chunk inside AVIX.
         assert_eq!(payload(&out, SegmentKind::Jumbf).unwrap(), b"STORE");
     }
 
@@ -890,7 +890,7 @@ mod tests {
     fn a_placeholder_is_filled_in_place() {
         let f = wav(&[chunk(b"C2PA", &[0u8; 20])]);
         let s = parse(&mut Cursor::new(&f)).unwrap();
-        let e = s.require_entity(SegmentKind::Jumbf).unwrap();
+        let e = s.require_item(SegmentKind::Jumbf).unwrap();
         let mut cur = Cursor::new(f.clone());
         s.patch_exact(&mut cur, e, &[9u8; 20]).unwrap();
         let out = cur.into_inner();

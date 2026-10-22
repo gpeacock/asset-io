@@ -26,12 +26,12 @@ const FILES: &[&str] = &[
 fn items(s: &Structure, bytes: &[u8]) -> Vec<(SegmentKind, Option<String>, Vec<u8>)> {
     [SegmentKind::Exif, SegmentKind::Thumbnail]
         .into_iter()
-        .flat_map(|k| s.entities(k))
+        .flat_map(|k| s.items(k))
         .map(|e| {
             (
                 e.kind(),
                 e.label().map(str::to_owned),
-                s.read_entity(&mut Cursor::new(bytes), e).unwrap(),
+                s.read_item(&mut Cursor::new(bytes), e).unwrap(),
             )
         })
         .collect()

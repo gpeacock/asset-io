@@ -34,7 +34,7 @@ fn main() -> asset_io::Result<()> {
     println!("  Segments: {}", structure.segments().len());
 
     for kind in [SegmentKind::Xmp, SegmentKind::Jumbf] {
-        for e in structure.entities(kind) {
+        for e in structure.items(kind) {
             let label = e.label().map(|l| format!(" [{l}]")).unwrap_or_default();
             println!(
                 "\n{kind}{label}: {} bytes, {} part(s)",
@@ -42,7 +42,7 @@ fn main() -> asset_io::Result<()> {
                 e.part_count()
             );
             if kind == SegmentKind::Xmp {
-                let data = structure.read_entity(&mut src, e)?;
+                let data = structure.read_item(&mut src, e)?;
                 let head = &data[..data.len().min(100)];
                 println!("  Preview: {}...", String::from_utf8_lossy(head));
             }

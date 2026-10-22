@@ -2,7 +2,7 @@
 
 Streaming, container-agnostic access to the structure and metadata of media files.
 
-A parsed file is a `Structure`: a gapless tiling of `Segment`s (header, payload, trailer) plus `Entity`s that group the parts of logical items such as XMP and JUMBF. It holds geometry only. It does not hash, sign or interpret C2PA; callers decide what each byte range means.
+A parsed file is a `Structure`: a gapless tiling of `Segment`s (header, payload, trailer) plus `Item`s, the logical pieces of metadata such as XMP and JUMBF, each made of parts of one or more segments. It holds geometry only. It does not hash, sign or interpret C2PA; callers decide what each byte range means.
 
 ## Upgrading from 0.1
 
@@ -30,8 +30,8 @@ let registry = HandlerRegistry::builtin();
 let mut src = std::fs::File::open("image.jpg")?;
 let structure = registry.parse_detect(&mut src)?;
 
-if let Some(jumbf) = structure.entity(SegmentKind::Jumbf)? {
-    let bytes = structure.read_entity(&mut src, jumbf)?;
+if let Some(jumbf) = structure.item(SegmentKind::Jumbf)? {
+    let bytes = structure.read_item(&mut src, jumbf)?;
 }
 
 let mut out = std::fs::File::create("out.jpg")?; // BMFF also needs Read
@@ -49,9 +49,9 @@ structure.write(&mut src, &mut out, &updates, &mut NullSink)?;
 
 `Structure::patch_exact` fills a placeholder in place; the replacement must be the same length.
 
-`set_jumbf` replaces the JUMBF of the same type (the type in its description box) and leaves JUMBF of other types alone; `remove_jumbf_of(type)` removes one type, and `remove_jumbf()` removes all. This applies to JPEG, which carries JUMBF of any type. `Entity::jumbf_type()` gives each entity's type. PNG, RIFF and ISO BMFF reserve an element for the manifest store, and the type does not select anything there.
+`set_jumbf` replaces the JUMBF of the same type (the type in its description box) and leaves JUMBF of other types alone; `remove_jumbf_of(type)` removes one type, and `remove_jumbf()` removes all. This applies to JPEG, which carries JUMBF of any type. `Item::jumbf_type()` gives each item's type. PNG, RIFF and ISO BMFF reserve an element for the manifest store, and the type does not select anything there.
 
-`Structure::plan(src, &updates)` returns the structure `write` would produce, without writing: where each entity would land and the output size.
+`Structure::plan(src, &updates)` returns the structure `write` would produce, without writing: where each item would land and the output size.
 
 `Structure::store(src)` reads the JUMBF store as a reader sees it. For ISO BMFF that combines an original store and its update; `jumbf::{addition_to, extend}` convert between the two forms.
 
@@ -72,7 +72,7 @@ Edits to a multi-picture JPEG add metadata to the first image and shift the size
 A handler implements `ContainerHandler`:
 
 - `parse_async(self: Arc<Self>, io: Io)` builds a `Structure` with `StructureBuilder`, reading the stream through `io` (`io.read_at(offset, &mut buf).await?`, `io.reader(at)` for a run of fields, `io.fetch(..)` for a borrowed slice). Everything but the reads is ordinary code. Return `Box::pin(async move { ... })`.
-- `write_plan_async(&self, structure, io, updates)` describes a write as a `WritePlan`: the structure of the output plus ordered `Step`s that copy source bytes or supply new ones. It reads the source only for what it must know (`io`), and does no writing. A handler that cannot write leaves the default. Decide what the output holds from `Updates` (`xmp()`, `jumbf()`, ...; a `MetadataSlot` says whether each existing XMP or JUMBF item is kept, replaced or dropped, and what is left to insert), then describe it in order with a `PlanBuilder`: `copy_segment(id)` for a source segment kept, `put_segment(kind, name, header, payload, trailer)` for a new one, `entity_for(id)` for the metadata it holds, `carry_entities(..)` for the entities of the kept segments, and `finish()`. The builder works out sizes, offsets and the output structure. When a segment is part copied and part changed, `shape_like`/`shape` add it and `copy`, `put` and `relocate` supply its bytes.
+- `write_plan_async(&self, structure, io, updates)` describes a write as a `WritePlan`: the structure of the output plus ordered `Step`s that copy source bytes or supply new ones. It reads the source only for what it must know (`io`), and does no writing. A handler that cannot write leaves the default. Decide what the output holds from `Updates` (`xmp()`, `jumbf()`, ...; a `MetadataSlot` says whether each existing XMP or JUMBF item is kept, replaced or dropped, and what is left to insert), then describe it in order with a `PlanBuilder`: `copy_segment(id)` for a source segment kept, `put_segment(kind, name, header, payload, trailer)` for a new one, `item_for(id)` for the metadata it holds, `carry_items(..)` for the items of the kept segments, and `finish()`. The builder works out sizes, offsets and the output structure. When a segment is part copied and part changed, `shape_like`/`shape` add it and `copy`, `put` and `relocate` supply its bytes.
 
 The blocking `parse`, `write_plan` and `write` are provided: they run those methods against a `Read + Seek`. The default `write` runs the plan with `WritePlan::execute`, which coalesces reads, feeds the sink and checks the bytes against the structure and role. `plan::validate` checks a plan without any I/O, for a handler's tests. A container with absolute file offsets (ISO BMFF chunk tables) uses `Step::Relocate`, which copies a table of offsets and rewrites them from an `OffsetMap`. Read what to change from `Updates` (`xmp()`, `jumbf()`, ...). Options only one container has live outside `Updates`: attach them with `Updates::set_extension` and read them with `Updates::extension` (ISO BMFF's merkle boxes are `containers::bmff::BmffUpdates`). `tests/external_handler.rs` is a complete handler written with only the public API. Test it with `testing::Conformance::new(handler).check(name, &sample_bytes)`: it checks the promises every handler makes (the structure tiles the stream, a no-op write is byte-identical, plan, write and stepper agree, the sink sees every byte once and in order, set and remove read back, damaged input never panics), so a handler's own tests cover only what is particular to its format.
 
@@ -88,13 +88,13 @@ A `WritePlan` runs the same way: `WritePlan::start` gives an `Execution` whose `
 
 ## Zero-copy
 
-With the bytes in memory, `Structure::slice`, `slice_entity` and `read_slice` borrow instead of copying. The `memory-mapped` feature adds `MappedFile` for that. Mapping is `unsafe`: the file must not change while mapped, so don't map files untrusted parties can write.
+With the bytes in memory, `Structure::slice`, `slice_item` and `read_slice` borrow instead of copying. The `memory-mapped` feature adds `MappedFile` for that. Mapping is `unsafe`: the file must not change while mapped, so don't map files untrusted parties can write.
 
 ## Other modules
 
 - `MiniXmp` (feature `xmp`): minimal XMP read/modify.
-- `Structure::exif_info` (feature `exif`): basic EXIF fields, for containers that report EXIF entities: JPEG, PNG, WebP, and HEIF/AVIF (the `Exif` item).
-- `Structure::embedded_thumbnail`: a thumbnail the container stores as its own element (a HEIF `thmb` item, entity kind `Thumbnail`; its data is the coded item unless the item is a `jpeg` or a `mime` item), or with the `exif` feature the JPEG thumbnail inside EXIF data. `Thumbnail::media_type()` says what the data is, or `None` when the container cannot tell (a coded `hvc1`/`av01` item); `Entity::media_type()` and `SubAsset::media_type()` report media types the same way.
+- `Structure::exif_info` (feature `exif`): basic EXIF fields, for containers that report EXIF items: JPEG, PNG, WebP, and HEIF/AVIF (the `Exif` item).
+- `Structure::embedded_thumbnail`: a thumbnail the container stores as its own element (a HEIF `thmb` item, item kind `Thumbnail`; its data is the coded HEIF item unless that item is a `jpeg` or a `mime` item), or with the `exif` feature the JPEG thumbnail inside EXIF data. `Thumbnail::media_type()` says what the data is, or `None` when the container cannot tell (a coded `hvc1`/`av01` item); `Item::media_type()` and `SubAsset::media_type()` report media types the same way.
 
 Run `cargo run --example inspect --features all-formats,xmp,exif -- <file>` to print a file's structure.
 

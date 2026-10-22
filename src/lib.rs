@@ -15,9 +15,10 @@
 //! files (JPEG, PNG, ISO BMFF, ...).
 //!
 //! A [`Structure`] describes a file as an ordered tiling of [`Segment`]s, each
-//! split into header, payload and trailer, plus [`Entity`]s that group the parts
-//! of logical items such as XMP or JUMBF. It carries geometry only: no data, and
-//! no hashing or signing rules. Callers decide what each byte range means.
+//! split into header, payload and trailer, plus [`Item`]s, the logical pieces of
+//! metadata such as XMP or JUMBF, each made of parts of one or more segments. It
+//! carries geometry only: no data, and no hashing or signing rules. Callers decide
+//! what each byte range means.
 //!
 //! # Design principles
 //!
@@ -41,8 +42,8 @@
 //! let structure = registry.parse("jpg", &mut src)?;
 //!
 //! // Read a metadata item, which may span several segments.
-//! if let Some(jumbf) = structure.entity(SegmentKind::Jumbf)? {
-//!     let bytes = structure.read_entity(&mut src, jumbf)?;
+//! if let Some(jumbf) = structure.item(SegmentKind::Jumbf)? {
+//!     let bytes = structure.read_item(&mut src, jumbf)?;
 //!     println!("JUMBF: {} bytes", bytes.len());
 //! }
 //!
@@ -98,7 +99,7 @@ pub use registry::HandlerRegistry;
 pub use segment::{labels, Name, Role, Segment, SegmentKind, AFTER_BOX, MAX_SEGMENT_SIZE};
 pub use sink::{Chunk, NullSink, Sink};
 pub use structure::{
-    Entity, Part, Region, SegmentId, Structure, StructureBuilder, SubAsset, MAX_SEGMENTS,
+    Item, Part, Region, SegmentId, Structure, StructureBuilder, SubAsset, MAX_SEGMENTS,
 };
 pub use task::{block_on, BoxFuture, Io, Progress, ReadRequest, Reader, Task, DEFAULT_WINDOW};
 pub use thumbnail::Thumbnail;

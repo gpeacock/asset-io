@@ -16,10 +16,10 @@
 use crate::error::{Error, Result};
 use crate::range::ByteRange;
 
-/// Entity labels that mean the same in every container.
+/// Item labels that mean the same in every container.
 ///
 /// A container that stores a JUMBF store in more than one place labels the
-/// entities so a caller can tell them apart (see [`Entity::label`](crate::Entity::label)).
+/// items so a caller can tell them apart (see [`Item::label`](crate::Item::label)).
 /// ISO BMFF does: a file has a `MANIFEST`, or an `ORIGINAL` store plus an `UPDATE`
 /// that extends it. Merkle proof boxes are labelled `MERKLE`.
 pub mod labels {

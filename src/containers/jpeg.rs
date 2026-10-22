@@ -23,7 +23,7 @@
 //! [`Structure::elements`](crate::Structure::elements) and `subdivide`.
 //!
 //! JUMBF is carried in JPEG XT APP11 segments. A manifest larger than one
-//! segment spans several; they form a single [`Entity`](crate::Entity) whose
+//! segment spans several; they form a single [`Item`](crate::Item) whose
 //! parts are the per-segment payloads, so the repeated XT headers are never part
 //! of the data and are always visible as headers.
 //!
@@ -242,10 +242,10 @@ async fn parse_with(handler: Arc<dyn ContainerHandler>, mut io: Io) -> Result<St
     // images and trailing data alike, is data beyond the end of it.
     b.end_boxes()?;
     if let Some(ids) = meta.xmp_open.take() {
-        b.entity_of_segments(SegmentKind::Xmp, &ids)?;
+        b.item_of_segments(SegmentKind::Xmp, &ids)?;
     }
     if let Some(o) = meta.jumbf_open.take() {
-        b.entity_of_segments_typed(SegmentKind::Jumbf, o.ty, &o.ids)?;
+        b.item_of_segments_typed(SegmentKind::Jumbf, o.ty, &o.ids)?;
     }
 
     // Another image directly after this one makes a multi-picture file. Later
@@ -484,10 +484,10 @@ async fn scan_image(
 
         match class {
             Class::Plain => {}
-            Class::Exif => b.entity_of_segments(SegmentKind::Exif, &[id])?,
+            Class::Exif => b.item_of_segments(SegmentKind::Exif, &[id])?,
             Class::XmpMain => {
                 if let Some(ids) = xmp_open.take() {
-                    b.entity_of_segments(SegmentKind::Xmp, &ids)?;
+                    b.item_of_segments(SegmentKind::Xmp, &ids)?;
                 }
                 *xmp_open = Some(vec![id]);
             }
@@ -499,7 +499,7 @@ async fn scan_image(
             Class::Jumbf { en, z } => {
                 if z <= 1 {
                     if let Some(o) = jumbf_open.take() {
-                        b.entity_of_segments_typed(SegmentKind::Jumbf, o.ty, &o.ids)?;
+                        b.item_of_segments_typed(SegmentKind::Jumbf, o.ty, &o.ids)?;
                     }
                     *jumbf_open = Some(Open {
                         en,
@@ -513,7 +513,7 @@ async fn scan_image(
             }
             Class::JumbfRaw => {
                 if let Some(o) = jumbf_open.take() {
-                    b.entity_of_segments_typed(SegmentKind::Jumbf, o.ty, &o.ids)?;
+                    b.item_of_segments_typed(SegmentKind::Jumbf, o.ty, &o.ids)?;
                 }
                 *jumbf_open = Some(Open {
                     en: 0,
@@ -975,7 +975,7 @@ fn new_kind(op: &Op<'_>) -> Result<(SegmentKind, u8)> {
     }
 }
 
-/// Entities of the destination: kind, JUMBF type, and the ops they are made of.
+/// Items of the destination: kind, JUMBF type, and the ops they are made of.
 type Groups = Vec<(SegmentKind, Option<[u8; 16]>, Vec<usize>)>;
 
 fn push_new_xmp<'a>(ops: &mut Vec<Op<'a>>, groups: &mut Groups, xmp: &'a [u8]) -> Result<()> {
@@ -1084,12 +1084,12 @@ async fn plan<'a>(src: &Structure, io: &mut Io, updates: &'a Updates) -> Result<
             }
         });
     }
-    // New entities first, then those of kept segments, as they were.
+    // New items first, then those of kept segments, as they were.
     for (kind, ty, idx) in &groups {
         let group: Vec<SegmentId> = idx.iter().map(|&i| ids[i]).collect();
-        b.entity_typed(*kind, *ty, &group)?;
+        b.item_typed(*kind, *ty, &group)?;
     }
-    b.carry_entities(|_| true);
+    b.carry_items(|_| true);
     let dest_of = (src.subassets().len() > 1).then(|| b.dest_map().to_vec());
     let mut plan = b.finish()?;
     if let Some(dest_of) = dest_of {
@@ -1100,7 +1100,7 @@ async fn plan<'a>(src: &Structure, io: &mut Io, updates: &'a Updates) -> Result<
     Ok(plan)
 }
 
-/// Decide what the output contains: the ops, and the entities made of new ones.
+/// Decide what the output contains: the ops, and the items made of new ones.
 fn plan_ops<'a>(src: &Structure, updates: &'a Updates) -> Result<(Vec<Op<'a>>, Groups)> {
     let n = src.segments().len();
     let primary_end = src.subassets()[0].segments().end;
@@ -1112,9 +1112,9 @@ fn plan_ops<'a>(src: &Structure, updates: &'a Updates) -> Result<(Vec<Op<'a>>, G
 
     // The segments of the JUMBF the update applies to.
     let mut targeted = vec![false; n];
-    for (kind, entity) in src.entity_list() {
-        if kind == SegmentKind::Jumbf && updates.jumbf_targets(entity.jumbf_type()) {
-            for p in entity.parts() {
+    for (kind, item) in src.item_list() {
+        if kind == SegmentKind::Jumbf && updates.jumbf_targets(item.jumbf_type()) {
+            for p in item.parts() {
                 targeted[p.segment().index()] = true;
             }
         }
@@ -1244,8 +1244,8 @@ fn compose(kind: SegmentKind, data: &[u8]) -> Result<Vec<u8>> {
 /// The JUMBF bytes (XT framing removed, parts concatenated), or `None`.
 /// Several distinct JUMBF boxes is an error.
 pub fn read_jumbf<R: Read + Seek>(s: &Structure, src: &mut R) -> Result<Option<Vec<u8>>> {
-    match s.entity(SegmentKind::Jumbf)? {
-        Some(e) => s.read_entity(src, e).map(Some),
+    match s.item(SegmentKind::Jumbf)? {
+        Some(e) => s.read_item(src, e).map(Some),
         None => Ok(None),
     }
 }
@@ -1253,11 +1253,11 @@ pub fn read_jumbf<R: Read + Seek>(s: &Structure, src: &mut R) -> Result<Option<V
 /// The XMP packet, or `None`. With extended XMP, the reassembled extended
 /// packet is returned (the standard packet only carries a pointer to it).
 pub fn read_xmp<R: Read + Seek>(s: &Structure, src: &mut R) -> Result<Option<Vec<u8>>> {
-    let Some(e) = s.entity(SegmentKind::Xmp)? else {
+    let Some(e) = s.item(SegmentKind::Xmp)? else {
         return Ok(None);
     };
     if e.part_count() == 1 {
-        return s.read_entity(src, e).map(Some);
+        return s.read_item(src, e).map(Some);
     }
 
     let parts: Vec<&Part> = e.parts().collect();
@@ -1454,9 +1454,9 @@ mod tests {
         let j = vec![0xFF, SOI, 0xFF, EOI];
         let updates = Updates::new().set_jumbf(fake_jumbf(100));
         let (out, dest) = do_write(&j, &updates);
-        let e = dest.require_entity(SegmentKind::Jumbf).unwrap();
+        let e = dest.require_item(SegmentKind::Jumbf).unwrap();
         assert_eq!(
-            dest.read_entity(&mut Cursor::new(out), e).unwrap(),
+            dest.read_item(&mut Cursor::new(out), e).unwrap(),
             fake_jumbf(100)
         );
     }
@@ -1467,7 +1467,7 @@ mod tests {
         let data = fake_jumbf(1000);
         let (out, dest) = do_write(&j, &Updates::new().set_jumbf(data.clone()));
         let re = parse(&mut Cursor::new(out.clone())).unwrap();
-        let e = re.require_entity(SegmentKind::Jumbf).unwrap();
+        let e = re.require_item(SegmentKind::Jumbf).unwrap();
         assert_eq!(e.part_count(), 1);
         assert_eq!(
             read_jumbf(&re, &mut Cursor::new(out)).unwrap().unwrap(),
@@ -1477,16 +1477,16 @@ mod tests {
     }
 
     #[test]
-    fn multi_part_jumbf_is_one_entity_with_visible_headers() {
+    fn multi_part_jumbf_is_one_item_with_visible_headers() {
         let j = sample_jpeg();
         let data = fake_jumbf(150_000);
         let (out, _) = do_write(&j, &Updates::new().set_jumbf(data.clone()));
         let re = parse(&mut Cursor::new(out.clone())).unwrap();
-        let e = re.require_entity(SegmentKind::Jumbf).unwrap();
+        let e = re.require_item(SegmentKind::Jumbf).unwrap();
         assert_eq!(e.part_count(), 3);
         assert_eq!(e.len(), 150_000);
         assert_eq!(
-            re.read_entity(&mut Cursor::new(out.clone()), e).unwrap(),
+            re.read_item(&mut Cursor::new(out.clone()), e).unwrap(),
             data
         );
         // Continuation headers repeat LBox/TBox and are header, not payload.
@@ -1516,10 +1516,10 @@ mod tests {
         two.extend_from_slice(&out[at..]);
         let s = parse(&mut Cursor::new(two)).unwrap();
         assert!(matches!(
-            s.entity(SegmentKind::Jumbf),
+            s.item(SegmentKind::Jumbf),
             Err(Error::Ambiguous { count: 2, .. })
         ));
-        assert_eq!(s.entities(SegmentKind::Jumbf).count(), 2);
+        assert_eq!(s.items(SegmentKind::Jumbf).count(), 2);
     }
 
     /// Progressive-style file: two scans, restart markers in the first, and a
@@ -1563,7 +1563,7 @@ mod tests {
         let j = sample_jpeg();
         let (with, d1) = do_write(&j, &Updates::new().set_jumbf(fake_jumbf(100)));
         let start = |s: &Structure| {
-            let e = s.require_entity(SegmentKind::Jumbf).unwrap();
+            let e = s.require_item(SegmentKind::Jumbf).unwrap();
             let first = e.parts().next().unwrap();
             s.segment(first.segment()).unwrap().extent().offset()
         };
@@ -1592,7 +1592,7 @@ mod tests {
         assert!(!scans[1].subdivides());
 
         // The manifest after the last scan is found.
-        assert_eq!(s.entities(SegmentKind::Jumbf).count(), 1);
+        assert_eq!(s.items(SegmentKind::Jumbf).count(), 1);
 
         // elements() expands the scan and tiles the file.
         let els = elements_of(&s, &j);
@@ -1634,7 +1634,7 @@ mod tests {
 
         // Set replaces the manifest that follows the scans; no second one appears.
         let (out, dest) = do_write(&j, &Updates::new().set_jumbf(fake_jumbf(200)));
-        assert_eq!(dest.entities(SegmentKind::Jumbf).count(), 1);
+        assert_eq!(dest.items(SegmentKind::Jumbf).count(), 1);
         let re = parse(&mut Cursor::new(out)).unwrap();
         assert_eq!(re.segments(), dest.segments());
     }
@@ -1690,7 +1690,7 @@ mod tests {
         };
 
         let ok = parse(&mut Cursor::new(build(&[]))).unwrap();
-        let e = ok.require_entity(SegmentKind::Jumbf).unwrap();
+        let e = ok.require_item(SegmentKind::Jumbf).unwrap();
         assert_eq!(e.part_count(), 2);
 
         let gap = marker(0xFE, b"comment"); // COM between the packets
@@ -1717,7 +1717,7 @@ mod tests {
         b.resize(60, 0);
 
         let (out, dest) = do_write(&sample_jpeg(), &Updates::new().set_jumbf(b));
-        let e = dest.require_entity(SegmentKind::Jumbf).unwrap();
+        let e = dest.require_item(SegmentKind::Jumbf).unwrap();
         assert_eq!(
             dest.jumbf_type(&mut Cursor::new(out), e).unwrap(),
             Some(uuid)
@@ -1725,7 +1725,7 @@ mod tests {
 
         // A JUMBF box without a description box has no type.
         let (out, dest) = do_write(&sample_jpeg(), &Updates::new().set_jumbf(fake_jumbf(100)));
-        let e = dest.require_entity(SegmentKind::Jumbf).unwrap();
+        let e = dest.require_item(SegmentKind::Jumbf).unwrap();
         assert_eq!(dest.jumbf_type(&mut Cursor::new(out), e).unwrap(), None);
     }
 
@@ -1743,21 +1743,21 @@ mod tests {
         with.extend_from_slice(&j[2..]);
 
         let s = parse(&mut Cursor::new(with.clone())).unwrap();
-        assert_eq!(s.entities(SegmentKind::Jumbf).count(), 1);
-        let e = s.require_entity(SegmentKind::Jumbf).unwrap();
+        assert_eq!(s.items(SegmentKind::Jumbf).count(), 1);
+        let e = s.require_item(SegmentKind::Jumbf).unwrap();
         assert_eq!(
-            s.read_entity(&mut Cursor::new(with.clone()), e).unwrap(),
+            s.read_item(&mut Cursor::new(with.clone()), e).unwrap(),
             body
         );
 
         // Set replaces it rather than adding a second manifest.
         let new = fake_jumbf(200);
         let (out, dest) = do_write(&with, &Updates::new().set_jumbf(new));
-        assert_eq!(dest.entities(SegmentKind::Jumbf).count(), 1);
+        assert_eq!(dest.items(SegmentKind::Jumbf).count(), 1);
         assert_eq!(
             parse(&mut Cursor::new(out))
                 .unwrap()
-                .entities(SegmentKind::Jumbf)
+                .items(SegmentKind::Jumbf)
                 .count(),
             1
         );
@@ -1782,8 +1782,8 @@ mod tests {
         v
     }
 
-    fn jumbf_of(out: &[u8], s: &Structure, e: &crate::Entity) -> Vec<u8> {
-        s.read_entity(&mut Cursor::new(out.to_vec()), e).unwrap()
+    fn jumbf_of(out: &[u8], s: &Structure, e: &crate::Item) -> Vec<u8> {
+        s.read_item(&mut Cursor::new(out.to_vec()), e).unwrap()
     }
 
     /// A file holding one JUMBF of type 1 and one of type 2.
@@ -1799,13 +1799,13 @@ mod tests {
         let (file, a, b) = two_stores();
         let s = parse(&mut Cursor::new(file.clone())).unwrap();
         let found: Vec<_> = s
-            .entities(SegmentKind::Jumbf)
+            .items(SegmentKind::Jumbf)
             .map(|e| (e.jumbf_type(), jumbf_of(&file, &s, e)))
             .collect();
         assert_eq!(found, [(Some([1; 16]), a), (Some([2; 16]), b)]);
-        // The single-entity accessor refuses to guess between them.
+        // The single-item accessor refuses to guess between them.
         assert!(matches!(
-            s.entity(SegmentKind::Jumbf),
+            s.item(SegmentKind::Jumbf),
             Err(Error::Ambiguous { .. })
         ));
     }
@@ -1816,25 +1816,25 @@ mod tests {
         let a2 = typed_jumbf(1, 5000);
         let (out, dest) = do_write(&file, &Updates::new().set_jumbf(a2.clone()));
         let found: Vec<_> = dest
-            .entities(SegmentKind::Jumbf)
+            .items(SegmentKind::Jumbf)
             .map(|e| (e.jumbf_type(), jumbf_of(&out, &dest, e)))
             .collect();
         assert_eq!(found, [(Some([1; 16]), a2), (Some([2; 16]), b)]);
         // What was written reads back the same.
         let again = parse(&mut Cursor::new(out)).unwrap();
-        assert_eq!(again.entities(SegmentKind::Jumbf).count(), 2);
+        assert_eq!(again.items(SegmentKind::Jumbf).count(), 2);
     }
 
     #[test]
     fn remove_of_a_type_keeps_the_others() {
         let (file, a, b) = two_stores();
         let (out, dest) = do_write(&file, &Updates::new().remove_jumbf_of([1; 16]));
-        let e = dest.require_entity(SegmentKind::Jumbf).unwrap();
+        let e = dest.require_item(SegmentKind::Jumbf).unwrap();
         assert_eq!(e.jumbf_type(), Some([2; 16]));
         assert_eq!(jumbf_of(&out, &dest, e), b);
 
         let (out, dest) = do_write(&file, &Updates::new().remove_jumbf_of([2; 16]));
-        let e = dest.require_entity(SegmentKind::Jumbf).unwrap();
+        let e = dest.require_item(SegmentKind::Jumbf).unwrap();
         assert_eq!(jumbf_of(&out, &dest, e), a);
 
         // A type that is not there changes nothing.
@@ -1843,12 +1843,12 @@ mod tests {
 
         // Removing without a type removes them all.
         let (_, dest) = do_write(&file, &Updates::new().remove_jumbf());
-        assert_eq!(dest.entities(SegmentKind::Jumbf).count(), 0);
+        assert_eq!(dest.items(SegmentKind::Jumbf).count(), 0);
         let (out, _) = do_write(&file, &Updates::remove_all());
         assert_eq!(
             parse(&mut Cursor::new(out))
                 .unwrap()
-                .entities(SegmentKind::Jumbf)
+                .items(SegmentKind::Jumbf)
                 .count(),
             0
         );
@@ -1861,22 +1861,22 @@ mod tests {
         assert_eq!(out, file);
         let (out, _) = do_write(&file, &Updates::new().set_xmp(b"<x/>".to_vec()));
         let s = parse(&mut Cursor::new(out)).unwrap();
-        assert_eq!(s.entities(SegmentKind::Jumbf).count(), 2);
+        assert_eq!(s.items(SegmentKind::Jumbf).count(), 2);
     }
 
     #[test]
     fn a_set_without_a_readable_type_replaces_all_jumbf() {
         let (file, _, _) = two_stores();
         let (_, dest) = do_write(&file, &Updates::new().set_jumbf(fake_jumbf(100)));
-        assert_eq!(dest.entities(SegmentKind::Jumbf).count(), 1);
+        assert_eq!(dest.items(SegmentKind::Jumbf).count(), 1);
         // And unknown-type JUMBF is not touched by an update of one type.
         let (with_fake, _) = do_write(&sample_jpeg(), &Updates::new().set_jumbf(fake_jumbf(100)));
         let (out, dest) = do_write(&with_fake, &Updates::new().set_jumbf(typed_jumbf(1, 50)));
-        assert_eq!(dest.entities(SegmentKind::Jumbf).count(), 2);
+        assert_eq!(dest.items(SegmentKind::Jumbf).count(), 2);
         assert_eq!(
             parse(&mut Cursor::new(out))
                 .unwrap()
-                .entities(SegmentKind::Jumbf)
+                .items(SegmentKind::Jumbf)
                 .count(),
             2
         );
@@ -1888,12 +1888,12 @@ mod tests {
         let (out, dest) = do_write(&sample_jpeg(), &Updates::new().set_jumbf(big.clone()));
         let s = parse(&mut Cursor::new(out.clone())).unwrap();
         for st in [&dest, &s] {
-            let e = st.require_entity(SegmentKind::Jumbf).unwrap();
+            let e = st.require_item(SegmentKind::Jumbf).unwrap();
             assert!(e.part_count() > 1);
             assert_eq!(e.jumbf_type(), Some([7; 16]));
         }
         assert_eq!(
-            jumbf_of(&out, &s, s.require_entity(SegmentKind::Jumbf).unwrap()),
+            jumbf_of(&out, &s, s.require_item(SegmentKind::Jumbf).unwrap()),
             big
         );
     }
@@ -1955,8 +1955,8 @@ mod tests {
             .unwrap();
         }
 
-        // Route 3: hash everything outside the entity's payload parts.
-        let e = dest.require_entity(SegmentKind::Jumbf).unwrap();
+        // Route 3: hash everything outside the item's payload parts.
+        let e = dest.require_item(SegmentKind::Jumbf).unwrap();
         assert_eq!(e.part_count(), 3);
         let mut outside = Sha256::new();
         let mut pos = 0usize;
@@ -1989,7 +1989,7 @@ mod tests {
         .unwrap();
         let before = out.get_ref().clone();
 
-        let e = dest.require_entity(SegmentKind::Jumbf).unwrap().clone();
+        let e = dest.require_item(SegmentKind::Jumbf).unwrap().clone();
         let signed = fake_jumbf(140_000);
         dest.patch(&mut out, &e, &signed).unwrap();
         let after = out.into_inner();
@@ -2028,12 +2028,9 @@ mod tests {
         let big = vec![b'x'; 70_000];
         let (out, dest) = do_write(&j, &Updates::new().set_xmp(big.clone()));
         let re = parse(&mut Cursor::new(out.clone())).unwrap();
-        let e = re.require_entity(SegmentKind::Xmp).unwrap();
+        let e = re.require_item(SegmentKind::Xmp).unwrap();
         assert_eq!(e.part_count(), 3); // stub + two extended chunks
-        assert_eq!(
-            dest.require_entity(SegmentKind::Xmp).unwrap().part_count(),
-            3
-        );
+        assert_eq!(dest.require_item(SegmentKind::Xmp).unwrap().part_count(), 3);
         assert_eq!(
             read_xmp(&re, &mut Cursor::new(out.clone()))
                 .unwrap()
@@ -2054,7 +2051,7 @@ mod tests {
         let (mut out, _) = do_write(&j, &Updates::new().set_xmp(big));
         // Corrupt the declared total of every extended chunk to 90 MB.
         let re = parse(&mut Cursor::new(out.clone())).unwrap();
-        let e = re.require_entity(SegmentKind::Xmp).unwrap();
+        let e = re.require_item(SegmentKind::Xmp).unwrap();
         for p in e.parts().skip(1) {
             let h = re.segment(p.segment()).unwrap().header();
             let at = (h.end() - 8) as usize;
@@ -2289,7 +2286,7 @@ mod tests {
         let (out, _) = do_write(&f, &Updates::new().set_jumbf(fake_jumbf(64)));
         let re = parse(&mut Cursor::new(out)).unwrap();
         let primary = re.subassets()[0].segments();
-        let e = re.require_entity(SegmentKind::Jumbf).unwrap();
+        let e = re.require_item(SegmentKind::Jumbf).unwrap();
         assert!(e.parts().all(|p| primary.contains(&p.segment().index())));
     }
 

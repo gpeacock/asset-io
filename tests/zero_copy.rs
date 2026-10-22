@@ -110,9 +110,9 @@ fn slices_match_reads_and_borrow_when_possible() {
     let mut borrowed = 0;
     for (name, bytes, s) in &load() {
         for kind in [SegmentKind::Xmp, SegmentKind::Jumbf, SegmentKind::Exif] {
-            for e in s.entities(kind) {
-                let read = s.read_entity(&mut Cursor::new(bytes), e).unwrap();
-                let slice = s.slice_entity(bytes, e).unwrap();
+            for e in s.items(kind) {
+                let read = s.read_item(&mut Cursor::new(bytes), e).unwrap();
+                let slice = s.slice_item(bytes, e).unwrap();
                 assert_eq!(&*slice, &read[..], "{name} {kind}");
                 if e.part_count() == 1 {
                     assert!(matches!(slice, Cow::Borrowed(_)), "{name} {kind}");
@@ -121,7 +121,7 @@ fn slices_match_reads_and_borrow_when_possible() {
             }
         }
     }
-    assert!(borrowed > 0, "no single-part entity in any fixture");
+    assert!(borrowed > 0, "no single-part item in any fixture");
 }
 
 #[test]

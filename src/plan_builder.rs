@@ -33,10 +33,10 @@ struct Shape {
     from: Option<SegmentId>,
 }
 
-/// An entity of the output. A part is a segment of the output and, for an entity
+/// An item of the output. A part is a segment of the output and, for an item
 /// carried over from the source, the source range it covers; without one it is the
 /// segment's whole payload.
-struct EntitySpec {
+struct ItemSpec {
     kind: SegmentKind,
     label: Option<Cow<'static, str>>,
     media_type: Option<Cow<'static, str>>,
@@ -55,7 +55,7 @@ struct EntitySpec {
 /// - the output [`Structure`], including where the container's own structure ends
 ///   and where each sub-asset starts, which follow the source segments that began
 ///   them;
-/// - entities, including those of the source that survive, wherever their segments
+/// - items, including those of the source that survive, wherever their segments
 ///   land;
 /// - the steps.
 ///
@@ -88,7 +88,7 @@ struct EntitySpec {
 ///     &b"new data"[..],
 ///     &[][..],
 /// )?;
-/// b.carry_entities(|_| true);
+/// b.carry_items(|_| true);
 /// let plan = b.finish()?;
 /// # let _ = (id, plan);
 /// # Ok(())
@@ -98,7 +98,7 @@ pub struct PlanBuilder<'s, 'a> {
     src: &'s Structure,
     shapes: Vec<Shape>,
     steps: Vec<Step<'a>>,
-    entities: Vec<EntitySpec>,
+    items: Vec<ItemSpec>,
     /// For each source segment, the output segment it became.
     dest_of: Vec<Option<SegmentId>>,
     len: u64,
@@ -112,7 +112,7 @@ impl<'s, 'a> PlanBuilder<'s, 'a> {
             src,
             shapes: Vec::with_capacity(src.segments().len() + 2),
             steps: Vec::new(),
-            entities: Vec::new(),
+            items: Vec::new(),
             dest_of: vec![None; src.segments().len()],
             len: 0,
             attachment: None,
@@ -200,7 +200,7 @@ impl<'s, 'a> PlanBuilder<'s, 'a> {
     }
 
     /// Add a segment shaped like source segment `src`, with no steps yet. It takes
-    /// the place of `src` for entities, sub-assets and
+    /// the place of `src` for items, sub-assets and
     /// [`dest_of`](Self::dest_of).
     pub fn shape_like(&mut self, src: SegmentId) -> Result<SegmentId> {
         let s = self.src.segment(src)?;
@@ -300,7 +300,7 @@ impl<'s, 'a> PlanBuilder<'s, 'a> {
         self
     }
 
-    fn entity_of(
+    fn item_of(
         &mut self,
         kind: SegmentKind,
         label: Option<Cow<'static, str>>,
@@ -310,7 +310,7 @@ impl<'s, 'a> PlanBuilder<'s, 'a> {
         if ids.iter().any(|id| id.index() >= self.shapes.len()) {
             return Err(Error::NotFound { what: "segment" });
         }
-        self.entities.push(EntitySpec {
+        self.items.push(ItemSpec {
             kind,
             label,
             media_type: None,
@@ -320,36 +320,36 @@ impl<'s, 'a> PlanBuilder<'s, 'a> {
         Ok(())
     }
 
-    /// Declare an entity made of the payloads of whole output segments.
-    pub fn entity(&mut self, kind: SegmentKind, ids: &[SegmentId]) -> Result<()> {
-        self.entity_of(kind, None, None, ids)
+    /// Declare an item made of the payloads of whole output segments.
+    pub fn item(&mut self, kind: SegmentKind, ids: &[SegmentId]) -> Result<()> {
+        self.item_of(kind, None, None, ids)
     }
 
-    /// Like [`entity`](Self::entity), recording the
-    /// [JUMBF type](crate::Entity::jumbf_type) of the item.
-    pub fn entity_typed(
+    /// Like [`item`](Self::item), recording the
+    /// [JUMBF type](crate::Item::jumbf_type) of the item.
+    pub fn item_typed(
         &mut self,
         kind: SegmentKind,
         jumbf_type: Option<[u8; 16]>,
         ids: &[SegmentId],
     ) -> Result<()> {
-        self.entity_of(kind, None, jumbf_type, ids)
+        self.item_of(kind, None, jumbf_type, ids)
     }
 
-    /// Like [`entity`](Self::entity), with a container-defined
-    /// [label](crate::Entity::label).
-    pub fn entity_labelled(
+    /// Like [`item`](Self::item), with a container-defined
+    /// [label](crate::Item::label).
+    pub fn item_labelled(
         &mut self,
         kind: SegmentKind,
         label: impl Into<Cow<'static, str>>,
         ids: &[SegmentId],
     ) -> Result<()> {
-        self.entity_of(kind, Some(label.into()), None, ids)
+        self.item_of(kind, Some(label.into()), None, ids)
     }
 
-    /// Declare the entity that segment `id` is, if its kind is XMP, JUMBF or
+    /// Declare the item that segment `id` is, if its kind is XMP, JUMBF or
     /// Exif: a segment per item, as in chunked containers.
-    pub fn entity_for(&mut self, id: SegmentId) -> Result<()> {
+    pub fn item_for(&mut self, id: SegmentId) -> Result<()> {
         let kind = self
             .shapes
             .get(id.index())
@@ -359,17 +359,17 @@ impl<'s, 'a> PlanBuilder<'s, 'a> {
             kind,
             SegmentKind::Xmp | SegmentKind::Jumbf | SegmentKind::Exif
         ) {
-            self.entity(kind, &[id])?;
+            self.item(kind, &[id])?;
         }
         Ok(())
     }
 
-    /// Declare the entities of the source that `keep` accepts (by kind) and whose
+    /// Declare the items of the source that `keep` accepts (by kind) and whose
     /// segments were all copied or shaped like a source segment. Each covers the
     /// same bytes as before, wherever they now are; one with a segment that is gone
     /// is dropped.
-    pub fn carry_entities(&mut self, keep: impl Fn(SegmentKind) -> bool) {
-        for (kind, e) in self.src.entity_list() {
+    pub fn carry_items(&mut self, keep: impl Fn(SegmentKind) -> bool) {
+        for (kind, e) in self.src.item_list() {
             if !keep(kind) {
                 continue;
             }
@@ -384,7 +384,7 @@ impl<'s, 'a> PlanBuilder<'s, 'a> {
                 })
                 .collect();
             if let Some(parts) = parts {
-                self.entities.push(EntitySpec {
+                self.items.push(ItemSpec {
                     kind,
                     label: e.label().map(|l| l.to_owned().into()),
                     media_type: e.media_type().map(|m| m.to_owned().into()),
@@ -446,7 +446,7 @@ impl<'s, 'a> PlanBuilder<'s, 'a> {
             ));
         }
 
-        for e in self.entities {
+        for e in self.items {
             let mut parts = Vec::with_capacity(e.parts.len());
             for (dest, carried) in e.parts {
                 let at = b.segment(dest)?.extent().offset();
@@ -462,7 +462,7 @@ impl<'s, 'a> PlanBuilder<'s, 'a> {
                 };
                 parts.push((dest, range));
             }
-            b.entity_described(e.kind, e.label, e.media_type, e.jumbf_type, &parts)?;
+            b.item_described(e.kind, e.label, e.media_type, e.jumbf_type, &parts)?;
         }
         Ok(WritePlan::from_parts(b.finish()?, self.steps))
     }

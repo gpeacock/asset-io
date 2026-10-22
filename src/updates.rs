@@ -340,7 +340,7 @@ impl Updates {
         self
     }
 
-    /// Remove the JUMBF of one type (see [`Entity::jumbf_type`](crate::Entity::jumbf_type))
+    /// Remove the JUMBF of one type (see [`Item::jumbf_type`](crate::Item::jumbf_type))
     /// and keep any other. Containers with an element reserved for one store
     /// remove that element.
     pub fn remove_jumbf_of(mut self, jumbf_type: [u8; 16]) -> Self {
