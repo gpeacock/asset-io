@@ -443,3 +443,33 @@ fn walking_boxes_works_with_a_callback_that_is_not_send() {
     assert!(seen.contains(&"/moof/traf/tfhd".to_string()));
     assert_eq!(seen.iter().filter(|p| *p == "/moof").count(), 3);
 }
+
+#[test]
+fn every_built_in_handler_parses_and_plans_through_a_task() {
+    let reg = HandlerRegistry::builtin();
+    let keep = Updates::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for (name, ext) in [
+        ("sample1.png", "png"),
+        ("FireflyTrain.jpg", "jpg"),
+        ("sample1.heic", "heic"),
+        ("sample1.m4a", "m4a"),
+        ("sample1.webp", "webp"),
+        ("sample1.wav", "wav"),
+    ] {
+        let Some(bytes) = fixture(name) else { continue };
+        let (s, _) = drive(reg.parse_task(ext, bytes.len() as u64).unwrap(), &bytes);
+        let s = s.unwrap();
+        let (plan, _) = drive(s.write_plan_task(&keep), &bytes);
+        let plan = plan.unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(
+            execute(&plan, &bytes),
+            bytes,
+            "{name}: a no-op write copies"
+        );
+        seen.insert(s.container_id().to_string());
+    }
+    // One of each, so that a handler that implements only the blocking methods is
+    // noticed.
+    assert_eq!(seen.len(), 4, "{seen:?}");
+}

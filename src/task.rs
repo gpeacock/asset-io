@@ -16,6 +16,7 @@
 use crate::error::{Error, Result};
 use std::future::Future;
 use std::io::{Read, Seek, SeekFrom};
+use std::marker::PhantomData;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::task::{Context, Poll, Waker};
@@ -416,16 +417,15 @@ impl<'f, T> Task<'f, T> {
                 self.finished = true;
                 done.map(Progress::Done)
             }
-            Poll::Pending => {
-                let slot = self.link.lock();
-                if slot.request.is_none() {
+            Poll::Pending => match ReadRequest::take(&self.link) {
+                Some(req) => Ok(Progress::Read(req)),
+                None => {
                     self.finished = true;
-                    return Err(Error::InvalidFormat(
+                    Err(Error::InvalidFormat(
                         "task suspended on something other than a read".into(),
-                    ));
+                    ))
                 }
-                Ok(Progress::Read(ReadRequest { slot }))
-            }
+            },
         }
     }
 
@@ -468,13 +468,12 @@ where
         match fut.as_mut().poll(&mut cx) {
             Poll::Ready(done) => return done,
             Poll::Pending => {
-                let slot = link.lock();
-                if slot.request.is_none() {
+                let Some(req) = ReadRequest::take(&link) else {
                     return Err(Error::InvalidFormat(
                         "task suspended on something other than a read".into(),
                     ));
-                }
-                pos = Some(ReadRequest { slot }.fill_from(src, pos)?);
+                };
+                pos = Some(req.fill_from(src, pos)?);
             }
         }
     }
@@ -498,44 +497,70 @@ pub enum Progress<'a, T> {
 /// `min_len` is an unexpected end of the stream, and the task fails. Then resume the
 /// task.
 pub struct ReadRequest<'a> {
-    slot: MutexGuard<'a, Slot>,
+    link: Arc<Link>,
+    offset: u64,
+    min_len: usize,
+    window_len: usize,
+    /// The window's buffer, handed to the caller until the request is dropped.
+    buf: Vec<u8>,
+    /// Keeps the task from resuming while the request is out.
+    _task: PhantomData<&'a mut ()>,
+}
+
+impl Drop for ReadRequest<'_> {
+    fn drop(&mut self) {
+        // The task finds the buffer where it left it.
+        self.link.lock().buf = std::mem::take(&mut self.buf);
+    }
 }
 
 impl std::fmt::Debug for ReadRequest<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ReadRequest")
-            .field("offset", &self.offset())
-            .field("min_len", &self.min_len())
-            .field("window_len", &self.window_len())
+            .field("offset", &self.offset)
+            .field("min_len", &self.min_len)
+            .field("window_len", &self.window_len)
             .finish()
     }
 }
 
 impl ReadRequest<'_> {
-    fn request(&self) -> (u64, usize, usize) {
-        self.slot.request.unwrap_or_default()
+    /// The request a suspended task has made, with the buffer it left for it.
+    fn take<'a>(link: &Arc<Link>) -> Option<ReadRequest<'a>> {
+        let mut slot = link.lock();
+        let (offset, min_len, window_len) = slot.request?;
+        Some(ReadRequest {
+            link: link.clone(),
+            offset,
+            min_len,
+            window_len,
+            buf: std::mem::take(&mut slot.buf),
+            _task: PhantomData,
+        })
     }
 
     /// Where in the stream the bytes are wanted.
     pub fn offset(&self) -> u64 {
-        self.request().0
+        self.offset
     }
 
     /// The fewest bytes the task can go on with.
     pub fn min_len(&self) -> usize {
-        self.request().1
+        self.min_len
     }
 
     /// How many bytes the task would like: at least `min_len`, and never past the
     /// end of the stream.
     pub fn window_len(&self) -> usize {
-        self.request().2
+        self.window_len
     }
 
     /// The buffer to fill. It starts empty; put the bytes in it, replacing what it
-    /// holds. Its capacity is reused between requests.
+    /// holds. Its capacity is reused between requests. The request owns it, so a
+    /// request can be held across an `.await`, and the task is given the buffer
+    /// back when the request is dropped.
     pub fn buffer(&mut self) -> &mut Vec<u8> {
-        &mut self.slot.buf
+        &mut self.buf
     }
 
     /// Fill the buffer from `src`, a seekable stream: seek to the offset and read up
@@ -547,7 +572,7 @@ impl ReadRequest<'_> {
     /// [`fill`](Self::fill), not seeking if `pos`, where the stream is now, is
     /// already the offset. Returns where the stream is afterwards.
     fn fill_from<R: Read + Seek + ?Sized>(mut self, src: &mut R, pos: Option<u64>) -> Result<u64> {
-        let (offset, _, window) = self.request();
+        let (offset, window) = (self.offset, self.window_len);
         if pos != Some(offset) {
             src.seek(SeekFrom::Start(offset))?;
         }
@@ -808,10 +833,46 @@ mod tests {
     }
 
     #[test]
-    fn a_task_is_send() {
+    fn a_task_and_its_requests_are_send() {
         fn needs_send<T: Send>(_: &T) {}
-        let t: Task<'_, ()> = Task::new(1, |_| async { Ok(()) });
+        let mut t: Task<'_, ()> =
+            Task::new(
+                8,
+                |mut io| async move { io.read_at(0, &mut [0u8; 4]).await },
+            );
         needs_send(&t);
+        // A request can be held across an `.await` in a spawned task.
+        let Ok(Progress::Read(req)) = t.resume() else {
+            panic!("expected a request");
+        };
+        needs_send(&req);
+    }
+
+    #[test]
+    fn a_request_gives_the_buffer_back_when_dropped() {
+        let mut task = Task::new(8_000, |mut io| async move {
+            let mut b = [0u8; 4];
+            io.read_at(0, &mut b).await?;
+            io.read_at(5_000, &mut b).await?;
+            Ok(b)
+        });
+        let data: Vec<u8> = (0..8_000u32).map(|i| i as u8).collect();
+        let mut cap = 0;
+        loop {
+            match task.resume().unwrap() {
+                Progress::Read(mut req) => {
+                    let at = req.offset() as usize;
+                    let to = (at + req.window_len()).min(data.len());
+                    req.buffer().extend_from_slice(&data[at..to]);
+                    cap = cap.max(req.buffer().capacity());
+                }
+                Progress::Done(b) => {
+                    assert_eq!(b, [(5_000 % 256) as u8, 137, 138, 139]);
+                    break;
+                }
+            }
+        }
+        assert!(cap >= 4096);
     }
 
     #[test]

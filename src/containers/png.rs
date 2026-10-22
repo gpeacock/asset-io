@@ -18,7 +18,7 @@
 
 use crate::crc::Crc32;
 use crate::error::{Error, Result};
-use crate::handler::{ContainerHandler, FormatSpec, ReadSeek, ReadWriteSeek};
+use crate::handler::{ContainerHandler, FormatSpec, ReadWriteSeek};
 use crate::plan::WritePlan;
 use crate::segment::SegmentKind;
 use crate::segment::{Name, Role, Segment};
@@ -96,13 +96,14 @@ impl ContainerHandler for PngHandler {
         Box::pin(parse_with(self, io))
     }
 
-    fn write_plan<'a>(
-        &self,
-        src_structure: &Structure,
-        _src: &mut dyn ReadSeek,
+    // A PNG write needs nothing from the source to be planned.
+    fn write_plan_async<'f, 'a: 'f>(
+        &'f self,
+        src_structure: &'f Structure,
+        _io: Io,
         updates: &'a Updates,
-    ) -> Result<WritePlan<'a>> {
-        plan(src_structure, updates)
+    ) -> BoxFuture<'f, Result<WritePlan<'a>>> {
+        Box::pin(async move { plan(src_structure, updates) })
     }
 
     fn compose(&self, kind: SegmentKind, data: &[u8]) -> Result<Vec<u8>> {
