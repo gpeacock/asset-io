@@ -21,11 +21,12 @@
 //! on any structure without the caller knowing the format.
 
 use crate::error::{Error, Result};
+use crate::io::{BoxFuture, Io};
 use crate::plan::WritePlan;
 use crate::segment::{Name, Segment, SegmentKind};
 use crate::sink::Sink;
 use crate::structure::{Entity, SegmentId, Structure};
-use crate::task::{BoxFuture, Io, Task};
+use crate::task::block_on;
 use crate::walk::Node;
 use crate::Updates;
 use std::borrow::Cow;
@@ -139,7 +140,7 @@ pub trait ContainerHandler: std::fmt::Debug + Send + Sync {
     fn parse(self: Arc<Self>, src: &mut dyn ReadSeek) -> Result<Structure> {
         let total = src.seek(SeekFrom::End(0))?;
         src.seek(SeekFrom::Start(0))?;
-        Task::new(total, |io| self.parse_async(io)).run(src)
+        block_on(total, src, |io| self.parse_async(io))
     }
 
     /// Describe the write of the asset with `updates` applied: the structure of the
@@ -171,10 +172,9 @@ pub trait ContainerHandler: std::fmt::Debug + Send + Sync {
         src: &mut dyn ReadSeek,
         updates: &'a Updates,
     ) -> Result<WritePlan<'a>> {
-        Task::new(src_structure.total_size(), |io| {
+        block_on(src_structure.total_size(), src, |io| {
             self.write_plan_async(src_structure, io, updates)
         })
-        .run(src)
     }
 
     /// Write the asset with `updates` applied, delivering every output byte to

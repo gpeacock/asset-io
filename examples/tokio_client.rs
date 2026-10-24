@@ -32,6 +32,7 @@ use asset_io::{
 };
 use sha2::{Digest, Sha256};
 use std::io::SeekFrom;
+use std::time::Instant;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
@@ -100,18 +101,24 @@ async fn inspect(path: String) -> Result<String> {
 /// Replace the XMP of `input`, writing `output`, and hash the output as it is
 /// written. Returns the SHA-256 of the output.
 async fn edit(input: String, output: String, xmp: Vec<u8>) -> Result<(Structure, String)> {
+    let started = Instant::now();
     let registry = HandlerRegistry::builtin();
     let mut src = File::open(&input).await?;
     let total = src.metadata().await?.len();
+    let parse_started = Instant::now();
     let structure = drive(registry.parse_detect_task(total), &mut src).await?;
+    let parse_elapsed = parse_started.elapsed();
 
     // Plan the write: the structure of the output and the steps that produce it.
     // Planning reads a little of the source (for some formats), asked for the same way.
+    let plan_started = Instant::now();
     let updates = Updates::new().set_xmp(xmp);
     let plan = drive(structure.write_plan_task(&updates), &mut src).await?;
+    let plan_elapsed = plan_started.elapsed();
 
     // Run the plan. Every output byte also goes to a sink, tagged with its segment
     // and role, so it can be hashed without a second pass.
+    let write_started = Instant::now();
     let mut out = File::create(&output).await?;
     let mut hash = Sha256::new();
     let mut sink = |chunk: Chunk<'_>| {
@@ -135,15 +142,24 @@ async fn edit(input: String, output: String, xmp: Vec<u8>) -> Result<(Structure,
         }
     }
     out.flush().await?;
+    let digest: String = hash.finalize().iter().map(|b| format!("{b:02x}")).collect();
+    let write_elapsed = write_started.elapsed();
 
     // The layout of what was written is known without parsing it again.
     let written = plan.into_structure();
     let xmp_entities = written.entities(SegmentKind::Xmp).count();
+    let total_elapsed = started.elapsed();
     println!(
         "  wrote {} bytes, {xmp_entities} XMP packet(s)",
         written.total_size()
     );
-    let digest: String = hash.finalize().iter().map(|b| format!("{b:02x}")).collect();
+    println!(
+        "  timing: parse {:.3} ms, plan {:.3} ms, write+sha256 {:.3} ms, total {:.3} ms",
+        parse_elapsed.as_secs_f64() * 1000.0,
+        plan_elapsed.as_secs_f64() * 1000.0,
+        write_elapsed.as_secs_f64() * 1000.0,
+        total_elapsed.as_secs_f64() * 1000.0,
+    );
     Ok((written, digest))
 }
 

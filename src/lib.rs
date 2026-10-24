@@ -65,6 +65,7 @@ mod crc;
 mod error;
 mod execute;
 mod handler;
+mod io;
 pub mod jumbf;
 #[cfg(feature = "memory-mapped")]
 mod mapped;
@@ -89,6 +90,7 @@ pub use crc::Crc32;
 pub use error::{Error, Result};
 pub use execute::{Action, Execution};
 pub use handler::{ContainerHandler, FormatSpec, ReadSeek, ReadWriteSeek, DETECT_LEN};
+pub use io::{BoxFuture, Io, Reader, DEFAULT_WINDOW};
 #[cfg(feature = "memory-mapped")]
 pub use mapped::MappedFile;
 pub use plan::{Step, WritePlan};
@@ -100,7 +102,7 @@ pub use sink::{Chunk, NullSink, Sink};
 pub use structure::{
     Entity, Part, Region, SegmentId, Structure, StructureBuilder, SubAsset, MAX_SEGMENTS,
 };
-pub use task::{block_on, BoxFuture, Io, Progress, ReadRequest, Reader, Task, DEFAULT_WINDOW};
+pub use task::{block_on, Progress, ReadRequest, Task};
 pub use thumbnail::Thumbnail;
 #[cfg(feature = "exif")]
 pub use tiff::ExifInfo;

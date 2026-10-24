@@ -73,7 +73,7 @@ use crate::plan::{OffsetMap, Relocate, WritePlan};
 use crate::{
     block_on, BoxFuture, ByteRange, ContainerHandler, Entity, Error, Existing, FormatSpec, Io,
     MetadataSlot, MetadataUpdate, Name, Node, PlanBuilder, ReadSeek, Result, Role, Segment,
-    SegmentId, SegmentKind, Structure, StructureBuilder, Task, Updates, MAX_SEGMENT_SIZE,
+    SegmentId, SegmentKind, Structure, StructureBuilder, Updates, MAX_SEGMENT_SIZE,
 };
 use std::borrow::Cow;
 use std::io::{Read, Seek, SeekFrom};
@@ -248,12 +248,11 @@ impl ContainerHandler for BmffHandler {
         src: &mut dyn ReadSeek,
         updates: &Updates,
     ) -> Result<Structure> {
-        Task::new(src_structure.total_size(), |mut io| async move {
+        crate::block_on(src_structure.total_size(), src, |mut io| async move {
             let (ops, labels, map) = plan(src_structure, &mut io, updates).await?;
             let plan = assemble(src_structure, &mut io, ops, &labels, map, false).await?;
             Ok(plan.into_structure())
         })
-        .run(src)
     }
 
     fn compose(&self, kind: SegmentKind, data: &[u8]) -> Result<Vec<u8>> {

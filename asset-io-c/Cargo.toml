@@ -1,0 +1,33 @@
+[package]
+name = "asset-io-c"
+version = "0.2.0"
+edition = "2021"
+rust-version = "1.96"
+license = "MIT OR Apache-2.0"
+description = "Application-facing C bindings for asset-io (not a handler plugin ABI)"
+build = "build.rs"
+
+[lib]
+name = "asset_io_c"
+crate-type = ["rlib", "cdylib", "staticlib"]
+
+[dependencies]
+asset-io = { path = "..", version = "0.2.0", default-features = false }
+cimpl = "=0.4.1"
+serde_json = "1"
+
+[build-dependencies]
+cbindgen = "=0.29.2"
+
+[features]
+default = ["jpeg", "png"]
+jpeg = ["asset-io/jpeg"]
+png = ["asset-io/png"]
+bmff = ["asset-io/bmff"]
+riff = ["asset-io/riff"]
+svg = ["asset-io/svg"]
+pdf = ["asset-io/pdf"]
+all-formats = ["jpeg", "png", "bmff", "riff", "svg", "pdf"]
+exif = ["asset-io/exif"]
+xmp = ["asset-io/xmp"]
+memory-mapped = ["asset-io/memory-mapped"]
