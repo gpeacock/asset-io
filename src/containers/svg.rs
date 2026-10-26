@@ -857,6 +857,18 @@ mod tests {
     }
 
     #[test]
+    fn a_manifest_that_is_not_base64_has_no_type() {
+        let svg = with_manifest("this is not base64 at all");
+        let s = parsed(&svg);
+        let item = s.require_item(ItemKind::Jumbf).unwrap();
+        assert_eq!(
+            s.jumbf_type(&mut Cursor::new(svg.as_bytes()), item)
+                .unwrap(),
+            None
+        );
+    }
+
+    #[test]
     fn conforms() {
         let c = Conformance::new(handler()).jumbf(Some(jumbf(200)));
         c.check("plain", plain().as_bytes());

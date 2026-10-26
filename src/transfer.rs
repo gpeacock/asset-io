@@ -145,6 +145,43 @@ impl TransferEncoding {
         }
     }
 
+    /// At most the first `n` bytes of the content, decoding only as much of
+    /// `stored` as that needs. `stored` may be a prefix of what is stored. Fewer
+    /// bytes are returned when the content is shorter. Errors as
+    /// [`decode`](Self::decode) does.
+    pub fn decode_prefix(&self, stored: &[u8], n: usize) -> Result<Vec<u8>> {
+        match self {
+            Self::Identity => Ok(stored[..stored.len().min(n)].to_vec()),
+            Self::Base64 => {
+                let chars: Vec<u8> = stored
+                    .iter()
+                    .copied()
+                    .filter(|c| !c.is_ascii_whitespace())
+                    .take(n.div_ceil(3) * 4)
+                    .collect();
+                let whole = chars.len() / 4 * 4;
+                let mut out = base64_decode(&chars[..whole])?;
+                out.truncate(n);
+                Ok(out)
+            }
+            Self::Zlib {
+                png_predictor_columns: Some(columns),
+            } => {
+                let columns = (*columns).max(1) as usize;
+                let rows = n.div_ceil(columns);
+                let mut data = stream_prefix(self, stored, rows * (columns + 1))?;
+                data.truncate(data.len() / (columns + 1) * (columns + 1));
+                let mut out = undo_png_predictor(data, columns as u32)?;
+                out.truncate(n);
+                Ok(out)
+            }
+            Self::Unknown(_) => Err(Error::UnsupportedFeature(
+                "decoding an unknown transfer encoding",
+            )),
+            _ => stream_prefix(self, stored, n),
+        }
+    }
+
     /// The bytes to store for `content`. Only [`Identity`](Self::Identity) and
     /// [`Base64`](Self::Base64) can be written; anything else is
     /// [`Error::UnsupportedFeature`].
@@ -309,6 +346,54 @@ fn inflate_with(_: &[u8], _: usize, _: Option<usize>, _: bool) -> Result<Vec<u8>
     Err(Error::UnsupportedFeature(
         "Flate decoding (enable the `flate` feature)",
     ))
+}
+
+/// The first `n` bytes a streaming decoder gives for `stored`; a stream that ends
+/// early (or a truncated `stored`) gives what was decoded before the end.
+#[cfg(any(feature = "flate", feature = "brotli"))]
+fn stream_prefix(encoding: &TransferEncoding, stored: &[u8], n: usize) -> Result<Vec<u8>> {
+    use std::io::Read;
+    let reader: Box<dyn Read + '_> = match encoding {
+        #[cfg(feature = "flate")]
+        TransferEncoding::Zlib { .. } => Box::new(flate2::read::ZlibDecoder::new(stored)),
+        #[cfg(feature = "flate")]
+        TransferEncoding::Deflate if is_zlib(stored) => {
+            Box::new(flate2::read::ZlibDecoder::new(stored))
+        }
+        #[cfg(feature = "flate")]
+        TransferEncoding::Deflate => Box::new(flate2::read::DeflateDecoder::new(stored)),
+        #[cfg(feature = "flate")]
+        TransferEncoding::Gzip => Box::new(flate2::read::GzDecoder::new(stored)),
+        #[cfg(feature = "brotli")]
+        TransferEncoding::Brotli => Box::new(brotli_decompressor::Decompressor::new(stored, 4096)),
+        other => return missing_decoder(other),
+    };
+    let mut out = vec![0u8; n];
+    let mut filled = 0;
+    let mut reader = reader;
+    while filled < n {
+        match reader.read(&mut out[filled..]) {
+            Ok(0) => break,
+            Ok(k) => filled += k,
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof && filled > 0 => break,
+            Err(e) => return Err(Error::InvalidFormat(format!("{}: {e}", encoding.as_str()))),
+        }
+    }
+    out.truncate(filled);
+    Ok(out)
+}
+
+#[cfg(not(any(feature = "flate", feature = "brotli")))]
+fn stream_prefix(encoding: &TransferEncoding, _: &[u8], _: usize) -> Result<Vec<u8>> {
+    missing_decoder(encoding)
+}
+
+fn missing_decoder(encoding: &TransferEncoding) -> Result<Vec<u8>> {
+    // `decode` names the feature to enable; reuse its message.
+    match encoding.decode(Vec::new()) {
+        Err(e @ Error::UnsupportedFeature(_)) => Err(e),
+        _ => Err(Error::UnsupportedFeature("decoder not built in")),
+    }
 }
 
 /// Read all of `reader`, failing above `limit` bytes.
@@ -674,5 +759,54 @@ mod tests {
             assert!(gunzip(&gz, data.len() - 1).is_err(), "over the limit");
             assert!(TransferEncoding::Gzip.decode(b"not gzip".to_vec()).is_err());
         }
+
+        #[test]
+        fn a_prefix_decodes_only_what_it_needs() {
+            let data: Vec<u8> = (0..20_000u32).map(|i| (i * 7 % 251) as u8).collect();
+            let z = deflate(&data);
+            let plain = TransferEncoding::Zlib {
+                png_predictor_columns: None,
+            };
+            // A cut-short stream still gives its head.
+            assert_eq!(
+                plain.decode_prefix(&z[..z.len() / 2], 32).unwrap(),
+                data[..32]
+            );
+            assert_eq!(
+                TransferEncoding::Deflate.decode_prefix(&z, 5).unwrap(),
+                data[..5]
+            );
+            let predicted = TransferEncoding::Zlib {
+                png_predictor_columns: Some(3),
+            };
+            let rows = deflate(&[1, 10, 1, 1, 2, 5, 5, 5]);
+            assert_eq!(predicted.decode_prefix(&rows, 4).unwrap(), [10, 11, 12, 15]);
+            assert_eq!(plain.decode_prefix(&deflate(b"ab"), 32).unwrap(), b"ab");
+            assert!(plain.decode_prefix(b"not zlib", 32).is_err());
+        }
+    }
+
+    #[test]
+    fn a_base64_prefix_decodes_only_its_head() {
+        let data: Vec<u8> = (0..100u8).collect();
+        let mut text = base64_encode(&data);
+        text.insert(10, b'\n');
+        let tail = text.len() - 3;
+        text[tail] = b'!'; // damage beyond the head is not read
+        assert_eq!(
+            TransferEncoding::Base64.decode_prefix(&text, 32).unwrap(),
+            data[..32]
+        );
+        assert_eq!(
+            TransferEncoding::Identity.decode_prefix(&data, 4).unwrap(),
+            data[..4]
+        );
+        assert!(TransferEncoding::Base64.decode_prefix(b"!!!!", 3).is_err());
+        assert!(matches!(
+            TransferEncoding::unknown("x-custom")
+                .unwrap()
+                .decode_prefix(b"abc", 3),
+            Err(Error::UnsupportedFeature(_))
+        ));
     }
 }

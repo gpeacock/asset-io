@@ -404,8 +404,27 @@ impl Structure {
             return Ok(Some(t));
         }
         if *item.transfer() != TransferEncoding::Identity {
-            let content = self.read_content(src, item)?;
-            return Ok(crate::jumbf::superbox_type(&content));
+            // Decode only the head. Stored bytes that do not decode, or whose decoder
+            // is not built in, give no type, as bytes that are not a superbox do.
+            const STORED_HEAD: u64 = 4096;
+            let mut stored = Vec::new();
+            for extent in item.extents() {
+                let left = STORED_HEAD - stored.len() as u64;
+                let r = extent.range();
+                self.read_into(
+                    src,
+                    ByteRange::new(r.offset(), r.len().min(left))?,
+                    &mut stored,
+                )?;
+                if stored.len() as u64 >= STORED_HEAD {
+                    break;
+                }
+            }
+            return match item.transfer().decode_prefix(&stored, 32) {
+                Ok(head) => Ok(crate::jumbf::superbox_type(&head)),
+                Err(Error::InvalidFormat(_) | Error::UnsupportedFeature(_)) => Ok(None),
+                Err(e) => Err(e),
+            };
         }
         let first = item.extents().next().ok_or(Error::NotFound {
             what: "item extent",
