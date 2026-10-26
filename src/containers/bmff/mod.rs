@@ -761,9 +761,18 @@ async fn item_entity(
     }
     match f.kind {
         heif_items::Kind::Exif => b.entity(SegmentKind::Exif, &parts),
-        heif_items::Kind::Thumbnail => b.entity_with_media_type(
-            SegmentKind::Thumbnail,
-            Some(String::from_utf8_lossy(&f.item_type).into_owned().into()),
+        heif_items::Kind::Thumbnail | heif_items::Kind::Embedded => b.entity_with_media_type(
+            if f.kind == heif_items::Kind::Thumbnail {
+                SegmentKind::Thumbnail
+            } else {
+                SegmentKind::Embedded
+            },
+            Some(
+                f.uri
+                    .clone()
+                    .unwrap_or_else(|| String::from_utf8_lossy(&f.item_type).into_owned())
+                    .into(),
+            ),
             f.media_type.clone().map(Into::into),
             &parts,
         ),
@@ -1516,9 +1525,11 @@ async fn assemble<'a>(
             _ => {}
         }
     }
-    // Items (EXIF, thumbnails) are bytes inside boxes that are copied as they are,
+    // Items are bytes inside boxes that are copied as they are,
     // so their entities follow the boxes to wherever those land.
-    b.carry_entities(|k| matches!(k, SegmentKind::Exif | SegmentKind::Thumbnail));
+    b.carry_entities(|k| {
+        matches!(k, SegmentKind::Exif | SegmentKind::Thumbnail | SegmentKind::Embedded)
+    });
     b.finish()
 }
 

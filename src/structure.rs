@@ -69,7 +69,7 @@ impl Part {
     }
 }
 
-/// A logical metadata item (XMP, JUMBF, EXIF) assembled from one or more parts.
+/// A logical item (metadata or an embedded file) assembled from one or more parts.
 ///
 /// Parts are payload-only: framing that repeats per part (JPEG XT headers, PNG
 /// chunk headers) is not included. The common single-part case does not allocate.
@@ -95,7 +95,8 @@ impl Entity {
     }
 
     /// Container-defined role of the entity among others of its kind, for example
-    /// the purpose of a BMFF C2PA box (`manifest`, `update`). `None` if the
+    /// the purpose of a BMFF C2PA box (`manifest`, `update`) or the identifying
+    /// URI of a HEIF `uri ` item. `None` if the
     /// container does not distinguish them.
     pub fn label(&self) -> Option<&str> {
         self.label.as_deref()

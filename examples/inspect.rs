@@ -13,9 +13,9 @@
 
 //! Parse a media file and print its structure and metadata.
 //!
-//! Run: `cargo run --example inspect --features all-formats,xmp,exif -- <file>`
+//! Run: `cargo run --example inspect --features all-formats,xmp,exif -- <file> [--embedded]`
 
-use asset_io::{HandlerRegistry, Role, SegmentKind};
+use asset_io::{HandlerRegistry, Role, ScanLimits, SegmentKind};
 use std::{env, fs::File};
 
 fn main() -> asset_io::Result<()> {
@@ -69,6 +69,52 @@ fn main() -> asset_io::Result<()> {
             t.media_type().unwrap_or("unknown type"),
             t.data.len()
         );
+    }
+
+    for e in structure.embedded_assets() {
+        println!(
+            "\nEmbedded item: {} [{}], {}, {} bytes",
+            e.kind(),
+            e.label().unwrap_or("unlabelled"),
+            e.media_type().unwrap_or("unknown type"),
+            e.len()
+        );
+    }
+    if env::args().skip(2).any(|arg| arg == "--embedded") {
+        let assets = structure.scan_embedded(
+            &mut src,
+            &HandlerRegistry::builtin(),
+            ScanLimits::default(),
+        )?;
+        for (i, asset) in assets.iter().enumerate() {
+            println!(
+                "\nEmbedded [{i}]: depth {}, parent {:?}, label {:?}",
+                asset.depth,
+                asset.parent,
+                asset.entity.label()
+            );
+            match &asset.structure {
+                Ok(s) => {
+                    println!(
+                        "  Container: {}, media type: {}",
+                        s.container_id(),
+                        s.media_type()
+                    );
+                    let mut reader = asset.reader(&mut src)?;
+                    for (kind, e) in s.entity_list() {
+                        println!("  {kind}: {} bytes, {} part(s)", e.len(), e.part_count());
+                        if matches!(
+                            kind,
+                            SegmentKind::Jumbf | SegmentKind::Xmp | SegmentKind::Exif
+                        ) {
+                            let bytes = s.read_entity(&mut reader, e)?;
+                            println!("    Raw content: {:02x?}", &bytes[..bytes.len().min(24)]);
+                        }
+                    }
+                }
+                Err(error) => println!("  Not parsed: {error}"),
+            }
+        }
     }
 
     println!("\nSegments:");

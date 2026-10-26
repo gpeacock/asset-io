@@ -58,6 +58,7 @@ use crate::{
     StructureBuilder, Updates,
 };
 use std::borrow::Cow;
+use std::collections::BTreeMap;
 use std::io::{Read, Seek, SeekFrom};
 use std::sync::Arc;
 
@@ -111,6 +112,13 @@ struct Open {
     ty: Option<[u8; 16]>,
 }
 
+/// Generic UUID boxes use the JPEG XT transport without a repeated box header.
+#[derive(Default)]
+struct UuidBox {
+    size: Option<u64>,
+    parts: BTreeMap<u32, SegmentId>,
+}
+
 enum Class {
     Plain,
     XmpMain,
@@ -118,6 +126,7 @@ enum Class {
     Exif,
     Jumbf { en: u16, z: u32 },
     JumbfRaw,
+    Uuid { en: u16, z: u32, size: Option<u64> },
 }
 
 /// The JPEG container handler.
@@ -247,6 +256,16 @@ async fn parse_with(handler: Arc<dyn ContainerHandler>, mut io: Io) -> Result<St
     if let Some(o) = meta.jumbf_open.take() {
         b.entity_of_segments_typed(SegmentKind::Jumbf, o.ty, &o.ids)?;
     }
+    for (_, raw) in meta.uuid_boxes {
+        let ids: Vec<_> = raw.parts.into_values().collect();
+        let len = ids.iter().try_fold(0u64, |n, &id| {
+            Ok::<_, Error>(n + b.segment(id)?.payload().len())
+        })?;
+        if raw.size != Some(len) {
+            return Err(Error::InvalidFormat("JPEG XT UUID box length mismatch".into()));
+        }
+        b.entity_of_segments(SegmentKind::Jumbf, &ids)?;
+    }
 
     // Another image directly after this one makes a multi-picture file. Later
     // images are listed as segments and left uninterpreted. Bytes that start like an
@@ -297,6 +316,7 @@ struct Meta {
     /// End offset of the last segment added to `jumbf_open`. C2PA A.3.1 requires the
     /// APP11 segments of one manifest to be sequential and contiguous.
     jumbf_end: u64,
+    uuid_boxes: BTreeMap<u16, UuidBox>,
 }
 
 /// List the markers of one image, from `offset` through its `EOI`, and return the
@@ -313,6 +333,7 @@ async fn scan_image(
         xmp_open,
         jumbf_open,
         jumbf_end,
+        uuid_boxes,
     } = meta;
     loop {
         if total - offset < 2 {
@@ -444,7 +465,11 @@ async fn scan_image(
                     hdr_extra = EXIF_SIGNATURE.len() as u64;
                     class = Class::Exif;
                 }
-            } else if n >= 16 && peek[0..2] == JP[..] && peek[12..16] == JUMB[..] {
+            } else if n >= 16
+                && peek[0..2] == JP[..]
+                && peek[12..16] == JUMB[..]
+                && !uuid_boxes.contains_key(&u16::from_be_bytes([peek[2], peek[3]]))
+            {
                 let en = u16::from_be_bytes([peek[2], peek[3]]);
                 let z = u32::from_be_bytes([peek[4], peek[5], peek[6], peek[7]]);
                 // The spec numbers packets from 1, but real files (e.g. Designer.jpeg)
@@ -466,6 +491,29 @@ async fn scan_image(
                     if first {
                         jtype = crate::jumbf::superbox_type(&peek[8..]);
                     }
+                }
+            } else if marker == APP11 && n >= 8 && peek[..2] == JP {
+                let en = u16::from_be_bytes([peek[2], peek[3]]);
+                let z = u32::from_be_bytes([peek[4], peek[5], peek[6], peek[7]]);
+                let first = z <= 1 && n >= 16 && &peek[12..16] == b"uuid";
+                if first || uuid_boxes.contains_key(&en) {
+                    let size = if first {
+                        let size32 = u32::from_be_bytes(peek[8..12].try_into().unwrap());
+                        let size = if size32 == 1 && n >= 24 {
+                            u64::from_be_bytes(peek[16..24].try_into().unwrap())
+                        } else {
+                            u64::from(size32)
+                        };
+                        if size < if size32 == 1 { 32 } else { 24 } {
+                            return Err(Error::InvalidFormat("JPEG XT UUID box too short".into()));
+                        }
+                        Some(size)
+                    } else {
+                        None
+                    };
+                    kind = SegmentKind::Jumbf;
+                    hdr_extra = 8;
+                    class = Class::Uuid { en, z, size };
                 }
             } else if n >= 8 && peek[4..8] == JUMB[..] {
                 kind = SegmentKind::Jumbf;
@@ -521,6 +569,15 @@ async fn scan_image(
                     ty: jtype,
                 });
                 *jumbf_end = mstart + seg_total;
+            }
+            Class::Uuid { en, z, size } => {
+                let raw = uuid_boxes.entry(en).or_default();
+                if raw.parts.insert(z, id).is_some() || (size.is_some() && raw.size.is_some()) {
+                    return Err(Error::InvalidFormat("duplicate JPEG XT UUID packet".into()));
+                }
+                if size.is_some() {
+                    raw.size = size;
+                }
             }
         }
 

@@ -104,6 +104,61 @@ With the bytes in memory, `Structure::slice`, `slice_entity` and `read_slice` bo
 
 Run `cargo run --example inspect --features all-formats,xmp,exif -- <file>` to print a file's structure.
 
+### Embedded files
+
+`Structure::embedded_assets()` lists embedded-file and container-thumbnail
+entities. HEIF discovery includes `jpeg`, `mime` and `uri ` items, including
+Apple's reference JPEG. URI item labels preserve the URI identifying their
+purpose; a URI does not imply a media type and is never fetched. Coded HEIF
+items such as `hvc1` are not standalone files. EXIF-internal thumbnails remain
+available through `embedded_thumbnail`; MPF parts remain `subassets`.
+
+Parsing stays shallow. Opt in to recursive scanning with the same registry,
+including any custom handlers:
+
+```rust,no_run
+use asset_io::{HandlerRegistry, ScanLimits, SegmentKind};
+
+# fn main() -> asset_io::Result<()> {
+let registry = HandlerRegistry::builtin();
+let mut src = std::fs::File::open("photo.heic")?;
+let structure = registry.parse_detect(&mut src)?;
+let embedded = structure.scan_embedded(&mut src, &registry, ScanLimits::default())?;
+for asset in &embedded {
+    match &asset.structure {
+        Ok(child) => {
+            let mut reader = asset.reader(&mut src)?;
+            for entity in child.entities(SegmentKind::Jumbf) {
+                let bytes = child.read_entity(&mut reader, entity)?;
+                // The application interprets these bytes.
+                println!("{} bytes of box content", bytes.len());
+            }
+        }
+        Err(error) => eprintln!("Embedded item {:?}: {error}", asset.entity.label()),
+    }
+}
+# Ok(())
+# }
+```
+
+Results are depth-first, with parent indices and nesting depth. Child offsets
+are relative to the child's stream; `asset.reader()` maps them back to the
+original source, even through fragmented and nested items, without copying
+image data. Unsupported or malformed children retain their errors and raw byte
+ranges so siblings remain inspectable. Budget overruns fail the scan explicitly:
+defaults are depth 4, 64 assets and 256 MiB of cumulative embedded lengths.
+Depth is always capped at 32. Scanning follows declared items, not arbitrary
+signatures hidden in opaque payloads, and never decodes pixels.
+
+JPEG scanning exposes both JUMBF superboxes and generic UUID boxes carried in
+JPEG XT APP11 packets as `Jumbf` entities. Transport headers are removed and
+packet bodies reassembled. A UUID box is not a JUMBF superbox, so its
+`jumbf_type()` is `None`; interpreting its UUID and payload belongs to the
+application.
+
+Add `--embedded` to the `inspect` command to print nested metadata and raw box
+prefixes.
+
 ## Safety
 
 Lengths are checked, segment counts and nesting are capped, and malformed input returns an error. Fuzz targets are in `fuzz/` (see `FUZZING_SETUP.md`).

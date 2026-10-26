@@ -11,13 +11,15 @@
 // specific language governing permissions and limitations under
 // each license.
 
-//! HEIF items found through the file-level `meta` box: EXIF data and thumbnails.
+//! HEIF items found through the file-level `meta` box: EXIF, thumbnails and
+//! embedded files (JPEG, MIME and URI-typed items).
 //!
 //! This is not a container handler. It is a parser for one part of ISO BMFF that
 //! the [`bmff`](super::bmff) handler calls when it parses a file, and only that
 //! handler uses it. The handler turns what it finds into
 //! [`Exif`](crate::SegmentKind::Exif) and
-//! [`Thumbnail`](crate::SegmentKind::Thumbnail) entities, which the
+//! [`Thumbnail`](crate::SegmentKind::Thumbnail) and
+//! [`Embedded`](crate::SegmentKind::Embedded) entities, which the
 //! container-agnostic code (`Structure::exif_info`, `Structure::embedded_thumbnail`)
 //! then reads without knowing the format.
 //!
@@ -56,6 +58,7 @@ pub(super) enum Kind {
     Exif,
     /// An item that is the source of a `thmb` reference.
     Thumbnail,
+    Embedded,
 }
 
 /// An item of interest and where its data is.
@@ -67,6 +70,7 @@ pub(super) struct Found {
     /// type the file gives for a `mime` item, and `None` for anything else (coded
     /// bitstreams such as `hvc1` are not files of any media type).
     pub media_type: Option<String>,
+    pub uri: Option<String>,
     /// `(file offset, length)` of each extent, in order.
     pub extents: Vec<(u64, u64)>,
 }
@@ -168,6 +172,7 @@ fn boxes(buf: &[u8]) -> Result<Vec<([u8; 4], usize, usize)>> {
 struct Info {
     item_type: [u8; 4],
     media_type: Option<String>,
+    uri: Option<String>,
 }
 
 /// Longest media type accepted, in bytes.
@@ -222,11 +227,31 @@ fn parse_iinf(p: &[u8]) -> Result<Vec<(u32, Info)>> {
         } else {
             None
         };
+        let uri = if item_type == *b"uri " {
+            let text = e
+                .cstr()
+                .and_then(|_name| e.cstr())
+                .ok_or_else(|| malformed("infe URI"))?;
+            if text.len() > 4096 {
+                return Err(Error::LimitExceeded {
+                    what: "HEIF item URI",
+                    limit: 4096,
+                });
+            }
+            Some(
+                std::str::from_utf8(text)
+                    .map_err(|_| malformed("infe URI"))?
+                    .to_owned(),
+            )
+        } else {
+            None
+        };
         out.push((
             id,
             Info {
                 item_type,
                 media_type,
+                uri,
             },
         ));
     }
@@ -323,6 +348,7 @@ fn parse_iloc(
                 kind: *kind,
                 item_type: info.item_type,
                 media_type: info.media_type.clone(),
+                uri: info.uri.clone(),
                 extents,
             });
         }
@@ -330,7 +356,7 @@ fn parse_iloc(
     Ok(out)
 }
 
-/// The EXIF and thumbnail items described by the `meta` box whose body (after any
+/// The EXIF, thumbnail and embedded items described by the `meta` box whose body (after any
 /// FullBox header) is `meta`, and which starts at file offset `meta_at`.
 pub(super) fn find(meta: &[u8], meta_at: u64) -> Result<Vec<Found>> {
     let children = boxes(meta)?;
@@ -349,6 +375,8 @@ pub(super) fn find(meta: &[u8], meta_at: u64) -> Result<Vec<Found>> {
             Kind::Exif
         } else if thumbs.contains(&id) {
             Kind::Thumbnail
+        } else if matches!(&info.item_type, b"jpeg" | b"mime" | b"uri ") {
+            Kind::Embedded
         } else {
             continue;
         };
@@ -473,12 +501,14 @@ mod tests {
                     kind: Kind::Exif,
                     item_type: *b"Exif",
                     media_type: None,
+                    uri: None,
                     extents: vec![(100, 20), (200, 8)]
                 },
                 Found {
                     kind: Kind::Thumbnail,
                     item_type: *b"jpeg",
                     media_type: Some("image/jpeg".into()),
+                    uri: None,
                     extents: vec![(500, 40)]
                 },
             ]

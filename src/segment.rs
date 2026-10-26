@@ -59,7 +59,7 @@ pub enum SegmentKind {
     Header,
     /// XMP metadata
     Xmp,
-    /// JUMBF/C2PA data
+    /// JUMBF/C2PA data, or generic UUID boxes in JPEG XT APP11 transport.
     Jumbf,
     /// Compressed image data
     ImageData,
@@ -69,6 +69,9 @@ pub enum SegmentKind {
     /// A thumbnail inside EXIF data is not this kind; see
     /// [`Structure::embedded_thumbnail`](crate::Structure::embedded_thumbnail).
     Thumbnail,
+    /// A self-contained embedded file, or a URI-typed HEIF item whose format
+    /// must be detected from its bytes. Coded HEIF image bitstreams are not files.
+    Embedded,
     /// Other/unknown segment type
     Other,
 }
@@ -83,6 +86,7 @@ impl SegmentKind {
             Self::ImageData => "image_data",
             Self::Exif => "exif",
             Self::Thumbnail => "thumbnail",
+            Self::Embedded => "embedded",
             Self::Other => "other",
         }
     }
