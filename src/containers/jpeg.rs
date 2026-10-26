@@ -669,10 +669,9 @@ fn find_mpf<R: Read + Seek>(
     rd: &mut R,
     primary_end: usize,
 ) -> Result<Option<SegmentId>> {
-    let found = crate::Task::new(src.total_size(), |mut io| async move {
+    let found = crate::block_on(src.total_size(), rd, |mut io| async move {
         find_all_mpf(src, &mut io, primary_end).await
-    })
-    .run(rd)?;
+    })?;
     Ok(found.first().copied())
 }
 

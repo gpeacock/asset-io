@@ -41,3 +41,34 @@ jobs:
 
       - name: Tests (all features)
         run: cargo test --all-features
+
+  c-bindings:
+    name: C bindings
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Check formatting and lint
+        run: |
+          cargo fmt --manifest-path asset-io-c/Cargo.toml --check
+          cargo clippy --locked --manifest-path asset-io-c/Cargo.toml --all-features --all-targets -- -D warnings
+
+      - name: Test minimal, default and full bindings
+        run: |
+          cargo test --locked --manifest-path asset-io-c/Cargo.toml --no-default-features
+          cargo test --locked --manifest-path asset-io-c/Cargo.toml
+          cargo test --locked --manifest-path asset-io-c/Cargo.toml --all-features
+
+      - name: Compile and run C and C++ consumers
+        run: |
+          cargo build --locked --manifest-path asset-io-c/Cargo.toml --all-features --target-dir asset-io-c/target
+          cc -std=c11 -Wall -Wextra -Werror -Iasset-io-c/include asset-io-c/examples/smoke.c \
+            -Lasset-io-c/target/debug -lasset_io_c -Wl,-rpath,"$PWD/asset-io-c/target/debug" -o asset-io-c/target/c-smoke
+          asset-io-c/target/c-smoke
+          c++ -x c++ -std=c++17 -Wall -Wextra -Werror -Iasset-io-c/include asset-io-c/examples/smoke.c \
+            -Lasset-io-c/target/debug -lasset_io_c -Wl,-rpath,"$PWD/asset-io-c/target/debug" -o asset-io-c/target/cpp-smoke
+          asset-io-c/target/cpp-smoke

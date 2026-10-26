@@ -71,6 +71,10 @@ Edits to a multi-picture JPEG add metadata to the first image and shift the size
 
 A handler implements `ContainerHandler`:
 
+Handlers use `Io` and `BoxFuture` for asynchronous reads, without constructing or
+driving a `Task`. The shared reader types live in `src/io.rs`; task execution lives
+in `src/task.rs`. Both remain available through the crate-root exports.
+
 - `parse_async(self: Arc<Self>, io: Io)` builds a `Structure` with `StructureBuilder`, reading the stream through `io` (`io.read_at(offset, &mut buf).await?`, `io.reader(at)` for a run of fields, `io.fetch(..)` for a borrowed slice). Everything but the reads is ordinary code. Return `Box::pin(async move { ... })`.
 - `write_plan_async(&self, structure, io, updates)` describes a write as a `WritePlan`: the structure of the output plus ordered `Step`s that copy source bytes or supply new ones. It reads the source only for what it must know (`io`), and does no writing. A handler that cannot write leaves the default. Decide what the output holds from `Updates` (`xmp()`, `jumbf()`, ...; a `MetadataSlot` says whether each existing XMP or JUMBF item is kept, replaced or dropped, and what is left to insert), then describe it in order with a `PlanBuilder`: `copy_segment(id)` for a source segment kept, `put_segment(kind, name, header, payload, trailer)` for a new one, `entity_for(id)` for the metadata it holds, `carry_entities(..)` for the entities of the kept segments, and `finish()`. The builder works out sizes, offsets and the output structure. When a segment is part copied and part changed, `shape_like`/`shape` add it and `copy`, `put` and `relocate` supply its bytes.
 
@@ -85,6 +89,8 @@ Parsing and planning are `async` code that does no I/O: a `Task` runs it, and wh
 A `WritePlan` runs the same way: `WritePlan::start` gives an `Execution` whose `step` returns `Action::Read { offset, buf }`, `Action::Write(bytes)` or `Action::Done`, and does the sink calls, the checking and the read coalescing itself, so every way of running a plan behaves like `execute`. The blocking calls (`HandlerRegistry::parse`, `Structure::write`) are these drivers over a `Read + Seek` and a `Write`.
 
 `examples/tokio_client.rs` drives parsing, planning and writing with `tokio::fs`, one spawned task per file, hashing the output as it is written; `tests/tokio_driver.rs` checks that what it writes matches the blocking API byte for byte.
+
+Its `edit` command reports wall-clock times for parsing, planning, writing with SHA-256, and the total edit. Writing includes output creation and flushing, but not an explicit disk sync. The total excludes loading the replacement XMP, task spawning, and compilation.
 
 ## Zero-copy
 
@@ -101,6 +107,14 @@ Run `cargo run --example inspect --features all-formats,xmp,exif -- <file>` to p
 ## Safety
 
 Lengths are checked, segment counts and nesting are capped, and malformed input returns an error. Fuzz targets are in `fuzz/` (see `FUZZING_SETUP.md`).
+
+## Application C bindings
+
+The standalone [`asset-io-c`](asset-io-c/README.md) package provides a checked-in C
+header and shared/static libraries for C++, Python and Swift applications, with
+memory/read-at parsing, structure inspection, metadata updates and tagged streaming
+output. It supports minimal, JPEG/PNG-default and all-formats builds independently
+of this Rust crate. It does not define a dynamically loaded handler/plugin ABI.
 
 ## License
 
