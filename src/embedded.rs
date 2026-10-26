@@ -4,7 +4,10 @@
 
 //! Opt-in discovery and scanning of embedded files without copying their data.
 
-use crate::{ByteRange, Entity, Error, HandlerRegistry, ReadSeek, Result, SegmentKind, Structure};
+use crate::{
+    ByteRange, Encoding, Error, HandlerRegistry, Item, ItemKind, ReadSeek, Result, Structure,
+    TransferEncoding, DETECT_LEN,
+};
 use std::io::{self, Read, Seek, SeekFrom};
 
 /// Resource budgets for an embedded scan. Exceeding a budget returns an error,
@@ -36,8 +39,9 @@ impl Default for ScanLimits {
 /// source. No embedded image data is retained in memory.
 #[derive(Debug)]
 pub struct EmbeddedAsset {
-    /// The containing structure's entity, including its label and declared type.
-    pub entity: Entity,
+    /// The containing structure's item, including its declared media type, URI
+    /// and native identifiers.
+    pub item: Item,
     /// Index of the parent in the scan result, or `None` for a root child.
     pub parent: Option<usize>,
     /// Immediate children have depth 1.
@@ -134,24 +138,35 @@ impl<R: Read + Seek + ?Sized> Seek for EmbeddedReader<'_, R> {
 }
 
 impl Structure {
-    /// Embedded files and container-level thumbnails in declaration order.
-    ///
-    /// Handlers report self-contained files as [`SegmentKind::Embedded`].
-    /// HEIF reports JPEG, MIME and URI-typed items, preserving a URI as the
-    /// entity label. A URI is an identifier only: it is never fetched.
-    /// Coded HEIF thumbnails are included but cannot be parsed as standalone
-    /// files. EXIF-internal thumbnails and MPF subassets are separate APIs.
-    pub fn embedded_assets(&self) -> impl Iterator<Item = &Entity> {
-        self.entity_list().filter_map(|(kind, entity)| {
-            matches!(kind, SegmentKind::Embedded | SegmentKind::Thumbnail).then_some(entity)
-        })
+    /// Embedded files ([`ItemKind::EmbeddedAsset`] items) in declaration order:
+    /// items the format declares to be files of a media type, such as HEIF `jpeg`
+    /// items and `mime` items. HEIF `uri ` items, coded thumbnails and other opaque
+    /// items are [`ItemKind::Other`] and not listed here, though
+    /// [`scan_embedded`](Self::scan_embedded) finds those that turn out to be
+    /// files. EXIF-internal thumbnails and MPF sub-assets are separate APIs.
+    pub fn embedded_assets(&self) -> impl Iterator<Item = &Item> {
+        self.items_of(ItemKind::EmbeddedAsset)
     }
 
-    /// Recursively scan declared embedded files using `registry`, in depth-first
-    /// order. Ordinary parsing remains shallow. Formats are detected from bytes;
-    /// this does not carve arbitrary image signatures out of opaque payloads.
+    /// Recursively scan embedded files using `registry`, in depth-first order.
+    /// Ordinary parsing remains shallow.
     ///
-    /// Each child's parse error is retained in [`EmbeddedAsset::structure`].
+    /// Every [`embedded asset`](Self::embedded_assets) is reported, with its parse
+    /// error retained in [`EmbeddedAsset::structure`] if it has one. In addition,
+    /// each opaque item ([`ItemKind::Other`] of [`Encoding::Unknown`] content, stored
+    /// as is) is reported if `registry` recognises its first
+    /// [`DETECT_LEN`](crate::DETECT_LEN) bytes; one it does not recognise is skipped
+    /// silently and counts against no limit. Apple's HEIF `uri ` item holding a
+    /// processed JPEG is found this way. A URI is an identifier only: it is never
+    /// fetched. This does not carve file headers out of the middle of payloads.
+    ///
+    /// Items stored with a [transfer encoding](Item::transfer) other than
+    /// [`Identity`](TransferEncoding::Identity) (a compressed HEIF `mime` item) are
+    /// not decoded here: such an embedded asset is reported with
+    /// [`Error::UnsupportedFeature`] as its structure, and its
+    /// [`reader`](EmbeddedAsset::reader) gives the stored bytes; such an opaque
+    /// item is not considered at all.
+    ///
     /// Resource-budget and extent-mapping errors fail the entire scan. External
     /// HEIF references are never followed. No pixel decoding is performed.
     pub fn scan_embedded(
@@ -171,16 +186,27 @@ impl Structure {
         };
         scanner.scan(
             src,
-            self.embedded_assets()
-                .take(limits.max_assets.saturating_add(1))
-                .cloned()
-                .collect(),
+            candidates(self),
             &[ByteRange::new(0, self.total_size())?],
             None,
             1,
         )?;
         Ok(scanner.assets)
     }
+}
+
+/// The items a scan considers, in declaration order: embedded assets, and opaque
+/// items that may turn out to be files.
+fn candidates(s: &Structure) -> Vec<Item> {
+    s.items()
+        .filter(|e| {
+            e.kind() == ItemKind::EmbeddedAsset
+                || (e.kind() == ItemKind::Other
+                    && e.encoding() == Encoding::Unknown
+                    && *e.transfer() == TransferEncoding::Identity)
+        })
+        .cloned()
+        .collect()
 }
 
 struct Scanner<'a> {
@@ -191,15 +217,34 @@ struct Scanner<'a> {
 }
 
 impl Scanner<'_> {
+    /// Whether the registry recognises the start of the bytes at `ranges`.
+    fn detected(&self, src: &mut dyn ReadSeek, ranges: &[ByteRange]) -> Result<bool> {
+        let mut reader = EmbeddedReader::new(src, ranges)?;
+        let mut head = [0u8; DETECT_LEN];
+        let mut n = 0;
+        while n < head.len() {
+            let k = reader.read(&mut head[n..])?;
+            if k == 0 {
+                break;
+            }
+            n += k;
+        }
+        Ok(self.registry.detect(&head[..n]).is_some())
+    }
+
     fn scan(
         &mut self,
         src: &mut dyn ReadSeek,
-        entities: Vec<Entity>,
+        items: Vec<Item>,
         parent_ranges: &[ByteRange],
         parent: Option<usize>,
         depth: usize,
     ) -> Result<()> {
-        for entity in entities {
+        for item in items {
+            let ranges = map_ranges(parent_ranges, &item)?;
+            if item.kind() != ItemKind::EmbeddedAsset && !self.detected(src, &ranges)? {
+                continue;
+            }
             if depth > self.limits.max_depth {
                 return Err(Error::LimitExceeded {
                     what: "embedded depth",
@@ -214,32 +259,25 @@ impl Scanner<'_> {
             }
             self.bytes = self
                 .bytes
-                .checked_add(entity.len())
+                .checked_add(item.len())
                 .filter(|&n| n <= self.limits.max_total_bytes)
                 .ok_or(Error::LimitExceeded {
                     what: "embedded bytes",
                     limit: self.limits.max_total_bytes,
                 })?;
-            let ranges = map_ranges(parent_ranges, &entity)?;
-            let structure = self
-                .registry
-                .parse_detect(&mut EmbeddedReader::new(src, &ranges)?);
+            let structure = if *item.transfer() == TransferEncoding::Identity {
+                self.registry
+                    .parse_detect(&mut EmbeddedReader::new(src, &ranges)?)
+            } else {
+                Err(Error::UnsupportedFeature("transfer-encoded embedded asset"))
+            };
             let children = match &structure {
-                Ok(s) => s
-                    .embedded_assets()
-                    .take(
-                        self.limits
-                            .max_assets
-                            .saturating_sub(self.assets.len())
-                            .saturating_add(1),
-                    )
-                    .cloned()
-                    .collect(),
+                Ok(s) => candidates(s),
                 Err(_) => Vec::new(),
             };
             let index = self.assets.len();
             self.assets.push(EmbeddedAsset {
-                entity,
+                item,
                 parent,
                 depth,
                 structure,
@@ -251,9 +289,9 @@ impl Scanner<'_> {
     }
 }
 
-fn map_ranges(parent: &[ByteRange], entity: &Entity) -> Result<Vec<ByteRange>> {
+fn map_ranges(parent: &[ByteRange], item: &Item) -> Result<Vec<ByteRange>> {
     let mut out = Vec::new();
-    for part in entity.parts() {
+    for part in item.extents() {
         let mut offset = part.range().offset();
         let mut left = part.range().len();
         for range in parent {

@@ -91,26 +91,32 @@ fn roundtrip_and_geometry() {
         assert_eq!(bytes(xmp.0), b"<xmp/>");
         let j = owned(asset_io_metadata_bytes(b.0, 2));
         assert_eq!(bytes(j.0), store);
-        for (i, e) in inspect(b.0)["entities"]
-            .as_array()
-            .unwrap()
+        let snapshot = inspect(b.0);
+        assert_eq!(snapshot["schema"], 1);
+        let segments = snapshot["segments"].as_array().unwrap();
+        assert!(segments
             .iter()
-            .enumerate()
-        {
-            let raw = owned(asset_io_entity_bytes(b.0, i, 0));
+            .all(|g| g.get("range").is_some() && g.get("extent").is_none()));
+        assert!(segments.iter().any(|g| g["kind"] == "metadata"));
+        for (i, e) in snapshot["items"].as_array().unwrap().iter().enumerate() {
+            let raw = owned(asset_io_item_bytes(b.0, i, 0));
             assert!(!bytes(raw.0).is_empty());
+            assert_eq!(e["category"], "metadata");
+            assert!(!e["extents"].as_array().unwrap().is_empty());
+            assert!(e["relations"].as_array().unwrap().is_empty());
+            assert!(e["transfer"]["type"].is_string());
             if e["kind"] == "jumbf" {
-                let ty = owned(asset_io_entity_jumbf_type(b.0, i));
+                assert_eq!(e["encoding"], "jumbf");
+                let ty = owned(asset_io_item_jumbf_type(b.0, i));
                 assert_eq!(bytes(ty.0), vec![1; 16]);
+            } else {
+                assert_eq!((&e["kind"], &e["encoding"]), (&"xmp".into(), &"xml".into()));
             }
         }
         assert_eq!(asset_io_updates_remove_all(u.0), 0);
         let stripped = owned(asset_io_write_memory(b.0, u.0));
         let stripped = parse(&r, &bytes(stripped.0));
-        assert!(inspect(stripped.0)["entities"]
-            .as_array()
-            .unwrap()
-            .is_empty());
+        assert!(inspect(stripped.0)["items"].as_array().unwrap().is_empty());
     }
 }
 
@@ -159,7 +165,7 @@ fn errors_handles_features_and_lifetimes() {
         assert!(asset_io_read_range(a.0, 0, input.len() as u64 + 1).is_null());
         assert!(asset_io_read_range(a.0, u64::MAX, 1).is_null());
         let s = owned(asset_io_asset_structure(a.0));
-        assert!(asset_io_entity_bytes(a.0, usize::MAX, 1).is_null());
+        assert!(asset_io_item_bytes(a.0, usize::MAX, 1).is_null());
         assert!(asset_io_metadata_bytes(a.0, 1).is_null());
         assert!(error().starts_with("NotFound:"));
         drop(a);
@@ -362,7 +368,7 @@ fn typed_jumbf_scoping() {
     asset_io_updates_metadata(u.0, 2, 1, second.as_ptr(), second.len());
     let b = owned(asset_io_write_memory(a.0, u.0));
     let a = parse(&r, &bytes(b.0));
-    assert_eq!(inspect(a.0)["entities"].as_array().unwrap().len(), 2);
+    assert_eq!(inspect(a.0)["items"].as_array().unwrap().len(), 2);
     assert!(asset_io_metadata_bytes(a.0, 2).is_null());
     assert!(error().starts_with("Ambiguous:"));
     let ty = [1u8; 16];
@@ -371,4 +377,39 @@ fn typed_jumbf_scoping() {
     let a = parse(&r, &bytes(b.0));
     let store = owned(asset_io_metadata_bytes(a.0, 2));
     assert_eq!(bytes(store.0), second);
+}
+
+#[cfg(feature = "svg")]
+#[test]
+fn item_bytes_are_stored_or_content() {
+    let r = registry();
+    let format = CString::new("svg").unwrap();
+    let input = include_bytes!("../../tests/fixtures/sample1.svg");
+    let a = owned(asset_io_parse_memory(
+        r.0,
+        format.as_ptr(),
+        input.as_ptr(),
+        input.len(),
+    ));
+    let u = owned(asset_io_updates_new());
+    let store = jumbf(1);
+    assert_eq!(
+        asset_io_updates_metadata(u.0, 2, 1, store.as_ptr(), store.len()),
+        0
+    );
+    let out = owned(asset_io_write_memory(a.0, u.0));
+    let written = bytes(out.0);
+    let b = owned(asset_io_parse_memory(
+        r.0,
+        format.as_ptr(),
+        written.as_ptr(),
+        written.len(),
+    ));
+    let items = inspect(b.0)["items"].as_array().unwrap().clone();
+    let i = items.iter().position(|e| e["kind"] == "jumbf").unwrap();
+    assert_eq!(items[i]["transfer"], serde_json::json!({"type": "base64"}));
+    let stored = owned(asset_io_item_bytes(b.0, i, 0));
+    let content = owned(asset_io_item_bytes(b.0, i, 1));
+    assert_ne!(bytes(stored.0), store, "stored as base64 text");
+    assert_eq!(bytes(content.0), store);
 }

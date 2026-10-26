@@ -14,7 +14,7 @@
 //! RIFF handler on the real files in tests/fixtures.
 #![cfg(feature = "riff")]
 
-use asset_io::{HandlerRegistry, NullSink, SegmentKind, Updates};
+use asset_io::{HandlerRegistry, ItemKind, NullSink, Updates};
 use std::io::Cursor;
 
 const FILES: &[&str] = &["tests/fixtures/sample1.webp", "tests/fixtures/sample1.wav"];
@@ -58,12 +58,12 @@ fn real_files_round_trip_and_take_metadata() {
             .parse_detect(&mut Cursor::new(&out))
             .unwrap();
         for (kind, want) in [
-            (SegmentKind::Jumbf, vec![0xAB; 1001]),
-            (SegmentKind::Xmp, b"<x:xmpmeta/>".to_vec()),
+            (ItemKind::Jumbf, vec![0xAB; 1001]),
+            (ItemKind::Xmp, b"<x:xmpmeta/>".to_vec()),
         ] {
-            let e = t.require_entity(kind).unwrap();
+            let e = t.require_item(kind).unwrap();
             assert_eq!(
-                t.read_entity(&mut Cursor::new(&out), e).unwrap(),
+                t.read_item(&mut Cursor::new(&out), e).unwrap(),
                 want,
                 "{path}"
             );
@@ -75,8 +75,8 @@ fn real_files_round_trip_and_take_metadata() {
         let b = HandlerRegistry::builtin()
             .parse_detect(&mut Cursor::new(&back))
             .unwrap();
-        assert!(b.entity(SegmentKind::Jumbf).unwrap().is_none(), "{path}");
-        assert!(b.entity(SegmentKind::Xmp).unwrap().is_none(), "{path}");
+        assert!(b.item(ItemKind::Jumbf).unwrap().is_none(), "{path}");
+        assert!(b.item(ItemKind::Xmp).unwrap().is_none(), "{path}");
     }
     assert!(ran > 0, "no RIFF fixtures found");
 }

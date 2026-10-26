@@ -27,7 +27,7 @@
 //! ```
 
 use asset_io::{
-    Action, Chunk, HandlerRegistry, Progress, ReadRequest, Result, SegmentKind, Structure, Task,
+    Action, Chunk, HandlerRegistry, ItemKind, Progress, ReadRequest, Result, Structure, Task,
     Updates,
 };
 use sha2::{Digest, Sha256};
@@ -83,17 +83,15 @@ async fn inspect(path: String) -> Result<String> {
         structure.total_size(),
         structure.segments().len()
     );
-    for kind in [SegmentKind::Xmp, SegmentKind::Jumbf, SegmentKind::Exif] {
-        for e in structure.entities(kind) {
-            // The parts of an entity are plain byte ranges; read them however you like.
-            let mut bytes = Vec::with_capacity(e.len() as usize);
-            for part in e.parts() {
-                let r = part.range();
-                bytes.extend(read_range(&mut file, r.offset(), r.len()).await?);
-            }
-            let label = e.label().map(|l| format!(" [{l}]")).unwrap_or_default();
-            out += &format!("  {kind}{label}: {} bytes\n", bytes.len());
+    for e in structure.items() {
+        // The extents of an item are plain byte ranges; read them however you like.
+        let mut bytes = Vec::with_capacity(e.len() as usize);
+        for extent in e.extents() {
+            let r = extent.range();
+            bytes.extend(read_range(&mut file, r.offset(), r.len()).await?);
         }
+        let label = e.label().map(|l| format!(" [{l}]")).unwrap_or_default();
+        out += &format!("  {}{label}: {} bytes\n", e.kind(), bytes.len());
     }
     Ok(out)
 }
@@ -147,10 +145,10 @@ async fn edit(input: String, output: String, xmp: Vec<u8>) -> Result<(Structure,
 
     // The layout of what was written is known without parsing it again.
     let written = plan.into_structure();
-    let xmp_entities = written.entities(SegmentKind::Xmp).count();
+    let xmp_items = written.items_of(ItemKind::Xmp).count();
     let total_elapsed = started.elapsed();
     println!(
-        "  wrote {} bytes, {xmp_entities} XMP packet(s)",
+        "  wrote {} bytes, {xmp_items} XMP packet(s)",
         written.total_size()
     );
     println!(

@@ -14,13 +14,19 @@
 //! PNG on the structure model.
 //!
 //! Each chunk is one segment: `length(4) type(4) [iTXt prefix]` is the header,
-//! the chunk data is the payload, and the CRC is the trailer.
+//! the chunk data is the payload, and the CRC is the trailer. The `caBX` chunk is
+//! an [`ItemKind::Jumbf`] item, `eXIf` an [`ItemKind::Exif`] item and an XMP `iTXt`
+//! chunk an [`ItemKind::Xmp`] item, each in a [`Metadata`](SegmentKind::Metadata)
+//! segment; `IDAT` chunks are [`MediaData`](SegmentKind::MediaData). A compressed
+//! XMP `iTXt` (method 0) is an XMP item whose bytes are the compressed text, with a
+//! [`Zlib`](TransferEncoding::Zlib) transfer encoding. New XMP is written
+//! uncompressed.
 
 use crate::plan::WritePlan;
 use crate::{
-    BoxFuture, ContainerHandler, Crc32, Error, Existing, FormatSpec, Io, MetadataSlot, Name,
-    PlanBuilder, ReadWriteSeek, Result, Segment, SegmentId, SegmentKind, Structure,
-    StructureBuilder, Updates,
+    BoxFuture, ContainerHandler, Crc32, Error, Existing, FormatSpec, Io, ItemInfo, ItemKind,
+    MetadataSlot, Name, PlanBuilder, ReadWriteSeek, Result, Segment, SegmentId, SegmentKind,
+    Structure, StructureBuilder, TransferEncoding, Updates,
 };
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::sync::Arc;
@@ -47,18 +53,23 @@ const PEEK: usize = 256;
 
 /// Length of the iTXt prefix if this chunk's data begins an uncompressed XMP
 /// iTXt; `None` otherwise.
-fn xmp_prefix_len(buf: &[u8]) -> Option<usize> {
+fn xmp_prefix_len(buf: &[u8]) -> Option<(usize, TransferEncoding)> {
     if buf.len() < XMP_KEYWORD.len() + 2 || &buf[..XMP_KEYWORD.len()] != XMP_KEYWORD {
         return None;
     }
     let mut i = XMP_KEYWORD.len();
-    if buf[i] != 0 {
-        return None; // compressed: not a plain XMP packet
-    }
-    i += 2; // compression flag + method
+    // Compression flag and method: 0 is plain text, 1 with method 0 is zlib.
+    let transfer = match (buf[i], buf[i + 1]) {
+        (0, _) => TransferEncoding::Identity,
+        (1, 0) => TransferEncoding::Zlib {
+            png_predictor_columns: None,
+        },
+        _ => return None,
+    };
+    i += 2;
     i += buf[i..].iter().position(|&b| b == 0)? + 1; // language tag
     i += buf[i..].iter().position(|&b| b == 0)? + 1; // translated keyword
-    Some(i)
+    Some((i, transfer))
 }
 
 /// The PNG container handler.
@@ -101,10 +112,10 @@ impl ContainerHandler for PngHandler {
         Box::pin(async move { plan(src_structure, updates) })
     }
 
-    fn compose(&self, kind: SegmentKind, data: &[u8]) -> Result<Vec<u8>> {
+    fn compose(&self, kind: ItemKind, data: &[u8]) -> Result<Vec<u8>> {
         let op = match kind {
-            SegmentKind::Jumbf => new_chunk(kind, CABX, &[], data)?,
-            SegmentKind::Xmp => new_chunk(kind, ITXT, XMP_ITXT_PREFIX, data)?,
+            ItemKind::Jumbf => new_chunk(kind, CABX, &[], data)?,
+            ItemKind::Xmp => new_chunk(kind, ITXT, XMP_ITXT_PREFIX, data)?,
             _ => return Err(Error::UnsupportedFormat),
         };
         let Op::New {
@@ -150,8 +161,8 @@ async fn parse_with(handler: Arc<dyn ContainerHandler>, mut io: Io) -> Result<St
     }
 
     let mut b = StructureBuilder::new(handler, "image/png", total);
-    // Named PNGh so a hasher listing every box sees the signature as the first one.
-    b.push_span(SegmentKind::Header, Name::FourCC(*b"PNGh"), 8, 0, 0)?;
+    // Named PNGh so a hasher listing every box sees the preamble as the first one.
+    b.push_span(SegmentKind::Preamble, Name::FourCC(*b"PNGh"), 8, 0, 0)?;
 
     let mut offset = 8u64;
     let mut found_iend = false;
@@ -179,24 +190,42 @@ async fn parse_with(handler: Arc<dyn ContainerHandler>, mut io: Io) -> Result<St
         }
 
         let mut prefix = 0u64;
-        let kind = match ty {
-            IDAT => SegmentKind::ImageData,
-            CABX => SegmentKind::Jumbf,
-            EXIF => SegmentKind::Exif,
+        let mut transfer = TransferEncoding::Identity;
+        let item = match ty {
+            CABX => Some(ItemKind::Jumbf),
+            EXIF => Some(ItemKind::Exif),
             ITXT => {
                 let n = len.min(PEEK as u64) as usize;
-                match xmp_prefix_len(r.take(n).await?) {
-                    Some(p) => {
-                        prefix = p as u64;
-                        SegmentKind::Xmp
-                    }
-                    None => SegmentKind::Other,
-                }
+                xmp_prefix_len(r.take(n).await?).map(|(p, t)| {
+                    prefix = p as u64;
+                    transfer = t;
+                    ItemKind::Xmp
+                })
             }
-            _ => SegmentKind::Other,
+            _ => None,
         };
 
-        b.push_item(kind, Name::FourCC(ty), 8 + prefix as u32, len - prefix, 4)?;
+        let (name, header_len, payload_len) = (Name::FourCC(ty), 8 + prefix as u32, len - prefix);
+        match item {
+            Some(kind) => {
+                b.push_item(
+                    SegmentKind::Metadata,
+                    name,
+                    header_len,
+                    payload_len,
+                    4,
+                    item_info(kind).transfer(transfer),
+                )?;
+            }
+            None => {
+                let kind = if ty == IDAT {
+                    SegmentKind::MediaData
+                } else {
+                    SegmentKind::Other
+                };
+                b.push_span(kind, name, header_len, payload_len, 4)?;
+            }
+        }
 
         offset += chunk_len;
         found_iend = ty == IEND;
@@ -208,13 +237,22 @@ async fn parse_with(handler: Arc<dyn ContainerHandler>, mut io: Io) -> Result<St
     b.finish()
 }
 
+/// What a PNG metadata item is.
+fn item_info(kind: ItemKind) -> ItemInfo {
+    match kind {
+        ItemKind::Xmp => ItemInfo::xmp(),
+        ItemKind::Jumbf => ItemInfo::jumbf(),
+        _ => ItemInfo::exif(),
+    }
+}
+
 /// One planned output chunk.
 enum Op<'a> {
     /// Copy a source segment unchanged.
     Copy(SegmentId),
-    /// Emit a new chunk.
+    /// Emit a new chunk holding an item of `kind`.
     New {
-        kind: SegmentKind,
+        kind: ItemKind,
         ty: [u8; 4],
         prefix: &'static [u8],
         payload: &'a [u8],
@@ -222,7 +260,7 @@ enum Op<'a> {
 }
 
 fn new_chunk<'a>(
-    kind: SegmentKind,
+    kind: ItemKind,
     ty: [u8; 4],
     prefix: &'static [u8],
     payload: &'a [u8],
@@ -247,24 +285,21 @@ fn plan<'a>(src: &Structure, updates: &'a Updates) -> Result<WritePlan<'a>> {
     let mut ops: Vec<Op<'a>> = Vec::with_capacity(src.segments().len() + 2);
     let mut xmp = MetadataSlot::new(updates.xmp());
     let mut jumbf = MetadataSlot::new(updates.jumbf());
-    let has_jumbf = src
-        .segments()
-        .iter()
-        .any(|s| s.kind() == SegmentKind::Jumbf);
+    let has_jumbf = src.items_of(ItemKind::Jumbf).next().is_some();
 
     for (i, seg) in src.segments().iter().enumerate() {
         let id = SegmentId::from_index(i)?;
-        match seg.kind() {
-            SegmentKind::Xmp => match xmp.existing() {
+        match src.items_in(id).next().map(|e| e.kind()) {
+            Some(ItemKind::Xmp) => match xmp.existing() {
                 Existing::Keep => ops.push(Op::Copy(id)),
                 Existing::Replace(d) => {
-                    ops.push(new_chunk(SegmentKind::Xmp, ITXT, XMP_ITXT_PREFIX, d)?)
+                    ops.push(new_chunk(ItemKind::Xmp, ITXT, XMP_ITXT_PREFIX, d)?)
                 }
                 _ => {}
             },
-            SegmentKind::Jumbf => match jumbf.existing() {
+            Some(ItemKind::Jumbf) => match jumbf.existing() {
                 Existing::Keep => ops.push(Op::Copy(id)),
-                Existing::Replace(d) => ops.push(new_chunk(SegmentKind::Jumbf, CABX, &[], d)?),
+                Existing::Replace(d) => ops.push(new_chunk(ItemKind::Jumbf, CABX, &[], d)?),
                 _ => {}
             },
             _ => {
@@ -275,7 +310,7 @@ fn plan<'a>(src: &Structure, updates: &'a Updates) -> Result<WritePlan<'a>> {
                 // its position (C2PA 11.2.3: an update must not move the store).
                 if !has_jumbf && seg.name() == Name::FourCC(IDAT) {
                     if let Some(d) = jumbf.pending() {
-                        let op = new_chunk(SegmentKind::Jumbf, CABX, &[], d)?;
+                        let op = new_chunk(ItemKind::Jumbf, CABX, &[], d)?;
                         let after_fctl = matches!(
                             ops.last(),
                             Some(Op::Copy(p)) if src.segments()[p.index()].name() == Name::FourCC(FCTL)
@@ -291,10 +326,10 @@ fn plan<'a>(src: &Structure, updates: &'a Updates) -> Result<WritePlan<'a>> {
                 }
                 if seg.name() == Name::FourCC(IEND) {
                     if let Some(d) = xmp.pending() {
-                        ops.push(new_chunk(SegmentKind::Xmp, ITXT, XMP_ITXT_PREFIX, d)?);
+                        ops.push(new_chunk(ItemKind::Xmp, ITXT, XMP_ITXT_PREFIX, d)?);
                     }
                     if let Some(d) = jumbf.pending() {
-                        ops.push(new_chunk(SegmentKind::Jumbf, CABX, &[], d)?);
+                        ops.push(new_chunk(ItemKind::Jumbf, CABX, &[], d)?);
                     }
                 }
                 ops.push(Op::Copy(id));
@@ -304,8 +339,10 @@ fn plan<'a>(src: &Structure, updates: &'a Updates) -> Result<WritePlan<'a>> {
 
     let mut b = PlanBuilder::new(src);
     for op in ops {
-        let id = match op {
-            Op::Copy(sid) => b.copy_segment(sid)?,
+        match op {
+            Op::Copy(sid) => {
+                b.copy_segment(sid)?;
+            }
             Op::New {
                 kind,
                 ty,
@@ -313,17 +350,18 @@ fn plan<'a>(src: &Structure, updates: &'a Updates) -> Result<WritePlan<'a>> {
                 payload,
             } => {
                 let (hdr, n) = chunk_header(&ty, prefix, payload.len());
-                b.put_segment(
-                    kind,
+                let id = b.put_segment(
+                    SegmentKind::Metadata,
                     Name::FourCC(ty),
                     hdr[..n].to_vec(),
                     payload,
                     chunk_crc(&ty, prefix, payload).to_vec(),
-                )?
+                )?;
+                b.item(item_info(kind), &[id])?;
             }
-        };
-        b.entity_for(id)?;
+        }
     }
+    b.carry_items(|_| true);
     b.finish()
 }
 
@@ -356,12 +394,12 @@ pub(crate) fn fix_crc<W: Read + Write + Seek>(out: &mut W, seg: &Segment) -> Res
     let trailer = seg.trailer();
     if trailer.len() != 4 || seg.header().len() < 8 {
         return Err(Error::invalid_segment(
-            seg.extent().offset(),
+            seg.range().offset(),
             "not a PNG chunk",
         ));
     }
     // CRC covers type + data: everything after the 4-byte length, before the CRC.
-    let start = seg.extent().offset() + 4;
+    let start = seg.range().offset() + 4;
     let mut remaining = trailer.offset() - start;
     out.seek(SeekFrom::Start(start))?;
     let mut crc = Crc32::new();
@@ -410,7 +448,7 @@ mod tests {
             if seg.trailer().len() != 4 {
                 continue;
             }
-            let e = seg.extent();
+            let e = seg.range();
             let body = &bytes[(e.offset() + 4) as usize..seg.trailer().offset() as usize];
             let stored = &bytes[seg.trailer().offset() as usize..e.end() as usize];
             let mut c = Crc32::new();
@@ -530,7 +568,7 @@ mod tests {
         let mut png = sample_png();
         png.extend_from_slice(b"trailing");
         let s = parse(&mut Cursor::new(png.clone())).unwrap();
-        assert_eq!(s.segments().last().unwrap().extent().len(), 8);
+        assert_eq!(s.segments().last().unwrap().range().len(), 8);
     }
 
     #[test]
@@ -599,14 +637,14 @@ mod tests {
         )
         .unwrap();
 
-        let e = dest.require_entity(SegmentKind::Jumbf).unwrap().clone();
+        let e = dest.require_item(ItemKind::Jumbf).unwrap().clone();
         dest.patch(&mut out, &e, b"signed manifest").unwrap();
         let bytes = out.into_inner();
         verify_crcs(&bytes);
 
         let re = parse(&mut Cursor::new(bytes.clone())).unwrap();
-        let e = re.require_entity(SegmentKind::Jumbf).unwrap();
-        let data = re.read_entity(&mut Cursor::new(bytes), e).unwrap();
+        let e = re.require_item(ItemKind::Jumbf).unwrap();
+        let data = re.read_item(&mut Cursor::new(bytes), e).unwrap();
         assert_eq!(&data[..15], b"signed manifest");
         assert!(data[15..].iter().all(|&b| b == 0));
         assert_eq!(data.len(), 64);
@@ -626,12 +664,12 @@ mod tests {
             &mut crate::NullSink,
         )
         .unwrap();
-        let e = dest.require_entity(SegmentKind::Jumbf).unwrap().clone();
+        let e = dest.require_item(ItemKind::Jumbf).unwrap().clone();
         assert!(dest.patch(&mut out, &e, &[1u8; 9]).is_err());
     }
 
     #[test]
-    fn xmp_round_trip_and_compressed_itxt_is_not_xmp() {
+    fn xmp_round_trip_and_compressed_itxt_is_zlib_xmp() {
         let png = sample_png();
         let s = parse(&mut Cursor::new(png.clone())).unwrap();
         let updates = Updates::new().set_xmp(b"<x/>".to_vec());
@@ -647,18 +685,84 @@ mod tests {
         let bytes = out.into_inner();
         verify_crcs(&bytes);
         let re = parse(&mut Cursor::new(bytes.clone())).unwrap();
-        let e = re.require_entity(SegmentKind::Xmp).unwrap();
-        assert_eq!(re.read_entity(&mut Cursor::new(bytes), e).unwrap(), b"<x/>");
+        let e = re.require_item(ItemKind::Xmp).unwrap();
+        assert_eq!(re.read_item(&mut Cursor::new(bytes), e).unwrap(), b"<x/>");
 
-        // Same keyword but compression flag set: must not be treated as XMP.
-        let mut prefix = XMP_ITXT_PREFIX.to_vec();
-        prefix[18] = 1;
-        let mut data = prefix;
-        data.extend_from_slice(b"zzz");
+        // Same keyword with the compression flag set: XMP stored as zlib, whose
+        // item is the compressed text.
+        let compressed = |method: u8, text: &[u8]| {
+            let mut data = XMP_ITXT_PREFIX.to_vec();
+            data[18] = 1;
+            data[19] = method;
+            data.extend_from_slice(text);
+            let mut p = SIGNATURE.to_vec();
+            p.extend(chunk(b"iTXt", &data));
+            p.extend(chunk(b"IEND", &[]));
+            p
+        };
+        let p = compressed(0, b"zzz");
+        let s = parse(&mut Cursor::new(p.clone())).unwrap();
+        let e = s.require_item(ItemKind::Xmp).unwrap();
+        assert_eq!(
+            *e.transfer(),
+            TransferEncoding::Zlib {
+                png_predictor_columns: None
+            }
+        );
+        assert_eq!(s.read_item(&mut Cursor::new(p.clone()), e).unwrap(), b"zzz");
+        // An unknown compression method is not XMP.
+        let s = parse(&mut Cursor::new(compressed(1, b"zzz"))).unwrap();
+        assert!(s.item(ItemKind::Xmp).unwrap().is_none());
+
+        // Replacing or removing it treats it as any XMP item.
+        for (updates, want) in [
+            (Updates::new().set_xmp(b"<y/>".to_vec()), Some(&b"<y/>"[..])),
+            (Updates::new().remove_xmp(), None),
+        ] {
+            let s = parse(&mut Cursor::new(p.clone())).unwrap();
+            let mut out = Cursor::new(Vec::new());
+            write(
+                &s,
+                &mut Cursor::new(p.clone()),
+                &mut out,
+                &updates,
+                &mut crate::NullSink,
+            )
+            .unwrap();
+            let bytes = out.into_inner();
+            verify_crcs(&bytes);
+            let re = parse(&mut Cursor::new(bytes.clone())).unwrap();
+            assert_eq!(
+                re.items_of(ItemKind::Xmp).count(),
+                usize::from(want.is_some())
+            );
+            if let Some(want) = want {
+                let e = re.require_item(ItemKind::Xmp).unwrap();
+                assert_eq!(*e.transfer(), TransferEncoding::Identity);
+                assert_eq!(re.read_item(&mut Cursor::new(bytes), e).unwrap(), want);
+            }
+        }
+    }
+
+    #[cfg(feature = "flate")]
+    #[test]
+    fn compressed_xmp_reads_as_its_content() {
+        let packet = b"<x:xmpmeta>compressed</x:xmpmeta>";
+        let mut data = XMP_ITXT_PREFIX.to_vec();
+        data[18] = 1;
+        data.extend_from_slice(&crate::transfer::compress::zlib(packet));
         let mut p = SIGNATURE.to_vec();
         p.extend(chunk(b"iTXt", &data));
         p.extend(chunk(b"IEND", &[]));
-        let s = parse(&mut Cursor::new(p)).unwrap();
-        assert!(s.entity(SegmentKind::Xmp).unwrap().is_none());
+        let s = parse(&mut Cursor::new(p.clone())).unwrap();
+        let e = s.require_item(ItemKind::Xmp).unwrap();
+        assert_eq!(
+            s.read_content(&mut Cursor::new(p.clone()), e).unwrap(),
+            packet
+        );
+        assert_eq!(
+            s.xmp(&mut Cursor::new(p)).unwrap().as_deref(),
+            Some(&packet[..])
+        );
     }
 }

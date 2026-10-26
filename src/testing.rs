@@ -35,8 +35,9 @@
 use crate::error::{Error, Result};
 use crate::execute::Action;
 use crate::handler::ContainerHandler;
+use crate::item::ItemKind;
 use crate::plan::{validate, WritePlan};
-use crate::segment::Role;
+use crate::segment::{Role, SegmentKind};
 use crate::sink::{Chunk, Sink};
 use crate::structure::Structure;
 use crate::task::{Progress, Task};
@@ -434,9 +435,9 @@ impl Expect {
         };
         let (xmp, jumbf) = read(out, bytes);
         let (xmp0, jumbf0) = read(src, source);
-        for (what, want, got, before) in [
-            ("XMP", &self.xmp, xmp, xmp0),
-            ("JUMBF", &self.jumbf, jumbf, jumbf0),
+        for (what, kind, want, got, before) in [
+            ("XMP", ItemKind::Xmp, &self.xmp, xmp, xmp0),
+            ("JUMBF", ItemKind::Jumbf, &self.jumbf, jumbf, jumbf0),
         ] {
             match want {
                 Want::Any => {}
@@ -459,14 +460,30 @@ impl Expect {
                     }
                 }
                 Want::Absent => {
-                    if got?.is_some() {
-                        return Err(format!("{what} is still there after it was removed"));
+                    if let Some(got) = got? {
+                        if !carried(out, bytes, kind, &got) {
+                            return Err(format!("{what} is still there after it was removed"));
+                        }
                     }
                 }
             }
         }
         Ok(())
     }
+}
+
+/// Whether `data` is an item of `kind` outside the metadata segments, which
+/// [`Updates`] does not edit: an XMP item that a HEIF file keeps in `mdat` is carried
+/// through a write unchanged.
+fn carried(s: &Structure, bytes: &[u8], kind: ItemKind, data: &[u8]) -> bool {
+    s.items_of(kind).any(|e| {
+        e.extents().all(|x| {
+            s.segment(x.segment())
+                .is_ok_and(|g| g.kind() != SegmentKind::Metadata)
+        }) && s
+            .read_item(&mut Cursor::new(bytes), e)
+            .is_ok_and(|d| d == data)
+    })
 }
 
 /// Everything a structure says, as text, for comparing two of them.
@@ -489,18 +506,13 @@ fn describe(s: &Structure) -> String {
         s.total_size(),
         s.media_type()
     ));
-    // Entities in file order: how a handler declares them is not part of what a
+    // Items in file order: how a handler declares them is not part of what a
     // structure says.
-    let mut entities: Vec<_> = s.entity_list().collect();
-    entities.sort_by_key(|(_, e)| e.parts().next().map(|p| p.range().offset()));
-    for (kind, e) in entities {
-        out.push_str(&format!(
-            "entity {kind:?} {:?} {:?} {:?}",
-            e.label(),
-            e.media_type(),
-            e.jumbf_type()
-        ));
-        for p in e.parts() {
+    let mut items: Vec<_> = s.items().collect();
+    items.sort_by_key(|e| e.extents().next().map(|p| p.range().offset()));
+    for e in items {
+        out.push_str(&format!("item {:?}", e.info()));
+        for p in e.extents() {
             out.push_str(&format!(" {:?}:{:?}", p.segment(), p.range()));
         }
         out.push('\n');
@@ -509,11 +521,11 @@ fn describe(s: &Structure) -> String {
 }
 
 /// The segments follow one another from the first byte to the last, and an
-/// entity's parts lie in their segments.
+/// item's extents lie in their segments.
 fn tiles(s: &Structure, len: u64) -> std::result::Result<(), String> {
     let mut at = 0u64;
     for (i, seg) in s.segments().iter().enumerate() {
-        let e = seg.extent();
+        let e = seg.range();
         if e.offset() != at {
             return Err(format!("segment {i} starts at {}, not {at}", e.offset()));
         }
@@ -525,12 +537,15 @@ fn tiles(s: &Structure, len: u64) -> std::result::Result<(), String> {
             s.total_size()
         ));
     }
-    for (kind, e) in s.entity_list() {
-        for p in e.parts() {
+    for e in s.items() {
+        for p in e.extents() {
             let seg = s.segment(p.segment()).map_err(|e| e.to_string())?;
-            let (r, x) = (p.range(), seg.extent());
+            let (r, x) = (p.range(), seg.range());
             if r.offset() < x.offset() || r.end() > x.end() {
-                return Err(format!("{kind:?} entity has a part outside its segment"));
+                return Err(format!(
+                    "{} item has an extent outside its segment",
+                    e.kind()
+                ));
             }
         }
     }

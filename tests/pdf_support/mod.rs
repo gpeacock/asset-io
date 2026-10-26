@@ -16,7 +16,9 @@
 
 #![allow(dead_code)]
 
-use asset_io::{Error, HandlerRegistry, NullSink, Segment, SegmentKind, Structure, Updates};
+use asset_io::{
+    Error, HandlerRegistry, ItemKind, NullSink, Segment, SegmentKind, Structure, Updates,
+};
 use std::collections::BTreeMap;
 use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 
@@ -73,26 +75,24 @@ impl<R: Read + Write + Seek> Asset<R> {
     /// Overwrite the payload of the `kind` store in this document, in place.
     pub fn update_segment_in_place(
         &mut self,
-        kind: SegmentKind,
+        kind: ItemKind,
         data: Vec<u8>,
     ) -> asset_io::Result<()> {
         patch_kind(&self.structure, &mut self.source, kind, data)
     }
 }
 
-/// Overwrite, in `out`, the payload of the entity of `kind`, which must be the same length.
+/// Overwrite, in `out`, the bytes of the item of `kind`, which must be the same length.
 pub fn patch_kind<W: Read + Write + Seek>(
     structure: &Structure,
     out: &mut W,
-    kind: SegmentKind,
+    kind: ItemKind,
     data: Vec<u8>,
 ) -> asset_io::Result<()> {
-    let entity = structure
-        .require_entity(kind)
-        .map_err(|_| Error::NotFound {
-            what: "metadata entity",
-        })?;
-    structure.patch_exact(out, entity, &data)
+    let item = structure.require_item(kind).map_err(|_| Error::NotFound {
+        what: "metadata item",
+    })?;
+    structure.patch_exact(out, item, &data)
 }
 
 /// What the 0.1 `Structure` called overwriting a store in place.
@@ -100,7 +100,7 @@ pub trait UpdateSegment {
     fn update_segment<W: Read + Write + Seek>(
         &self,
         out: &mut W,
-        kind: SegmentKind,
+        kind: ItemKind,
         data: Vec<u8>,
     ) -> asset_io::Result<()>;
 }
@@ -109,7 +109,7 @@ impl UpdateSegment for Structure {
     fn update_segment<W: Read + Write + Seek>(
         &self,
         out: &mut W,
-        kind: SegmentKind,
+        kind: ItemKind,
         data: Vec<u8>,
     ) -> asset_io::Result<()> {
         patch_kind(self, out, kind, data)
@@ -117,11 +117,11 @@ impl UpdateSegment for Structure {
 }
 
 /// Where the payload of the `kind` store is.
-pub fn payload_range(structure: &Structure, kind: SegmentKind) -> Location {
+pub fn payload_range(structure: &Structure, kind: ItemKind) -> Location {
     let range = structure
-        .require_entity(kind)
+        .require_item(kind)
         .unwrap()
-        .parts()
+        .extents()
         .next()
         .unwrap()
         .range();
@@ -131,30 +131,28 @@ pub fn payload_range(structure: &Structure, kind: SegmentKind) -> Location {
     }
 }
 
-/// The two structures describe the same layout: segments, entities and size.
+/// The two structures describe the same layout: segments, items and size.
 pub fn same_layout(expected: &Structure, actual: &Structure) {
     assert_eq!(expected.total_size(), actual.total_size());
     let layout = |s: &Structure| {
-        let mut entities: Vec<_> = [SegmentKind::Xmp, SegmentKind::Jumbf]
-            .into_iter()
-            .flat_map(|k| {
-                s.entities(k).map(move |e| {
-                    (
-                        k,
-                        e.parts()
-                            .map(|p| (p.segment().index(), p.range()))
-                            .collect::<Vec<_>>(),
-                    )
-                })
+        let mut items: Vec<_> = s
+            .items()
+            .map(|e| {
+                (
+                    e.kind(),
+                    e.extents()
+                        .map(|p| (p.segment().index(), p.range()))
+                        .collect::<Vec<_>>(),
+                )
             })
             .collect();
-        entities.sort_by_key(|(k, parts)| (format!("{k:?}"), parts.first().map(|p| p.1.offset())));
+        items.sort_by_key(|(k, parts)| (format!("{k:?}"), parts.first().map(|p| p.1.offset())));
         (
             s.segments()
                 .iter()
                 .map(|g| format!("{g:?}"))
                 .collect::<Vec<_>>(),
-            format!("{entities:?}"),
+            format!("{items:?}"),
         )
     };
     assert_eq!(layout(expected), layout(actual));
@@ -179,8 +177,8 @@ pub trait SegmentExt {
 impl SegmentExt for Segment {
     fn location(&self) -> Location {
         Location {
-            offset: self.extent().offset(),
-            size: self.extent().len(),
+            offset: self.range().offset(),
+            size: self.range().len(),
         }
     }
 

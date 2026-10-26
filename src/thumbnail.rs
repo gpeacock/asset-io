@@ -14,20 +14,22 @@
 //! Embedded thumbnails, for any container.
 //!
 //! [`Structure::embedded_thumbnail`] works on every container because it does not
-//! look at the format. It uses the entities the container's handler reported:
+//! look at the format. It uses the items the container's handler reported:
 //!
-//! 1. A [`SegmentKind::Thumbnail`] entity: a pre-rendered preview the container
-//!    stores as its own element. Today that is a HEIF `thmb` item, which the BMFF
-//!    handler finds (see `containers::bmff`).
+//! 1. An item with a [`Thumbnail`](RelationKind::Thumbnail) relation: a
+//!    pre-rendered preview the container stores as its own item. Today that is a
+//!    HEIF item that is the source of a `thmb` reference, which the BMFF handler
+//!    finds (see `containers::bmff`).
 //! 2. Otherwise, with the `exif` feature, the JPEG thumbnail in the EXIF data
-//!    (IFD1) of the first [`SegmentKind::Exif`] entity. JPEG, PNG, WebP and
-//!    HEIF/AVIF all report EXIF, and the TIFF parsing lives in the `tiff` module.
+//!    (IFD1) of the first [`ItemKind::Exif`](crate::ItemKind::Exif) item. JPEG,
+//!    PNG, WebP and HEIF/AVIF all report EXIF, and the TIFF parsing lives in the
+//!    `tiff` module.
 //!
 //! So handlers only say where things are; finding the thumbnail inside them is
 //! done here, once.
 
 use crate::error::Result;
-use crate::segment::SegmentKind;
+use crate::item::RelationKind;
 use crate::structure::Structure;
 use std::borrow::Cow;
 use std::io::{Read, Seek};
@@ -85,9 +87,11 @@ impl Thumbnail {
 impl Structure {
     /// The asset's embedded thumbnail, if it has one.
     ///
-    /// A thumbnail the container stores as its own element
-    /// ([`SegmentKind::Thumbnail`], a HEIF `thmb` item) is preferred. Its media type
-    /// is the one the container reports for it (see [`Entity::media_type`](crate::Entity::media_type)):
+    /// An item the container records as a thumbnail (one with a
+    /// [`Thumbnail`](RelationKind::Thumbnail) relation, from a HEIF `thmb`
+    /// reference) is preferred, whatever its [kind](crate::Item::kind). Its media
+    /// type is the one the container reports for it (see
+    /// [`Item::media_type`](crate::Item::media_type)):
     /// `image/jpeg` for a `jpeg` item, the content type of a `mime` item. For a
     /// coded item (`hvc1`, `av01`, ...) it is `None`, and `data` is the coded item,
     /// which needs the
@@ -95,8 +99,13 @@ impl Structure {
     /// with the `exif` feature, the JPEG thumbnail in the EXIF data (IFD1) is
     /// returned.
     pub fn embedded_thumbnail<R: Read + Seek>(&self, src: &mut R) -> Result<Option<Thumbnail>> {
-        if let Some(e) = self.entities(SegmentKind::Thumbnail).next() {
-            let mut t = Thumbnail::new(self.read_entity(src, e)?);
+        let thumb = self.items().find(|e| {
+            e.relations()
+                .iter()
+                .any(|r| r.kind() == RelationKind::Thumbnail)
+        });
+        if let Some(e) = thumb {
+            let mut t = Thumbnail::new(self.read_item(src, e)?);
             if let Some(m) = e.media_type() {
                 t = t.with_media_type(m.to_owned());
             }

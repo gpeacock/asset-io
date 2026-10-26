@@ -25,7 +25,7 @@
 //! - Tags: tag ID (2), type (2), count (4), value/offset (4)
 
 use crate::error::Result;
-use crate::segment::SegmentKind;
+use crate::item::ItemKind;
 use crate::structure::Structure;
 use crate::thumbnail::Thumbnail;
 use std::io::{Cursor, Read, Seek, SeekFrom};
@@ -498,25 +498,25 @@ fn tiff_data(data: &[u8]) -> &[u8] {
     data.strip_prefix(b"Exif\0\0").unwrap_or(data)
 }
 
-/// EXIF access for any container that reports [`SegmentKind::Exif`] entities
-/// (JPEG `APP1`, PNG `eXIf`). The entity payload starts at the TIFF header.
+/// EXIF access for any container that reports [`ItemKind::Exif`] items
+/// (JPEG `APP1`, PNG `eXIf`, HEIF `Exif`). The item starts at the TIFF header.
 impl Structure {
-    /// Basic EXIF fields from the first EXIF entity, or `None` if there is none or
+    /// Basic EXIF fields from the first EXIF item, or `None` if there is none or
     /// it is not valid TIFF.
     pub fn exif_info<R: Read + Seek>(&self, src: &mut R) -> Result<Option<ExifInfo>> {
-        match self.entities(SegmentKind::Exif).next() {
-            Some(e) => parse_exif_info(tiff_data(&self.read_entity(src, e)?)),
+        match self.items_of(ItemKind::Exif).next() {
+            Some(e) => parse_exif_info(tiff_data(&self.read_item(src, e)?)),
             None => Ok(None),
         }
     }
 
-    /// The JPEG thumbnail embedded in the first EXIF entity, if present and
+    /// The JPEG thumbnail embedded in the first EXIF item, if present and
     /// entirely inside it.
     pub(crate) fn exif_thumbnail<R: Read + Seek>(&self, src: &mut R) -> Result<Option<Thumbnail>> {
-        let Some(e) = self.entities(SegmentKind::Exif).next() else {
+        let Some(e) = self.items_of(ItemKind::Exif).next() else {
             return Ok(None);
         };
-        let data = self.read_entity(src, e)?;
+        let data = self.read_item(src, e)?;
         let exif = tiff_data(&data);
         let Some(info) = parse_thumbnail_info(exif)? else {
             return Ok(None);

@@ -22,18 +22,18 @@ use std::ops::Deref;
 
 /// A read-only memory map of a file.
 ///
-/// Pair it with [`Structure::slice`], [`Structure::slice_entity`] and
+/// Pair it with [`Structure::slice`], [`Structure::slice_item`] and
 /// [`Structure::read_slice`] to read without copying.
 ///
 /// ```no_run
-/// # use asset_io::{HandlerRegistry, MappedFile, SegmentKind};
+/// # use asset_io::{HandlerRegistry, ItemKind, MappedFile};
 /// # fn main() -> asset_io::Result<()> {
 /// let file = std::fs::File::open("image.jpg")?;
 /// // SAFETY: the file is not modified or truncated while mapped.
 /// let map = unsafe { MappedFile::map(&file)? };
 /// let structure = map.parse_detect(&HandlerRegistry::builtin())?;
-/// if let Some(xmp) = structure.entity(SegmentKind::Xmp)? {
-///     let bytes = structure.slice_entity(&map, xmp)?; // borrowed from the map
+/// if let Some(xmp) = structure.item(ItemKind::Xmp)? {
+///     let bytes = structure.slice_item(&map, xmp)?; // borrowed from the map
 ///     println!("{} bytes of XMP", bytes.len());
 /// }
 /// # Ok(())

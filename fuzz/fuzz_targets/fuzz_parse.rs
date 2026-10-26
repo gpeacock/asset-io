@@ -13,7 +13,7 @@
 
 #![no_main]
 
-use asset_io::{HandlerRegistry, SegmentKind};
+use asset_io::HandlerRegistry;
 use libfuzzer_sys::fuzz_target;
 use std::io::Cursor;
 
@@ -31,10 +31,8 @@ fuzz_target!(|data: &[u8]| {
     };
 
     // Read what the structure describes.
-    for kind in [SegmentKind::Xmp, SegmentKind::Jumbf, SegmentKind::Exif] {
-        for e in structure.entities(kind) {
-            let _ = structure.read_entity(&mut src, e);
-        }
+    for e in structure.items() {
+        let _ = structure.read_item(&mut src, e);
     }
     // Hierarchical traversal.
     let _ = structure.walk(&mut src, |_| Ok(()));

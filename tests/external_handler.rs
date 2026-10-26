@@ -19,8 +19,8 @@ use asset_io::plan::validate;
 use asset_io::testing::Conformance;
 use asset_io::{
     BoxFuture, ByteRange, Chunk, ContainerHandler, Error, Existing, FormatSpec, HandlerRegistry,
-    Io, MetadataSlot, Name, PlanBuilder, Result, Role, SegmentId, SegmentKind, Step, Structure,
-    StructureBuilder, Updates, WritePlan,
+    Io, ItemInfo, ItemKind, MetadataSlot, Name, PlanBuilder, Result, Role, SegmentId, SegmentKind,
+    Step, Structure, StructureBuilder, Updates, WritePlan,
 };
 use std::io::Cursor;
 use std::sync::Arc;
@@ -65,9 +65,9 @@ fn write_toy_plan<'a>(src: &Structure, updates: &'a Updates) -> Result<WritePlan
     // Describe the output one segment at a time, in order.
     let mut b = PlanBuilder::new(src);
     let mut xmp = MetadataSlot::new(updates.xmp());
-    for (i, seg) in src.segments().iter().enumerate() {
+    for i in 0..src.segments().len() {
         let id = SegmentId::from_index(i)?;
-        if seg.kind() != SegmentKind::Xmp {
+        if !src.items_in(id).any(|e| e.kind() == ItemKind::Xmp) {
             b.copy_segment(id)?;
             continue;
         }
@@ -83,15 +83,21 @@ fn write_toy_plan<'a>(src: &Structure, updates: &'a Updates) -> Result<WritePlan
     if let Some(d) = xmp.pending() {
         new_xmp(&mut b, d)?;
     }
-    // The entities of the segments that were copied follow them.
-    b.carry_entities(|_| true);
+    // The items of the segments that were copied follow them.
+    b.carry_items(|_| true);
     b.finish()
 }
 
 fn new_xmp<'a>(b: &mut PlanBuilder<'_, 'a>, d: &'a [u8]) -> Result<()> {
     let header = vec![b'X', d.len() as u8];
-    let id = b.put_segment(SegmentKind::Xmp, Name::Id(b'X' as u64), header, d, &[][..])?;
-    b.entity_for(id)
+    let id = b.put_segment(
+        SegmentKind::Metadata,
+        Name::Id(b'X' as u64),
+        header,
+        d,
+        &[][..],
+    )?;
+    b.item(ItemInfo::xmp(), &[id])
 }
 
 fn parse_toy(handler: Arc<dyn ContainerHandler>, data: &[u8]) -> Result<Structure> {
@@ -99,7 +105,7 @@ fn parse_toy(handler: Arc<dyn ContainerHandler>, data: &[u8]) -> Result<Structur
         return Err(Error::InvalidFormat("not a toy".into()));
     }
     let mut b = StructureBuilder::new(handler, "application/x-toy", data.len() as u64);
-    b.push_span(SegmentKind::Header, Name::FourCC(*b"TOY!"), 4, 0, 0)?;
+    b.push_span(SegmentKind::Preamble, Name::FourCC(*b"TOY!"), 4, 0, 0)?;
     let mut at = 4usize;
     while at < data.len() {
         let (kind, len) = match data[at..] {
@@ -110,14 +116,14 @@ fn parse_toy(handler: Arc<dyn ContainerHandler>, data: &[u8]) -> Result<Structur
             return Err(Error::InvalidFormat("record overruns".into()));
         }
         let seg_kind = if kind == b'X' {
-            SegmentKind::Xmp
+            SegmentKind::Metadata
         } else {
             SegmentKind::Other
         };
         // Named by kind, not position, so a record keeps its name when others move.
         let id = b.push_span(seg_kind, Name::Id(kind as u64), 2, len as u64, 0)?;
         if kind == b'X' {
-            b.entity_of_segments(SegmentKind::Xmp, &[id])?;
+            b.item_of_segments(ItemInfo::xmp(), &[id])?;
         }
         at += 2 + len;
     }

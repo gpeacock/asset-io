@@ -30,13 +30,15 @@ const PRIVATE_CORE: &[&str] = &[
 const HANDLERS: &[&str] = &["jpeg", "png", "bmff", "riff", "svg", "pdf"];
 
 /// External crates a handler owns; no other handler may use them.
-const OWNED_DEPS: &[(&str, &str)] = &[
-    ("jpeg", "md5"),
-    ("jpeg", "memchr"),
-    ("svg", "quick_xml"),
-    ("pdf", "flate2"),
+const OWNED_DEPS: &[(&str, &str)] = &[("jpeg", "md5"), ("jpeg", "memchr"), ("svg", "quick_xml")];
+const ALL_DEPS: &[&str] = &[
+    "md5",
+    "memchr",
+    "quick_xml",
+    "flate2",
+    "brotli_decompressor",
+    "memmap2",
 ];
-const ALL_DEPS: &[&str] = &["md5", "memchr", "quick_xml", "flate2", "memmap2"];
 
 fn sources(dir: &Path, out: &mut Vec<PathBuf>) {
     for entry in fs::read_dir(dir).unwrap() {

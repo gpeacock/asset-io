@@ -118,11 +118,13 @@ struct AssetIoBuffer *asset_io_read_range(struct AssetIoAsset *asset,
 int32_t asset_io_read_stream(struct AssetIoAsset *asset, AssetIoChunk chunk, void *context);
 
 /**
- * Extract entity by declaration-order index. decoded=0 stored parts; 1 container-decoded.
+ * Extract an item by declaration-order index. decoded=0: the stored bytes (extents
+ * concatenated, what a hash covers); 1: the content, with the item's transfer
+ * encoding (base64, Flate) undone.
  */
-struct AssetIoBuffer *asset_io_entity_bytes(struct AssetIoAsset *asset,
-                                            size_t index,
-                                            uint32_t decoded);
+struct AssetIoBuffer *asset_io_item_bytes(struct AssetIoAsset *asset,
+                                          size_t index,
+                                          uint32_t decoded);
 
 /**
  * Extract XMP (kind=1) or logical JUMBF store (kind=2).
@@ -131,9 +133,9 @@ struct AssetIoBuffer *asset_io_entity_bytes(struct AssetIoAsset *asset,
 struct AssetIoBuffer *asset_io_metadata_bytes(struct AssetIoAsset *asset, uint32_t kind);
 
 /**
- * Read a JUMBF entity's type as 16 bytes; error if not known/a superbox.
+ * Read a JUMBF item's type as 16 bytes; error if not known/a superbox.
  */
-struct AssetIoBuffer *asset_io_entity_jumbf_type(struct AssetIoAsset *asset, size_t index);
+struct AssetIoBuffer *asset_io_item_jumbf_type(struct AssetIoAsset *asset, size_t index);
 
 struct AssetIoUpdates *asset_io_updates_new(void);
 

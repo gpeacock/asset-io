@@ -15,7 +15,7 @@
 //! writing, the store as a reader sees it, and media types by format string.
 #![cfg(all(feature = "jpeg", feature = "png", feature = "bmff", feature = "riff"))]
 
-use asset_io::{HandlerRegistry, NullSink, SegmentKind, Structure, Updates};
+use asset_io::{HandlerRegistry, ItemInfo, ItemKind, NullSink, Structure, Updates};
 use std::fs;
 use std::io::Cursor;
 use std::path::PathBuf;
@@ -62,29 +62,25 @@ fn store(uuid: u8, children: &[&[u8]]) -> Vec<u8> {
     boxed(b"jumb", &body)
 }
 
-/// An entity as a caller observes it: kind, label, and its parts as
+/// An item as a caller observes it: what it is, and its extents as
 /// (segment index, offset, length).
-type EntityShape = (SegmentKind, Option<String>, Vec<(usize, u64, u64)>);
+type ItemShape = (ItemInfo, Vec<(usize, u64, u64)>);
 
 /// Everything about a structure a caller can observe.
-fn shape(s: &Structure) -> (u64, Vec<asset_io::Segment>, Vec<EntityShape>) {
-    let mut entities = Vec::new();
-    for kind in [
-        SegmentKind::Jumbf,
-        SegmentKind::Xmp,
-        SegmentKind::Exif,
-        SegmentKind::Thumbnail,
-        SegmentKind::Other,
-    ] {
-        for e in s.entities(kind) {
-            let parts = e
-                .parts()
+fn shape(s: &Structure) -> (u64, Vec<asset_io::Segment>, Vec<ItemShape>) {
+    let mut items: Vec<ItemShape> = s
+        .items()
+        .map(|e| {
+            let extents = e
+                .extents()
                 .map(|p| (p.segment().index(), p.range().offset(), p.range().len()))
                 .collect();
-            entities.push((kind, e.label().map(str::to_owned), parts));
-        }
-    }
-    (s.total_size(), s.segments().to_vec(), entities)
+            (e.info().clone(), extents)
+        })
+        .collect();
+    // Declaration order is the handler's business; file order is what a caller sees.
+    items.sort_by_key(|(_, extents)| extents.first().copied());
+    (s.total_size(), s.segments().to_vec(), items)
 }
 
 #[test]
@@ -139,13 +135,13 @@ fn plan_places_a_manifest_that_is_not_there_yet() {
         let Ok(s) = reg.parse_detect(&mut Cursor::new(&bytes)) else {
             continue;
         };
-        if s.entity(SegmentKind::Jumbf).ok().flatten().is_some() {
+        if s.item(ItemKind::Jumbf).ok().flatten().is_some() {
             continue;
         }
         let Ok(dest) = s.plan(&mut Cursor::new(&bytes), &u) else {
             continue;
         };
-        let e = dest.require_entity(SegmentKind::Jumbf).unwrap();
+        let e = dest.require_item(ItemKind::Jumbf).unwrap();
         assert_eq!(e.len(), store(1, &[b"one"]).len() as u64, "{name}");
         assert!(dest.total_size() > s.total_size(), "{name}");
         ran += 1;
@@ -202,24 +198,24 @@ fn a_reader_sees_original_and_update_as_one_store() {
     let b = b.into_inner();
     let s2 = reg.parse_detect(&mut Cursor::new(&b)).unwrap();
     // Two stores are in the file, and a reader sees them as the one that was set.
-    assert_eq!(s2.entities(SegmentKind::Jumbf).count(), 2);
+    assert_eq!(s2.items_of(ItemKind::Jumbf).count(), 2);
     assert_eq!(s2.store(&mut Cursor::new(&b)).unwrap(), Some(second));
 }
 
-/// The bytes of the segments an entity lives in, in order.
-fn entity_segments(s: &Structure, out: &[u8], kind: SegmentKind) -> Vec<u8> {
+/// The bytes of the segments an item lives in, in order.
+fn item_segments(s: &Structure, out: &[u8], kind: ItemKind) -> Vec<u8> {
     // A JPEG that already holds a store of another type keeps it, so choose the
     // one just written, which these tests give the type `[1; 16]`.
     let e = s
-        .entities(kind)
+        .items_of(kind)
         .find(|e| e.jumbf_type() == Some([1; 16]))
-        .or_else(|| s.entities(kind).next())
+        .or_else(|| s.items_of(kind).next())
         .unwrap();
-    let mut ids: Vec<_> = e.parts().map(|p| p.segment()).collect();
+    let mut ids: Vec<_> = e.extents().map(|p| p.segment()).collect();
     ids.dedup();
     let mut v = Vec::new();
     for id in ids {
-        let x = s.segment(id).unwrap().extent();
+        let x = s.segment(id).unwrap().range();
         v.extend_from_slice(&out[x.offset() as usize..x.end() as usize]);
     }
     v
@@ -235,14 +231,14 @@ fn compose_is_what_write_inserts() {
         let Ok(s) = reg.parse_detect(&mut Cursor::new(&bytes)) else {
             continue;
         };
-        for (kind, data) in [(SegmentKind::Jumbf, &jumbf), (SegmentKind::Xmp, &xmp)] {
+        for (kind, data) in [(ItemKind::Jumbf, &jumbf), (ItemKind::Xmp, &xmp)] {
             let composed = match reg.compose(s.media_type(), kind, data) {
                 Ok(c) => c,
                 Err(asset_io::Error::UnsupportedFormat) => continue,
                 Err(e) => panic!("{name}: {e}"),
             };
             let updates = match kind {
-                SegmentKind::Jumbf => Updates::new().set_jumbf(data.clone()),
+                ItemKind::Jumbf => Updates::new().set_jumbf(data.clone()),
                 _ => Updates::new().set_xmp(data.clone()),
             };
             let mut out = Cursor::new(Vec::new());
@@ -252,7 +248,7 @@ fn compose_is_what_write_inserts() {
             let out = out.into_inner();
             assert_eq!(
                 composed,
-                entity_segments(&dest, &out, kind),
+                item_segments(&dest, &out, kind),
                 "{name} {kind:?}"
             );
             checked.insert((s.container_id().to_owned(), kind));
@@ -267,7 +263,7 @@ fn compose_splits_a_large_jpeg_store_like_write() {
     let reg = HandlerRegistry::builtin();
     let children = vec![0x5Au8; 200_000];
     let jumbf = store(1, &[&children]);
-    let composed = reg.compose("jpg", SegmentKind::Jumbf, &jumbf).unwrap();
+    let composed = reg.compose("jpg", ItemKind::Jumbf, &jumbf).unwrap();
     // Four APP11 segments, each with its own marker.
     let markers = composed
         .windows(2)
@@ -290,7 +286,7 @@ fn compose_splits_a_large_jpeg_store_like_write() {
         .unwrap();
     assert_eq!(
         composed,
-        entity_segments(&dest, &out.into_inner(), SegmentKind::Jumbf)
+        item_segments(&dest, &out.into_inner(), ItemKind::Jumbf)
     );
 }
 
@@ -298,11 +294,11 @@ fn compose_splits_a_large_jpeg_store_like_write() {
 fn compose_rejects_what_it_cannot_encode() {
     let reg = HandlerRegistry::builtin();
     assert!(reg
-        .compose("jpg", SegmentKind::Jumbf, b"not a superbox")
+        .compose("jpg", ItemKind::Jumbf, b"not a superbox")
         .is_err());
-    assert!(reg.compose("jpg", SegmentKind::Exif, b"x").is_err());
-    assert!(reg.compose("png", SegmentKind::Thumbnail, b"x").is_err());
-    assert!(reg.compose("xyz", SegmentKind::Jumbf, b"x").is_err());
+    assert!(reg.compose("jpg", ItemKind::Exif, b"x").is_err());
+    assert!(reg.compose("png", ItemKind::EmbeddedAsset, b"x").is_err());
+    assert!(reg.compose("xyz", ItemKind::Jumbf, b"x").is_err());
 }
 
 #[test]
@@ -356,4 +352,73 @@ fn media_types_by_format_string() {
     // A caller's registry extends the built-ins and still answers for them.
     let ext = HandlerRegistry::extending_builtin();
     assert_eq!(ext.media_type_for("heic"), Some("image/heic"));
+}
+
+/// Kinds, encodings and categories agree in every container, for items parsed and
+/// for items written.
+#[test]
+fn item_kinds_encodings_and_categories_per_container() {
+    use asset_io::{Encoding, ItemCategory, SegmentId, SegmentKind};
+    let check = |s: &Structure, what: &str| {
+        for e in s.items() {
+            let ok = match e.kind() {
+                ItemKind::Xmp => e.encoding() == Encoding::Xml,
+                ItemKind::Jumbf => e.encoding() == Encoding::Jumbf,
+                ItemKind::Exif => e.encoding() == Encoding::Tiff,
+                ItemKind::EmbeddedAsset => e.encoding() == Encoding::Asset,
+                _ => matches!(e.encoding(), Encoding::IsoBmff | Encoding::Unknown),
+            };
+            assert!(ok, "{what}: {:?}", e.info());
+            let category = match e.kind() {
+                ItemKind::EmbeddedAsset => ItemCategory::Asset,
+                ItemKind::Other => ItemCategory::Other,
+                _ => ItemCategory::Metadata,
+            };
+            assert_eq!(e.kind().category(), category, "{what}");
+        }
+    };
+    let reg = HandlerRegistry::builtin();
+    let xmp = b"<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"/>".to_vec();
+    let jumbf = store(1, &[b"one"]);
+    let mut written = std::collections::BTreeSet::new();
+    for (name, bytes) in fixtures() {
+        let Ok(s) = reg.parse_detect(&mut Cursor::new(&bytes)) else {
+            continue;
+        };
+        check(&s, &name);
+        let updates = Updates::new().set_xmp(xmp.clone()).set_jumbf(jumbf.clone());
+        let mut out = Cursor::new(Vec::new());
+        let Ok(dest) = s.write(&mut Cursor::new(&bytes), &mut out, &updates, &mut NullSink) else {
+            continue;
+        };
+        let out = out.into_inner();
+        check(&dest, &name);
+        // What a write inserts is a metadata item in a metadata segment.
+        for (kind, encoding, data) in [
+            (ItemKind::Xmp, Encoding::Xml, &xmp),
+            (ItemKind::Jumbf, Encoding::Jumbf, &jumbf),
+        ] {
+            let found = dest
+                .items_of(kind)
+                .find(|e| dest.read_content(&mut Cursor::new(&out), e).unwrap() == *data);
+            let e = found.unwrap_or_else(|| panic!("{name}: no {kind} written"));
+            assert_eq!(e.encoding(), encoding, "{name}");
+            assert_eq!(e.kind().category(), ItemCategory::Metadata, "{name}");
+            for x in e.extents() {
+                let seg = dest.segment(x.segment()).unwrap();
+                assert_eq!(seg.kind(), SegmentKind::Metadata, "{name} {kind}");
+                assert!(dest.items_in(x.segment()).any(|i| i.kind() == kind));
+            }
+        }
+        let first = SegmentId::from_index(0).unwrap();
+        assert_eq!(
+            dest.segment(first).unwrap().kind(),
+            SegmentKind::Preamble,
+            "{name}"
+        );
+        written.insert(s.container_id().to_owned());
+    }
+    for id in ["jpeg", "png", "bmff", "riff"] {
+        assert!(written.contains(id), "no {id} fixture was written");
+    }
 }
