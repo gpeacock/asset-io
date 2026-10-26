@@ -414,7 +414,7 @@ fn a_fragmented_file_plans_through_a_task_and_every_fragment_is_relocated() {
         .iter()
         .find(|g| g.name() == asset_io::Name::FourCC(*b"moof"))
         .unwrap();
-    let at = first_moof.extent().offset() as usize;
+    let at = first_moof.range().offset() as usize;
     let tfhd_base = |moof: usize| {
         // moof header 8, mfhd 16, traf header 8, tfhd header 8 + version/flags 4 +
         // track id 4, then the 8-byte base data offset.

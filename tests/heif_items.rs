@@ -14,7 +14,7 @@
 //! HEIF items (EXIF, thumbnails) on the real files in tests/fixtures.
 #![cfg(feature = "bmff")]
 
-use asset_io::{HandlerRegistry, NullSink, SegmentKind, Structure, Updates};
+use asset_io::{HandlerRegistry, ItemInfo, ItemKind, NullSink, RelationKind, Structure, Updates};
 use std::io::Cursor;
 
 const FILES: &[&str] = &[
@@ -23,18 +23,26 @@ const FILES: &[&str] = &[
     "tests/fixtures/sample1.avif",
 ];
 
-fn items(s: &Structure, bytes: &[u8]) -> Vec<(SegmentKind, Option<String>, Vec<u8>)> {
-    [SegmentKind::Exif, SegmentKind::Thumbnail]
-        .into_iter()
-        .flat_map(|k| s.entities(k))
+/// Every HEIF item (those with an item id): what it is and its bytes.
+fn items(s: &Structure, bytes: &[u8]) -> Vec<(ItemInfo, Vec<u8>)> {
+    s.items()
+        .filter(|e| e.native_id().is_some())
         .map(|e| {
             (
-                e.kind(),
-                e.label().map(str::to_owned),
-                s.read_entity(&mut Cursor::new(bytes), e).unwrap(),
+                e.info().clone(),
+                s.read_item(&mut Cursor::new(bytes), e).unwrap(),
             )
         })
         .collect()
+}
+
+fn is_thumbnail(i: &(ItemInfo, Vec<u8>), s: &Structure) -> bool {
+    s.items().any(|e| {
+        e.info() == &i.0
+            && e.relations()
+                .iter()
+                .any(|r| r.kind() == RelationKind::Thumbnail)
+    })
 }
 
 #[test]
@@ -51,11 +59,8 @@ fn items_survive_a_write_and_stay_readable() {
         let before = items(&s, &bytes);
         eprintln!(
             "{path}: {} exif, {} thumbnail",
-            before.iter().filter(|i| i.0 == SegmentKind::Exif).count(),
-            before
-                .iter()
-                .filter(|i| i.0 == SegmentKind::Thumbnail)
-                .count()
+            s.items_of(ItemKind::Exif).count(),
+            before.iter().filter(|i| is_thumbnail(i, &s)).count()
         );
 
         // Writing a manifest moves the data; the items must move with it, in both
@@ -79,7 +84,7 @@ fn items_survive_a_write_and_stay_readable() {
         #[cfg(feature = "exif")]
         {
             // Real EXIF must parse, or the item was not the TIFF data.
-            if before.iter().any(|i| i.0 == SegmentKind::Exif) {
+            if s.items_of(ItemKind::Exif).next().is_some() {
                 assert!(s.exif_info(&mut Cursor::new(&bytes)).is_ok(), "{path}");
             }
         }

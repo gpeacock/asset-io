@@ -24,7 +24,7 @@ use super::lexer::{
     MAX_SYNTAX_BYTES,
 };
 use super::{Parser, Xrefs, MAX_CLASSIC_ENTRIES, MAX_ENTRIES, MAX_OBJECTS, MAX_REVISIONS};
-use crate::{BoxFuture, Error, MetadataUpdate, Result, SegmentKind, Updates, MAX_SEGMENT_SIZE};
+use crate::{BoxFuture, Error, ItemKind, MetadataUpdate, Result, Updates, MAX_SEGMENT_SIZE};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::sync::Arc;
@@ -350,7 +350,7 @@ pub(super) enum Piece {
     /// Bytes of syntax.
     Syntax(Vec<u8>),
     /// The payload of a new metadata stream: the update's data of this kind.
-    Stream(SegmentKind),
+    Stream(ItemKind),
 }
 
 /// The appended revision, and what to know afterwards.
@@ -407,14 +407,14 @@ impl Appender {
         self.syntax(bytes)
     }
 
-    fn stream(&mut self, kind: SegmentKind, length: usize) -> Result<Reference> {
+    fn stream(&mut self, kind: ItemKind, length: usize) -> Result<Reference> {
         if length as u64 > MAX_SEGMENT_SIZE {
             return Err(invalid("metadata exceeds 256 MiB limit"));
         }
         let id = self.allocate()?;
         self.syntax_nodes += 7;
         self.objects.insert(id, self.position);
-        let entries = if kind == SegmentKind::Xmp {
+        let entries = if kind == ItemKind::Xmp {
             "/Type /Metadata /Subtype /XML"
         } else {
             "/Type /EmbeddedFile /Subtype /application#2Fc2pa"
@@ -456,7 +456,7 @@ pub(super) fn revision(context: &Context, source_size: u64, updates: &Updates) -
             context.catalog.remove(b"Metadata".as_slice());
         }
         MetadataUpdate::Set(data) => {
-            let id = result.stream(SegmentKind::Xmp, data.len())?;
+            let id = result.stream(ItemKind::Xmp, data.len())?;
             context
                 .catalog
                 .insert(b"Metadata".to_vec(), Value::Reference(id));
@@ -471,7 +471,7 @@ pub(super) fn revision(context: &Context, source_size: u64, updates: &Updates) -
         );
         context.active.clear();
         if let MetadataUpdate::Set(data) = updates.jumbf() {
-            let stream = result.stream(SegmentKind::Jumbf, data.len())?;
+            let stream = result.stream(ItemKind::Jumbf, data.len())?;
             let spec = result.allocate()?;
             let file_name = b"Content Credentials".to_vec();
             if context.pairs.contains_key(&file_name) {

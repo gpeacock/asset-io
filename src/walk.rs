@@ -30,7 +30,7 @@ pub struct Node<'a> {
     /// The element's own name.
     pub name: Name,
     /// Whole element, header through end.
-    pub extent: ByteRange,
+    pub range: ByteRange,
     /// Bytes of framing before the content: size, type, extended size and
     /// extended type. A FullBox's version and flags are reported separately.
     pub header_len: u32,
@@ -49,14 +49,14 @@ impl<'a> Node<'a> {
     pub const fn new(
         path: &'a str,
         name: Name,
-        extent: ByteRange,
+        range: ByteRange,
         header_len: u32,
         depth: u32,
     ) -> Self {
         Self {
             path,
             name,
-            extent,
+            range,
             header_len,
             depth,
             version: None,

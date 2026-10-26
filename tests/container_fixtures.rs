@@ -15,7 +15,7 @@
 
 #![cfg(all(feature = "jpeg", feature = "png"))]
 
-use asset_io::{containers, NullSink, Role};
+use asset_io::{containers, ItemKind, NullSink, Role};
 use asset_io::{SegmentKind, Updates};
 use std::fs;
 use std::io::Cursor;
@@ -65,8 +65,8 @@ fn write(
 
 fn read_jumbf(s: &asset_io::Structure, bytes: &[u8], jpeg: bool) -> Option<Vec<u8>> {
     let mut c = Cursor::new(bytes.to_vec());
-    match s.entity(SegmentKind::Jumbf).unwrap() {
-        Some(e) => Some(s.read_entity(&mut c, e).unwrap()),
+    match s.item(ItemKind::Jumbf).unwrap() {
+        Some(e) => Some(s.read_item(&mut c, e).unwrap()),
         None => {
             let _ = jpeg;
             None
@@ -103,8 +103,8 @@ fn real_files_parse_and_tile() {
         let mut next = 0;
         let mut count = 0usize;
         s.elements(&mut Cursor::new(bytes.clone()), |_, e| {
-            assert_eq!(e.extent().offset(), next, "{}: element gap", path.display());
-            next = e.extent().end();
+            assert_eq!(e.range().offset(), next, "{}: element gap", path.display());
+            next = e.range().end();
             count += 1;
             Ok(())
         })
@@ -120,8 +120,8 @@ fn real_files_parse_and_tile() {
             "{}: {} segments, jumbf={}, xmp={}",
             path.file_name().unwrap().to_string_lossy(),
             s.segments().len(),
-            s.entities(SegmentKind::Jumbf).count(),
-            s.entities(SegmentKind::Xmp).count()
+            s.items_of(ItemKind::Jumbf).count(),
+            s.items_of(ItemKind::Xmp).count()
         );
     }
 }
@@ -160,7 +160,7 @@ fn real_files_set_patch_and_reopen() {
             assert_eq!(reparsed.segments(), dest.segments(), "{}", path.display());
 
             // Patch a "signed" manifest in place.
-            let e = dest.require_entity(SegmentKind::Jumbf).unwrap().clone();
+            let e = dest.require_item(ItemKind::Jumbf).unwrap().clone();
             let signed = manifest(size - 100);
             let mut cur = Cursor::new(std::mem::take(&mut out));
             dest.patch(&mut cur, &e, &signed).unwrap();
@@ -175,8 +175,8 @@ fn real_files_set_patch_and_reopen() {
             let img = |st: &asset_io::Structure, b: &[u8]| -> Vec<u8> {
                 let mut v = Vec::new();
                 for g in st.segments() {
-                    if g.kind() == SegmentKind::ImageData {
-                        let r = g.extent();
+                    if g.kind() == SegmentKind::MediaData {
+                        let r = g.range();
                         v.extend_from_slice(&b[r.offset() as usize..r.end() as usize]);
                     }
                 }
@@ -269,9 +269,9 @@ fn sweep_external_directories() {
 
         // Metadata is readable. Ambiguity is reported, not treated as a mismatch.
         let mut c = Cursor::new(bytes.clone());
-        match s.entity(SegmentKind::Jumbf) {
+        match s.item(ItemKind::Jumbf) {
             Ok(Some(e)) => {
-                if let Err(e) = s.read_entity(&mut c, e) {
+                if let Err(e) = s.read_item(&mut c, e) {
                     problems.push(format!("{name}: JUMBF unreadable: {e}"));
                     continue;
                 }
@@ -307,19 +307,19 @@ fn sweep_external_directories() {
         ok += 1;
 
         census[0] += 1;
-        if s.entities(SegmentKind::Jumbf).next().is_some() {
+        if s.items_of(ItemKind::Jumbf).next().is_some() {
             census[1] += 1;
         }
-        if s.entities(SegmentKind::Jumbf).any(|e| e.part_count() > 1) {
+        if s.items_of(ItemKind::Jumbf).any(|e| e.extent_count() > 1) {
             census[2] += 1;
         }
-        if s.entities(SegmentKind::Xmp).next().is_some() {
+        if s.items_of(ItemKind::Xmp).next().is_some() {
             census[3] += 1;
         }
-        if s.entities(SegmentKind::Xmp).any(|e| e.part_count() > 1) {
+        if s.items_of(ItemKind::Xmp).any(|e| e.extent_count() > 1) {
             census[4] += 1;
         }
-        if s.entities(SegmentKind::Exif).next().is_some() {
+        if s.items_of(ItemKind::Exif).next().is_some() {
             census[5] += 1;
         }
     }
@@ -365,10 +365,8 @@ fn check_hostile(bytes: &[u8], jpeg: bool, what: &str) {
     }
     assert_eq!(next, bytes.len() as u64, "{what}: coverage");
     // Reads of whatever it found must not panic (errors are fine).
-    for kind in [SegmentKind::Jumbf, SegmentKind::Xmp, SegmentKind::Exif] {
-        for e in s.entities(kind) {
-            let _ = s.read_entity(&mut Cursor::new(bytes.to_vec()), e);
-        }
+    for e in s.items() {
+        let _ = s.read_item(&mut Cursor::new(bytes.to_vec()), e);
     }
     if let Ok((out, dest)) = write(&s, bytes, jpeg, &Updates::new()) {
         assert!(out == bytes, "{what}: Keep changed bytes");

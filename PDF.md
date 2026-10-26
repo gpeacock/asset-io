@@ -16,19 +16,21 @@ parsing. It does not load the document, decode page content, or search for
 metadata markers. Unreferenced and superseded metadata are not exposed.
 
 Each metadata stream, including those with an indirect `/Length`, is a segment holding
-the stream's payload as it is in the file, and the entity for XMP or the C2PA store. The
+the stream's payload as it is in the file, and the item for XMP or the C2PA store. The
 segments between them are other bytes, so the structure tiles the file. Parsing skips the
 payloads; `Structure::xmp()` and `Structure::store()` allocate only when called, and
 decode Flate-compressed metadata at that point. A stream with no payload holds nothing to
 expose, so it reads as absent.
-The `pdf` feature enables `flate2` with its pure-Rust backend (no native zlib).
-FlateDecode and 8-bit single-component PNG predictors are supported.
+The `pdf` feature enables the `flate` feature (`flate2` with its pure-Rust backend, no
+native zlib). FlateDecode and 8-bit single-component PNG predictors are supported; a
+compressed stream's item has the transfer encoding `TransferEncoding::Zlib`, with its
+predictor columns.
 
-`Structure::read_entity`, `read_range`, a `Sink`, and optional memory mapping
-(`slice_entity`) give streaming or borrowed access to **physical file bytes**. For
-compressed metadata these are the encoded bytes, which is what a hash covers; the
-structure's attachment records the encoding, and `xmp()` and `store()` decode it through
-the handler's `decode_entity`. Memory mapping retains its existing unsafe API and
+`Structure::read_item`, `read_range`, a `Sink`, and optional memory mapping
+(`slice_item`) give streaming or borrowed access to **physical file bytes**. For
+compressed metadata these are the encoded bytes, which is what a hash covers; the item's
+`transfer()` is `TransferEncoding::Zlib` (with any PNG predictor columns), and `xmp()`,
+`store()` and `read_content` decode it. Memory mapping retains its existing unsafe API and
 file-stability requirements.
 
 Only document-level C2PA stores associated through the catalog's `/AF` are

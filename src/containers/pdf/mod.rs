@@ -22,23 +22,28 @@
 //! [`Other`](crate::SegmentKind::Other) bytes, so the structure tiles the file and a
 //! hash can skip exactly a store.
 //!
-//! A Flate-compressed store is an entity whose bytes are the encoded ones;
-//! [`Structure::xmp`](crate::Structure::xmp) and
-//! [`Structure::store`](crate::Structure::store) decode them (through the handler's
-//! [`decode_entity`](ContainerHandler::decode_entity)). See `PDF.md` for the rules and
-//! the limits.
+//! The XMP metadata stream is an [`ItemKind::Xmp`] item and
+//! the C2PA store an [`ItemKind::Jumbf`] item, each in its own
+//! [`Metadata`](crate::SegmentKind::Metadata) segment. A Flate-compressed store is an
+//! item whose bytes are the encoded ones, with a
+//! [`Zlib`](crate::TransferEncoding::Zlib) transfer encoding;
+//! [`Structure::xmp`](crate::Structure::xmp),
+//! [`Structure::store`](crate::Structure::store) and
+//! [`Structure::read_content`](crate::Structure::read_content) decode them. See
+//! `PDF.md` for the rules and the limits.
 
 mod flate;
 mod lexer;
 mod write;
 
 use crate::plan::WritePlan;
+use crate::transfer::inflate;
 use crate::{
-    BoxFuture, ByteRange, ContainerHandler, Entity, Error, FormatSpec, Io, MetadataUpdate, Name,
-    PlanBuilder, Result, Role, SegmentId, SegmentKind, Structure, StructureBuilder, Updates,
-    MAX_SEGMENT_SIZE,
+    BoxFuture, ByteRange, ContainerHandler, Error, FormatSpec, Io, Item, ItemInfo, ItemKind,
+    MetadataUpdate, Name, PlanBuilder, Result, Role, SegmentId, SegmentKind, Structure,
+    StructureBuilder, TransferEncoding, Updates, MAX_SEGMENT_SIZE,
 };
-use flate::{inflate, Decode};
+use flate::Decode;
 use lexer::{
     invalid, required, unsigned, whitespace, Dictionary, Lex, Lexer, Reference, Stop, Value,
     MAX_DEPTH, MAX_SYNTAX_BYTES,
@@ -54,7 +59,6 @@ const MAX_OBJECTS: usize = 4096;
 const MAX_STRUCTURAL_STREAM: usize = 8 * 1024 * 1024;
 const MAX_DECODE_WORK: usize = 32 * 1024 * 1024;
 const MAX_XREF_STORAGE: usize = 16 * 1024 * 1024;
-const MAX_DECODED_METADATA: usize = 64 * 1024 * 1024;
 const MAX_OBJECT_STREAM_ENTRIES: u64 = 100_000;
 /// The final `startxref` and `%%EOF` must be this close to the end.
 const TAIL: u64 = 1024;
@@ -76,8 +80,6 @@ pub const ID: &str = "pdf";
 /// What a structure keeps for this handler.
 #[derive(Clone, Debug)]
 struct PdfState {
-    /// How each compressed metadata stream is encoded, by segment index.
-    decodes: BTreeMap<usize, Decode>,
     /// Whether the document can be edited, and what an edit needs to know.
     edit: write::State,
 }
@@ -87,17 +89,6 @@ impl PdfState {
         structure
             .attachment::<PdfState>()
             .ok_or_else(|| invalid("structure was not parsed by the PDF handler"))
-    }
-
-    fn decode_of(structure: &Structure, entity: &Entity) -> Result<Option<Decode>> {
-        let part = entity
-            .parts()
-            .next()
-            .ok_or_else(|| invalid("entity has no parts"))?;
-        Ok(Self::of(structure)?
-            .decodes
-            .get(&part.segment().index())
-            .copied())
     }
 }
 
@@ -132,37 +123,30 @@ impl ContainerHandler for PdfHandler {
         Box::pin(async move { plan(src_structure, io.len(), updates) })
     }
 
-    fn check_patch(&self, structure: &Structure, entity: &Entity, len: usize) -> Result<()> {
+    fn check_patch(&self, structure: &Structure, item: &Item, len: usize) -> Result<()> {
         let state = PdfState::of(structure)?;
         if let Some(refusal) = state.edit.refusal() {
             return Err(refusal);
         }
-        if PdfState::decode_of(structure, entity)?.is_some() {
+        if *item.transfer() != TransferEncoding::Identity {
             return Err(Error::UnsupportedFeature(
                 "cannot patch compressed PDF metadata in place",
             ));
         }
-        if len as u64 != entity.len() {
+        if len as u64 != item.len() {
             return Err(invalid(
                 "PDF in-place updates require exact-length payloads",
             ));
         }
         Ok(())
     }
+}
 
-    fn decode_entity(
-        &self,
-        structure: &Structure,
-        entity: &Entity,
-        stored: Vec<u8>,
-    ) -> Result<Vec<u8>> {
-        match PdfState::decode_of(structure, entity)? {
-            None => Ok(stored),
-            Some(decode) => {
-                let data = inflate(&stored, MAX_DECODED_METADATA, None)?;
-                decode.undo_predictor(data)
-            }
-        }
+/// What a PDF metadata stream is.
+fn item_info(kind: ItemKind) -> ItemInfo {
+    match kind {
+        ItemKind::Xmp => ItemInfo::xmp(),
+        _ => ItemInfo::jumbf(),
     }
 }
 
@@ -256,7 +240,7 @@ struct CatalogMetadata {
     catalog: Dictionary,
     associated: Vec<Value>,
     active: Option<BTreeSet<Reference>>,
-    ranges: Vec<(ByteRange, SegmentKind, Option<Decode>)>,
+    ranges: Vec<(ByteRange, ItemKind, Option<Decode>)>,
 }
 
 // ---------------------------------------------------------------------------
@@ -815,14 +799,14 @@ impl<'io> Parser<'io> {
     async fn stream(
         &mut self,
         value: Value,
-        kind: SegmentKind,
+        kind: ItemKind,
     ) -> Result<(ByteRange, Option<Decode>)> {
         let Value::Reference(reference) = value else {
             return Err(invalid("stream must be indirect"));
         };
         let object = self.object(reference).await?;
         let mut dict = object.value.dictionary()?;
-        let expected_type: &[u8] = if kind == SegmentKind::Xmp {
+        let expected_type: &[u8] = if kind == ItemKind::Xmp {
             b"Metadata"
         } else {
             b"EmbeddedFile"
@@ -830,7 +814,7 @@ impl<'io> Parser<'io> {
         if !required(&mut dict, b"Type")?.is_name(expected_type) {
             return Err(invalid("unexpected metadata stream type"));
         }
-        if kind == SegmentKind::Xmp && !required(&mut dict, b"Subtype")?.is_name(b"XML") {
+        if kind == ItemKind::Xmp && !required(&mut dict, b"Subtype")?.is_name(b"XML") {
             return Err(invalid("XMP stream must have XML subtype"));
         }
         let decode = Decode::from_dictionary(&mut dict)?;
@@ -856,8 +840,8 @@ impl<'io> Parser<'io> {
         let mut active = Some(BTreeSet::new());
         if let Some(value) = catalog.get(b"Metadata".as_slice()).cloned() {
             if !matches!(value, Value::Null) {
-                let (range, decode) = self.stream(value, SegmentKind::Xmp).await?;
-                ranges.push((range, SegmentKind::Xmp, decode));
+                let (range, decode) = self.stream(value, ItemKind::Xmp).await?;
+                ranges.push((range, ItemKind::Xmp, decode));
             }
         }
         if let Some(value) = catalog.get(b"AF".as_slice()).cloned() {
@@ -887,10 +871,7 @@ impl<'io> Parser<'io> {
                     }
                     _ => active = None,
                 }
-                if ranges
-                    .iter()
-                    .any(|(_, kind, _)| *kind == SegmentKind::Jumbf)
-                {
+                if ranges.iter().any(|(_, kind, _)| *kind == ItemKind::Jumbf) {
                     return Err(invalid("multiple document-level C2PA manifests"));
                 }
                 if !required(&mut spec, b"Subtype")?.is_name(b"application/c2pa") {
@@ -908,8 +889,8 @@ impl<'io> Parser<'io> {
                     (Some(value), None) | (None, Some(value)) => value,
                     (None, None) => return Err(invalid("missing C2PA embedded file")),
                 };
-                let (range, decode) = self.stream(stream, SegmentKind::Jumbf).await?;
-                ranges.push((range, SegmentKind::Jumbf, decode));
+                let (range, decode) = self.stream(stream, ItemKind::Jumbf).await?;
+                ranges.push((range, ItemKind::Jumbf, decode));
             }
             associated = values;
         }
@@ -963,12 +944,9 @@ async fn parse_with(handler: Arc<dyn ContainerHandler>, mut io: Io) -> Result<St
     ranges.sort_by_key(|(range, _, _)| range.offset());
 
     let mut b = StructureBuilder::new(handler, "application/pdf", size);
-    b.push_span(SegmentKind::Header, Name::None, HEADER_LEN as u32, 0, 0)?;
+    b.push_span(SegmentKind::Preamble, Name::None, HEADER_LEN as u32, 0, 0)?;
     let mut end = HEADER_LEN;
-    let mut state = PdfState {
-        decodes: BTreeMap::new(),
-        edit,
-    };
+    let state = PdfState { edit };
     for (range, kind, decode) in ranges {
         // An empty stream holds nothing to expose.
         if range.is_empty() {
@@ -980,10 +958,15 @@ async fn parse_with(handler: Arc<dyn ContainerHandler>, mut io: Io) -> Result<St
         if range.offset() > end {
             b.push_span(SegmentKind::Other, Name::None, 0, range.offset() - end, 0)?;
         }
-        let id = b.push_item(kind, Name::None, 0, range.len(), 0)?;
-        if let Some(decode) = decode {
-            state.decodes.insert(id.index(), decode);
-        }
+        let transfer = decode.map_or(TransferEncoding::Identity, Decode::transfer);
+        b.push_item(
+            SegmentKind::Metadata,
+            Name::None,
+            0,
+            range.len(),
+            0,
+            item_info(kind).transfer(transfer),
+        )?;
         end = range.end();
     }
     if end < size {
@@ -1048,7 +1031,7 @@ fn plan<'a>(src: &Structure, source_len: u64, updates: &'a Updates) -> Result<Wr
         for i in 0..segments.len() {
             b.copy_segment(SegmentId::from_index(i)?)?;
         }
-        b.carry_entities(|_| true);
+        b.carry_items(|_| true);
         b.attach(state.clone());
         return b.finish();
     }
@@ -1060,9 +1043,9 @@ fn plan<'a>(src: &Structure, source_len: u64, updates: &'a Updates) -> Result<Wr
     };
     let revision = write::revision(context, src.total_size(), updates)?;
 
-    let keeps = |kind: SegmentKind| {
+    let keeps = |kind: ItemKind| {
         matches!(
-            if kind == SegmentKind::Xmp {
+            if kind == ItemKind::Xmp {
                 updates.xmp()
             } else {
                 updates.jumbf()
@@ -1071,28 +1054,25 @@ fn plan<'a>(src: &Structure, source_len: u64, updates: &'a Updates) -> Result<Wr
         )
     };
     let mut run: Vec<Text<'a>> = Vec::new();
-    let mut decodes = BTreeMap::new();
     for (i, seg) in segments.iter().enumerate() {
         let id = SegmentId::from_index(i)?;
-        match seg.kind() {
-            SegmentKind::Header => {
+        if seg.kind() == SegmentKind::Preamble {
+            b.copy_segment(id)?;
+            continue;
+        }
+        match src.items_in(id).next().map(|e| e.kind()) {
+            Some(kind @ (ItemKind::Xmp | ItemKind::Jumbf)) if keeps(kind) => {
+                flush(&mut b, &mut run)?;
                 b.copy_segment(id)?;
             }
-            kind @ (SegmentKind::Xmp | SegmentKind::Jumbf) if keeps(kind) => {
-                flush(&mut b, &mut run)?;
-                let dest = b.copy_segment(id)?;
-                if let Some(decode) = state.decodes.get(&i) {
-                    decodes.insert(dest.index(), *decode);
-                }
-            }
-            _ => run.push(Text::Copy(seg.extent())),
+            _ => run.push(Text::Copy(seg.range())),
         }
     }
     for piece in revision.pieces {
         match piece {
             write::Piece::Syntax(bytes) => run.push(Text::Put(Cow::Owned(bytes))),
             write::Piece::Stream(kind) => {
-                let data = match if kind == SegmentKind::Xmp {
+                let data = match if kind == ItemKind::Xmp {
                     updates.xmp()
                 } else {
                     updates.jumbf()
@@ -1103,16 +1083,16 @@ fn plan<'a>(src: &Structure, source_len: u64, updates: &'a Updates) -> Result<Wr
                 // An empty stream holds nothing to expose.
                 if !data.is_empty() {
                     flush(&mut b, &mut run)?;
-                    let id = b.put_segment(kind, Name::None, &[][..], data, &[][..])?;
-                    b.entity_for(id)?;
+                    let id =
+                        b.put_segment(SegmentKind::Metadata, Name::None, &[][..], data, &[][..])?;
+                    b.item(item_info(kind), &[id])?;
                 }
             }
         }
     }
     flush(&mut b, &mut run)?;
-    b.carry_entities(|_| true);
+    b.carry_items(|_| true);
     b.attach(PdfState {
-        decodes,
         edit: write::State::Ready(Arc::new(revision.context)),
     });
     b.finish()

@@ -1,7 +1,7 @@
 //! Application C ABI. Handles are cimpl-tracked opaque identifiers, never Rust addresses.
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
-use asset_io::{HandlerRegistry, Name, Role, Structure, Updates};
+use asset_io::{HandlerRegistry, Name, Relation, Role, Structure, TransferEncoding, Updates};
 use cimpl::{
     box_tracked, bytes_or_return, cstr_or_return, deref_mut_or_return, deref_or_return,
     ptr_or_return,
@@ -167,21 +167,37 @@ fn name(n: Name) -> Value {
         _ => json!({"type":"future", "debug":format!("{n:?}")}),
     }
 }
+fn transfer(t: &TransferEncoding) -> Value {
+    match t {
+        TransferEncoding::Zlib {
+            png_predictor_columns,
+        } => json!({"type": t.as_str(), "png_predictor_columns": png_predictor_columns}),
+        TransferEncoding::Unknown(name) => json!({"type": t.as_str(), "name": name}),
+        t => json!({"type": t.as_str()}),
+    }
+}
+fn relation(r: &Relation) -> Value {
+    json!({"kind": r.kind().as_str(), "native": r.native(), "target": r.target()})
+}
 fn describe(s: &Structure) -> Value {
     json!({
         "schema": 1,
         "container": s.container_id(), "media_type": s.media_type(), "size": s.total_size(),
         "trailing": s.trailing().map(range),
         "segments": s.segments().iter().map(|v| json!({
-            "kind":v.kind().as_str(), "name":name(v.name()), "extent":range(v.extent()),
+            "kind":v.kind().as_str(), "name":name(v.name()), "range":range(v.range()),
             "box_name":s.box_name(v.name()),
             "regions":v.regions().map(|(r,b)|json!({"role":role(r),"range":range(b)})).collect::<Vec<_>>(),
             "subdivides":v.subdivides()
         })).collect::<Vec<_>>(),
-        "entities": s.entity_list().map(|(k,e)|json!({
-            "kind":k.as_str(), "label":e.label(), "media_type":e.media_type(), "size":e.len(),
-            "jumbf_type":e.jumbf_type(),
-            "parts":e.parts().map(|p|json!({"segment":p.segment().index(),"range":range(p.range())})).collect::<Vec<_>>()
+        "items": s.items().map(|e|json!({
+            "kind":e.kind().as_str(), "category":e.kind().category().as_str(),
+            "encoding":e.encoding().as_str(), "transfer":transfer(e.transfer()), "label":e.label(), "media_type":e.media_type(),
+            "jumbf_type":e.jumbf_type(), "native_type":e.native_type().map(name),
+            "native_id":e.native_id(), "uri":e.uri(),
+            "relations":e.relations().iter().map(relation).collect::<Vec<_>>(),
+            "size":e.len(),
+            "extents":e.extents().map(|p|json!({"segment":p.segment().index(),"range":range(p.range())})).collect::<Vec<_>>()
         })).collect::<Vec<_>>(),
         "subassets":s.subassets().iter().map(|a|json!({
             "range":range(a.range()),"segment_start":a.segments().start,"segment_end":a.segments().end,
@@ -349,9 +365,11 @@ pub extern "C" fn asset_io_read_stream(
     })
 }
 
-/// Extract entity by declaration-order index. decoded=0 stored parts; 1 container-decoded.
+/// Extract an item by declaration-order index. decoded=0: the stored bytes (extents
+/// concatenated, what a hash covers); 1: the content, with the item's transfer
+/// encoding (base64, Flate) undone.
 #[no_mangle]
-pub extern "C" fn asset_io_entity_bytes(
+pub extern "C" fn asset_io_item_bytes(
     asset: *mut AssetIoAsset,
     index: usize,
     decoded: u32,
@@ -360,15 +378,14 @@ pub extern "C" fn asset_io_entity_bytes(
         let mut a = deref_mut_or_return!(asset, AssetIoAsset, ptr::null_mut());
         let s = a.structure.clone();
         let e = ok_or_return!(
-            s.entity_list()
+            s.items()
                 .nth(index)
-                .ok_or_else(|| invalid("entity index out of range")),
+                .ok_or_else(|| invalid("item index out of range")),
             ptr::null_mut()
-        )
-        .1;
+        );
         let result = match decoded {
-            0 => s.read_entity(&mut a.source, e),
-            1 => s.read_decoded(&mut a.source, e),
+            0 => s.read_item(&mut a.source, e),
+            1 => s.read_content(&mut a.source, e),
             _ => {
                 invalid("decoded must be 0 or 1").set_last();
                 return ptr::null_mut();
@@ -404,9 +421,9 @@ pub extern "C" fn asset_io_metadata_bytes(
     })
 }
 
-/// Read a JUMBF entity's type as 16 bytes; error if not known/a superbox.
+/// Read a JUMBF item's type as 16 bytes; error if not known/a superbox.
 #[no_mangle]
-pub extern "C" fn asset_io_entity_jumbf_type(
+pub extern "C" fn asset_io_item_jumbf_type(
     asset: *mut AssetIoAsset,
     index: usize,
 ) -> *mut AssetIoBuffer {
@@ -414,12 +431,11 @@ pub extern "C" fn asset_io_entity_jumbf_type(
         let mut a = deref_mut_or_return!(asset, AssetIoAsset, ptr::null_mut());
         let s = a.structure.clone();
         let e = ok_or_return!(
-            s.entity_list()
+            s.items()
                 .nth(index)
-                .ok_or_else(|| invalid("entity index out of range")),
+                .ok_or_else(|| invalid("item index out of range")),
             ptr::null_mut()
-        )
-        .1;
+        );
         let ty = ok_or_return!(
             s.jumbf_type(&mut a.source, e).map_err(CoreError),
             ptr::null_mut()
@@ -647,6 +663,34 @@ pub extern "C" fn asset_io_free(handle: *mut c_void) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transfer_encodings_have_one_json_shape() {
+        assert_eq!(
+            transfer(&TransferEncoding::Identity),
+            json!({"type": "identity"})
+        );
+        assert_eq!(
+            transfer(&TransferEncoding::Zlib {
+                png_predictor_columns: Some(3)
+            }),
+            json!({"type": "zlib", "png_predictor_columns": 3})
+        );
+        assert_eq!(
+            transfer(&TransferEncoding::Zlib {
+                png_predictor_columns: None
+            }),
+            json!({"type": "zlib", "png_predictor_columns": null})
+        );
+        assert_eq!(
+            transfer(&TransferEncoding::unknown("x-lzma").unwrap()),
+            json!({"type": "unknown", "name": "x-lzma"})
+        );
+        assert_eq!(
+            transfer(&TransferEncoding::Brotli),
+            json!({"type": "brotli"})
+        );
+    }
 
     #[test]
     fn empty_buffer_and_panic_boundary() {

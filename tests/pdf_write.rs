@@ -19,7 +19,7 @@
 
 mod pdf_support;
 
-use asset_io::{Chunk, Error, Role, Segment, SegmentKind, Sink, Updates};
+use asset_io::{Chunk, Error, ItemKind, Role, Segment, SegmentKind, Sink, Updates};
 use pdf_support::*;
 use std::io::Cursor;
 
@@ -59,13 +59,13 @@ fn unregistered_attachment_edits_fail_but_noop_copies_exactly() {
     assert!(matches!(
         asset
             .structure()
-            .update_segment(&mut file, SegmentKind::Xmp, b"bad".to_vec()),
+            .update_segment(&mut file, ItemKind::Xmp, b"bad".to_vec()),
         Err(Error::UnsupportedFeature(_))
     ));
     assert!(matches!(
         asset
             .structure()
-            .update_segment(&mut file, SegmentKind::Jumbf, b"bad".to_vec()),
+            .update_segment(&mut file, ItemKind::Jumbf, b"bad".to_vec()),
         Err(Error::UnsupportedFeature(_))
     ));
     assert_eq!(file.get_ref(), &original);
@@ -93,8 +93,7 @@ fn a_sink_sees_the_output_with_superseded_data_as_ordinary_bytes() {
     struct SkipStores(Vec<u8>);
     impl Sink for SkipStores {
         fn wants(&self, segment: &Segment, role: Role) -> bool {
-            !(matches!(segment.kind(), SegmentKind::Jumbf | SegmentKind::Xmp)
-                && role == Role::Payload)
+            !(segment.kind() == SegmentKind::Metadata && role == Role::Payload)
         }
         fn chunk(&mut self, c: Chunk<'_>) -> asset_io::Result<()> {
             self.0.extend_from_slice(c.data);
@@ -115,7 +114,7 @@ fn a_sink_sees_the_output_with_superseded_data_as_ordinary_bytes() {
     let reparsed = Asset::from_source(Cursor::new(&output)).unwrap();
     same_layout(&structure, reparsed.structure());
     let mut expected = Vec::new();
-    for kind in [SegmentKind::Xmp, SegmentKind::Jumbf] {
+    for kind in [ItemKind::Xmp, ItemKind::Jumbf] {
         let range = payload_range(reparsed.structure(), kind);
         // The ranges are collected, then removed from the end backwards below.
         expected.push((range.offset as usize, range.end_offset() as usize));
@@ -195,7 +194,7 @@ fn compressed_patches_and_changed_source_length_are_rejected_before_output() {
     assert!(matches!(
         asset
             .structure()
-            .update_segment(&mut output, SegmentKind::Xmp, vec![0; encoded.len()]),
+            .update_segment(&mut output, ItemKind::Xmp, vec![0; encoded.len()]),
         Err(Error::UnsupportedFeature(_))
     ));
     assert_eq!(output.get_ref(), b"unchanged");
@@ -403,14 +402,14 @@ fn exact_length_finalization_changes_only_reserved_bytes() {
     for length in [0, 31, 33] {
         let before = output.get_ref().clone();
         assert!(structure
-            .update_segment(&mut output, SegmentKind::Jumbf, vec![1; length])
+            .update_segment(&mut output, ItemKind::Jumbf, vec![1; length])
             .is_err());
         assert_eq!(&before, output.get_ref());
     }
     let before = output.get_ref().clone();
-    let range = payload_range(&structure, SegmentKind::Jumbf);
+    let range = payload_range(&structure, ItemKind::Jumbf);
     structure
-        .update_segment(&mut output, SegmentKind::Jumbf, vec![7; 32])
+        .update_segment(&mut output, ItemKind::Jumbf, vec![7; 32])
         .unwrap();
     assert_eq!(
         &before[..range.offset as usize],
@@ -423,10 +422,10 @@ fn exact_length_finalization_changes_only_reserved_bytes() {
     let mut asset = Asset::from_source(output).unwrap();
     assert_eq!(asset.jumbf().unwrap().unwrap(), vec![7; 32]);
     assert!(asset
-        .update_segment_in_place(SegmentKind::Xmp, b"short".to_vec())
+        .update_segment_in_place(ItemKind::Xmp, b"short".to_vec())
         .is_err());
     asset
-        .update_segment_in_place(SegmentKind::Xmp, b"<new/>".to_vec())
+        .update_segment_in_place(ItemKind::Xmp, b"<new/>".to_vec())
         .unwrap();
     assert_eq!(asset.xmp().unwrap().unwrap(), b"<new/>");
 }
@@ -497,7 +496,7 @@ fn unsigned_forms_and_empty_signature_fields_are_preserved() {
                 .unwrap();
             assert!(output.get_ref().starts_with(&original));
             predicted
-                .update_segment(&mut output, SegmentKind::Jumbf, vec![1; 32])
+                .update_segment(&mut output, ItemKind::Jumbf, vec![1; 32])
                 .unwrap();
             let mut reparsed = Asset::from_source(output).unwrap();
             same_layout(&predicted, reparsed.structure());
@@ -559,7 +558,7 @@ fn populated_signature_fields_including_inherited_types_block_edits_and_patches(
             // There is no store to patch, and the document could not be edited anyway.
             assert!(asset
                 .structure()
-                .update_segment(&mut output, SegmentKind::Jumbf, vec![0; 32])
+                .update_segment(&mut output, ItemKind::Jumbf, vec![0; 32])
                 .is_err());
             assert_eq!(output.get_ref(), b"unchanged");
         }

@@ -11,15 +11,15 @@
 // specific language governing permissions and limitations under
 // each license.
 
-//! Physical container elements, their logical classification, and shared size limits.
+//! Segments, the units that tile an asset, and shared size limits.
 
 use crate::error::{Error, Result};
 use crate::range::ByteRange;
 
-/// Entity labels that mean the same in every container.
+/// Item labels that mean the same in every container.
 ///
 /// A container that stores a JUMBF store in more than one place labels the
-/// entities so a caller can tell them apart (see [`Entity::label`](crate::Entity::label)).
+/// items so a caller can tell them apart (see [`Item::label`](crate::Item::label)).
 /// ISO BMFF does: a file has a `MANIFEST`, or an `ORIGINAL` store plus an `UPDATE`
 /// that extends it. Merkle proof boxes are labelled `MERKLE`.
 pub mod labels {
@@ -48,41 +48,33 @@ pub const DEFAULT_CHUNK_SIZE: usize = 65536;
 /// 10 MB. Image data is streamed, never read in one piece.
 pub const MAX_SEGMENT_SIZE: u64 = 256 * 1024 * 1024;
 
-/// Logical classification of a segment (SDK-assigned)
+/// The purpose of a segment in the tiling of an asset.
 ///
-/// This represents what the segment IS from the SDK's perspective,
-/// independent of how it's physically stored in any particular format.
+/// A kind describes a segment's dominant purpose only. What its bytes belong to
+/// is given by the [items](crate::Item) whose extents lie in it: a HEIF `mdat`
+/// holds media and items, and mixed segments (`moov`, `meta`) are
+/// [`Other`](Self::Other).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum SegmentKind {
-    /// File header/signature
-    Header,
-    /// XMP metadata
-    Xmp,
-    /// JUMBF/C2PA data
-    Jumbf,
-    /// Compressed image data
-    ImageData,
-    /// EXIF metadata
-    Exif,
-    /// A pre-rendered preview image stored as its own element (a HEIF `thmb` item).
-    /// A thumbnail inside EXIF data is not this kind; see
-    /// [`Structure::embedded_thumbnail`](crate::Structure::embedded_thumbnail).
-    Thumbnail,
-    /// Other/unknown segment type
+    /// Leading bytes that identify the format (JPEG `SOI`, the first eight bytes
+    /// of a PNG, a BMFF `ftyp` box).
+    Preamble,
+    /// A segment whose payload is predominantly metadata (XMP, JUMBF, EXIF, ...).
+    Metadata,
+    /// Coded media of any type.
+    MediaData,
+    /// Anything else.
     Other,
 }
 
 impl SegmentKind {
-    /// Get a string representation of this kind
+    /// `"preamble"`, `"metadata"`, `"media_data"` or `"other"`.
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::Header => "header",
-            Self::Xmp => "xmp",
-            Self::Jumbf => "jumbf",
-            Self::ImageData => "image_data",
-            Self::Exif => "exif",
-            Self::Thumbnail => "thumbnail",
+            Self::Preamble => "preamble",
+            Self::Metadata => "metadata",
+            Self::MediaData => "media_data",
             Self::Other => "other",
         }
     }
@@ -112,7 +104,7 @@ pub enum Role {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Name {
-    /// Unnamed (signature, trailing data, ...).
+    /// Unnamed (fill, trailing data, ...).
     None,
     /// JPEG marker code (the byte after `0xFF`).
     Marker(u8),
@@ -141,19 +133,20 @@ impl std::fmt::Display for Name {
 }
 
 impl Name {
-    /// True for unnamed elements (signature bytes, fill, trailing data).
+    /// True for unnamed elements (fill, trailing data).
     pub const fn is_none(&self) -> bool {
         matches!(self, Name::None)
     }
 }
 
-/// One physical element of a container.
+/// One unit of the tiling of an asset: the unit a writer copies, replaces or moves.
 ///
-/// A segment's `extent` is split into `header | payload | trailer`. Segments
-/// carry geometry only; they own no data and no heap memory.
+/// A segment's `range` is split into `header | payload | trailer`: framing, then
+/// content, then framing. Segments carry geometry only; they own no data and no
+/// heap memory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Segment {
-    extent: ByteRange,
+    range: ByteRange,
     header_len: u32,
     trailer_len: u16,
     kind: SegmentKind,
@@ -162,29 +155,29 @@ pub struct Segment {
 }
 
 impl Segment {
-    /// Create a segment, validating that header and trailer fit in the extent.
+    /// Create a segment, validating that header and trailer fit in the range.
     pub fn new(
-        extent: ByteRange,
+        range: ByteRange,
         header_len: u32,
         trailer_len: u16,
         kind: SegmentKind,
         name: Name,
     ) -> Result<Self> {
-        if extent.is_empty() {
-            return Err(Error::invalid_segment(extent.offset(), "empty segment"));
+        if range.is_empty() {
+            return Err(Error::invalid_segment(range.offset(), "empty segment"));
         }
         let overhead = header_len as u64 + trailer_len as u64;
-        if overhead > extent.len() {
+        if overhead > range.len() {
             return Err(Error::invalid_segment(
-                extent.offset(),
+                range.offset(),
                 format!(
-                    "header ({header_len}) + trailer ({trailer_len}) exceed extent ({})",
-                    extent.len()
+                    "header ({header_len}) + trailer ({trailer_len}) exceed range ({})",
+                    range.len()
                 ),
             ));
         }
         Ok(Self {
-            extent,
+            range,
             header_len,
             trailer_len,
             kind,
@@ -207,12 +200,12 @@ impl Segment {
         self
     }
 
-    /// Whole element, header through trailer.
-    pub const fn extent(&self) -> ByteRange {
-        self.extent
+    /// Whole segment, header through trailer.
+    pub const fn range(&self) -> ByteRange {
+        self.range
     }
 
-    /// Logical classification.
+    /// Purpose in the tiling.
     pub const fn kind(&self) -> SegmentKind {
         self.kind
     }
@@ -224,21 +217,21 @@ impl Segment {
 
     /// Header bytes (possibly empty).
     pub const fn header(&self) -> ByteRange {
-        ByteRange::raw(self.extent.offset(), self.header_len as u64)
+        ByteRange::raw(self.range.offset(), self.header_len as u64)
     }
 
     /// Payload bytes (possibly empty).
     pub const fn payload(&self) -> ByteRange {
         ByteRange::raw(
-            self.extent.offset() + self.header_len as u64,
-            self.extent.len() - self.header_len as u64 - self.trailer_len as u64,
+            self.range.offset() + self.header_len as u64,
+            self.range.len() - self.header_len as u64 - self.trailer_len as u64,
         )
     }
 
     /// Trailer bytes (possibly empty).
     pub const fn trailer(&self) -> ByteRange {
         ByteRange::raw(
-            self.extent.end() - self.trailer_len as u64,
+            self.range.end() - self.trailer_len as u64,
             self.trailer_len as u64,
         )
     }
@@ -266,7 +259,7 @@ mod tests {
     }
 
     #[test]
-    fn splits_extent() {
+    fn splits_range() {
         let s = Segment::new(
             ByteRange::new(100, 30).unwrap(),
             8,

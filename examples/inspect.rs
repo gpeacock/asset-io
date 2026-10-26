@@ -13,19 +13,20 @@
 
 //! Parse a media file and print its structure and metadata.
 //!
-//! Run: `cargo run --example inspect --features all-formats,xmp,exif -- <file>`
+//! Run: `cargo run --example inspect --features all-formats,xmp,exif -- <file> [--embedded]`
 
-use asset_io::{HandlerRegistry, Role, SegmentKind};
+use asset_io::{HandlerRegistry, Item, Name, Role, ScanLimits, TransferEncoding};
 use std::{env, fs::File};
 
 fn main() -> asset_io::Result<()> {
     let Some(path) = env::args().nth(1) else {
-        eprintln!("Usage: inspect <file>");
+        eprintln!("Usage: inspect <file> [--embedded]");
         std::process::exit(1);
     };
 
     let mut src = File::open(&path)?;
-    let structure = HandlerRegistry::builtin().parse_detect(&mut src)?;
+    let registry = HandlerRegistry::builtin();
+    let structure = registry.parse_detect(&mut src)?;
 
     println!("File: {path}");
     println!("  Container: {}", structure.container_id());
@@ -33,42 +34,40 @@ fn main() -> asset_io::Result<()> {
     println!("  Size: {} bytes", structure.total_size());
     println!("  Segments: {}", structure.segments().len());
 
-    for kind in [SegmentKind::Xmp, SegmentKind::Jumbf] {
-        for e in structure.entities(kind) {
-            let label = e.label().map(|l| format!(" [{l}]")).unwrap_or_default();
-            println!(
-                "\n{kind}{label}: {} bytes, {} part(s)",
-                e.len(),
-                e.part_count()
-            );
-            if kind == SegmentKind::Xmp {
-                let data = structure.read_entity(&mut src, e)?;
-                let head = &data[..data.len().min(100)];
-                println!("  Preview: {}...", String::from_utf8_lossy(head));
-            }
-        }
+    println!("\nItems:");
+    for e in structure.items() {
+        println!("  {}", describe(e));
     }
 
     if let Some(info) = structure.exif_info(&mut src)? {
         println!("\nEXIF: {info}");
-        if let Some(v) = &info.software {
-            println!("  Software: {v}");
-        }
-        if let Some(v) = info.orientation {
-            println!("  Orientation: {v}");
-        }
     }
-
     if let Some(t) = structure.embedded_thumbnail(&mut src)? {
-        let dims = match (t.width, t.height) {
-            (Some(w), Some(h)) => format!("{w}x{h}"),
-            _ => "unknown size".into(),
-        };
         println!(
-            "\nThumbnail: {}, {dims}, {} bytes",
+            "Thumbnail: {}, {} bytes",
             t.media_type().unwrap_or("unknown type"),
             t.data.len()
         );
+    }
+
+    if env::args().skip(2).any(|arg| arg == "--embedded") {
+        let assets = structure.scan_embedded(&mut src, &registry, ScanLimits::default())?;
+        for (i, asset) in assets.iter().enumerate() {
+            let parsed = match &asset.structure {
+                Ok(s) => format!("{} {}", s.container_id(), s.media_type()),
+                Err(error) => format!("not parsed: {error}"),
+            };
+            println!(
+                "\nEmbedded [{i}]: depth {}, parent {:?}, {parsed}",
+                asset.depth, asset.parent
+            );
+            println!("  from {}", describe(&asset.item));
+            if let Ok(s) = &asset.structure {
+                for e in s.items() {
+                    println!("    {}", describe(e));
+                }
+            }
+        }
     }
 
     println!("\nSegments:");
@@ -80,8 +79,8 @@ fn main() -> asset_io::Result<()> {
         println!(
             "  [{i:4}] {name:8} {:10} offset {:10} size {:10} (header {}, payload {}, trailer {})",
             seg.kind().to_string(),
-            seg.extent().offset(),
-            seg.extent().len(),
+            seg.range().offset(),
+            seg.range().len(),
             seg.header().len(),
             seg.payload().len(),
             seg.trailer().len(),
@@ -96,4 +95,50 @@ fn main() -> asset_io::Result<()> {
         .sum();
     println!("\nPayload bytes: {payload} of {}", structure.total_size());
     Ok(())
+}
+
+/// One line with every attribute of an item: never its content.
+fn describe(e: &Item) -> String {
+    let mut out = format!(
+        "{} ({}) encoding {}",
+        e.kind(),
+        e.kind().category().as_str(),
+        e.encoding()
+    );
+    match e.transfer() {
+        TransferEncoding::Zlib {
+            png_predictor_columns: Some(c),
+        } => out += &format!(" transfer zlib (predictor columns {c})"),
+        t => out += &format!(" transfer {t}"),
+    }
+    if let Some(l) = e.label() {
+        out += &format!(" label {l}");
+    }
+    if let Some(m) = e.media_type() {
+        out += &format!(" media type {m}");
+    }
+    if let Some(t) = e.jumbf_type() {
+        let hex: String = t.iter().map(|b| format!("{b:02x}")).collect();
+        out += &format!(" jumbf type {hex}");
+    }
+    match e.native_type() {
+        Some(Name::FourCC(cc)) => out += &format!(" type '{}'", String::from_utf8_lossy(&cc)),
+        Some(t) => out += &format!(" type {t}"),
+        None => {}
+    }
+    if let Some(id) = e.native_id() {
+        out += &format!(" id {id}");
+    }
+    if let Some(u) = e.uri() {
+        out += &format!(" uri {u}");
+    }
+    for r in e.relations() {
+        out += &format!(
+            " {} ({}) -> {}",
+            r.kind().as_str(),
+            String::from_utf8_lossy(&r.native()),
+            r.target()
+        );
+    }
+    out + &format!(": {} bytes in {} extent(s)", e.len(), e.extent_count())
 }

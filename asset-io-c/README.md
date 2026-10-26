@@ -21,7 +21,7 @@ cargo build --locked --manifest-path asset-io-c/Cargo.toml \
 ```
 
 Individual `jpeg`, `png`, `bmff`, `riff`, `svg`, `pdf`, `xmp`, `exif`,
-`memory-mapped` switches forward to the core without enabling its defaults.
+`memory-mapped`, `flate` and `brotli` (transfer-encoding decoders) switches forward to the core without enabling its defaults.
 Inspector switches compile core functionality; inspector-specific methods are
 not currently exported. Query the registry rather than assuming feature presence.
 The no-default library can construct registries but cannot parse any format.
@@ -106,7 +106,9 @@ validated source range into an owned buffer, subject to the core's 256 MiB limit
 
 The header exports registry creation/format aliases, explicit/detected memory or
 read-at parsing, tagged source streaming, bounded range reads, independent structure snapshots,
-raw or decoded entity extraction,
+item extraction (`asset_io_item_bytes`: `decoded=0` gives the stored bytes, which
+are what a hash covers; `decoded=1` gives the content with the item's `transfer`
+undone),
 logical XMP/JUMBF extraction, JUMBF UUID extraction, XMP/JUMBF keep/set/remove,
 type-scoped JUMBF removal, remove-all, BMFF update-manifest hint, output planning,
 memory writing and tagged streaming writing.
@@ -115,15 +117,25 @@ memory writing and tagged streaming writing.
 or parse with a length-aware JSON API. Schema version `schema: 1` contains:
 
 * `container`, `media_type`, `size`; nullable `trailing` range.
-* `segments`: declaration/file order; `kind` is the exact core string (`header`,
-  `xmp`, `jumbf`, `image_data`, `exif`, `thumbnail`, `other`); `extent`,
-  `regions`, `subdivides`, lossless `name`, and nullable container-defined `box_name`.
+* `segments`: declaration/file order; `kind` is the exact core string (`preamble`,
+  `metadata`, `media_data`, `other`); `range`, `regions`, `subdivides`, lossless
+  `name`, and nullable container-defined `box_name`.
 * Names: `{type:"none"}`, `{type:"marker",value:u8}`,
   `{type:"fourcc",bytes:[u8;4]}`, `{type:"id",value:u64}`. Future core variants
   are explicitly tagged `future` with their debug representation, never flattened.
-* `entities`: declaration order (indices used for extraction), `kind`, nullable
-  `label`, `media_type`, `jumbf_type` (16-byte array), stored `size`, and `parts`
-  with owning `segment` index and payload `range`.
+* `items`: declaration order (indices used for extraction); `kind` (`xmp`, `jumbf`,
+  `exif`, `embedded_asset`, `other`), `category` (`metadata`, `asset`, `other`),
+  `encoding` (`xml`, `tiff`, `jumbf`, `iso_bmff`, `asset`, `unknown`); `transfer`,
+  how the stored bytes wrap the content: `{type:T}` with `T` one of `identity`,
+  `base64`, `zlib`, `deflate`, `gzip`, `brotli`, `unknown`; `zlib` adds
+  `png_predictor_columns` (u32 or null) and `unknown` adds `name`, the format's
+  own label (future kinds keep the `type` field). Decoding with `decoded=1` needs
+  the library's `flate`/`brotli` features and fails with `UnsupportedFeature`
+  otherwise; nullable
+  `label`, `media_type`, `jumbf_type` (16-byte array), `native_type` (a `name`),
+  `native_id` and `uri`; `relations` (`kind`, `native` as a 4-byte array, and the
+  `target` item's `native_id`); stored `size`; and `extents` with owning `segment`
+  index and `range`.
 * `subassets`: `range`, `[segment_start,segment_end)` indices, nullable
   `media_type`, `primary`.
 * `regions`: all stored regions in order, with `segment`, `role`, `range`.
@@ -133,7 +145,7 @@ or parse with a length-aware JSON API. Schema version `schema: 1` contains:
 
 Snapshots retain no source and survive freeing assets/updates/registries.
 Planned snapshots describe future output, not readable source bytes.
-UUIDs absent in the snapshot can be queried with `asset_io_entity_jumbf_type`
+UUIDs absent in the snapshot can be queried with `asset_io_item_jumbf_type`
 (reads at most the core's 32-byte prefix).
 
 Set replaces the first matching item and drops other matching items as defined

@@ -13,9 +13,7 @@
 
 //! Read-side sink and zero-copy slices on real files.
 
-use asset_io::{
-    ByteRange, Chunk, Error, HandlerRegistry, NullSink, Result, Role, SegmentKind, Structure,
-};
+use asset_io::{ByteRange, Chunk, Error, HandlerRegistry, NullSink, Result, Role, Structure};
 use std::borrow::Cow;
 use std::io::Cursor;
 
@@ -50,7 +48,7 @@ fn rebuild(s: &Structure, read: impl FnOnce(&mut dyn asset_io::Sink) -> Result<(
         assert_eq!(c.offset, next, "chunks must arrive in order, without gaps");
         let seg = s.segment(c.segment)?;
         assert!(seg
-            .extent()
+            .range()
             .contains(&ByteRange::new(c.offset, c.data.len() as u64)?));
         out[c.offset as usize..c.offset as usize + c.data.len()].copy_from_slice(c.data);
         next += c.data.len() as u64;
@@ -109,19 +107,18 @@ fn unwanted_runs_are_skipped_and_cancel_stops() {
 fn slices_match_reads_and_borrow_when_possible() {
     let mut borrowed = 0;
     for (name, bytes, s) in &load() {
-        for kind in [SegmentKind::Xmp, SegmentKind::Jumbf, SegmentKind::Exif] {
-            for e in s.entities(kind) {
-                let read = s.read_entity(&mut Cursor::new(bytes), e).unwrap();
-                let slice = s.slice_entity(bytes, e).unwrap();
-                assert_eq!(&*slice, &read[..], "{name} {kind}");
-                if e.part_count() == 1 {
-                    assert!(matches!(slice, Cow::Borrowed(_)), "{name} {kind}");
-                    borrowed += 1;
-                }
+        for e in s.items() {
+            let kind = e.kind();
+            let read = s.read_item(&mut Cursor::new(bytes), e).unwrap();
+            let slice = s.slice_item(bytes, e).unwrap();
+            assert_eq!(&*slice, &read[..], "{name} {kind}");
+            if e.extent_count() == 1 {
+                assert!(matches!(slice, Cow::Borrowed(_)), "{name} {kind}");
+                borrowed += 1;
             }
         }
     }
-    assert!(borrowed > 0, "no single-part entity in any fixture");
+    assert!(borrowed > 0, "no single-extent item in any fixture");
 }
 
 #[test]

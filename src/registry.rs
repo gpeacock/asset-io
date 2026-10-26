@@ -139,7 +139,7 @@ impl HandlerRegistry {
 
     /// The container's own encoding of one metadata item for a format string; see
     /// [`ContainerHandler::compose`].
-    pub fn compose(&self, format: &str, kind: crate::SegmentKind, data: &[u8]) -> Result<Vec<u8>> {
+    pub fn compose(&self, format: &str, kind: crate::ItemKind, data: &[u8]) -> Result<Vec<u8>> {
         self.handler(format)
             .ok_or(Error::UnsupportedFormat)?
             .compose(kind, data)
@@ -244,7 +244,7 @@ mod tests {
             Box::pin(async move {
                 let data = io.read_vec(0, io.len() as usize).await?;
                 let mut b = StructureBuilder::new(self, "application/x-toy", data.len() as u64);
-                b.push_span(SegmentKind::Header, Name::FourCC(*b"TOY!"), 4, 0, 0)?;
+                b.push_span(SegmentKind::Preamble, Name::FourCC(*b"TOY!"), 4, 0, 0)?;
                 let mut at = 4usize;
                 let mut idx = 0u64;
                 while at < data.len() {
@@ -297,8 +297,8 @@ mod tests {
         let mut names = Vec::new();
         let mut next = 0;
         s.elements(&mut Cursor::new(bytes.clone()), |_, e| {
-            assert_eq!(e.extent().offset(), next);
-            next = e.extent().end();
+            assert_eq!(e.range().offset(), next);
+            next = e.range().end();
             names.push(s.box_name(e.name()).map(|n| n.into_owned()));
             Ok(())
         })

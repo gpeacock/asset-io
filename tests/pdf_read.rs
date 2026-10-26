@@ -17,7 +17,7 @@
 #![cfg(feature = "pdf")]
 
 mod pdf_support;
-use asset_io::{Error, HandlerRegistry, Segment, SegmentKind};
+use asset_io::{Error, HandlerRegistry, ItemKind, Segment, SegmentKind, TransferEncoding};
 use pdf_support::*;
 use std::io::{Cursor, Read, Seek, SeekFrom};
 
@@ -38,11 +38,13 @@ fn detects_pdf_and_extracts_exact_payload_ranges() {
     );
     let structure = asset.structure();
     let mut end = 0;
-    for segment in structure.segments() {
+    for (i, segment) in structure.segments().iter().enumerate() {
         let range = segment.location();
         assert_eq!(range.offset, end);
         end = range.end_offset();
-        if segment.is_type(SegmentKind::Xmp) {
+        let id = asset_io::SegmentId::from_index(i).unwrap();
+        if structure.items_in(id).any(|e| e.kind() == ItemKind::Xmp) {
+            assert!(segment.is_type(SegmentKind::Metadata));
             assert_eq!(&pdf.bytes[range.offset as usize..end as usize], b"<xmp/>");
         }
     }
@@ -80,6 +82,49 @@ fn flate_metadata_is_decoded_only_on_request() {
         asset.jumbf().unwrap().as_deref(),
         Some(b"compressed manifest".as_slice())
     );
+    // The items are the stored (compressed) bytes, with their transfer encoding.
+    let flate = TransferEncoding::Zlib {
+        png_predictor_columns: None,
+    };
+    for (kind, content) in [
+        (ItemKind::Xmp, b"<compressed-xmp/>".as_slice()),
+        (ItemKind::Jumbf, b"compressed manifest".as_slice()),
+    ] {
+        let item = asset.structure.require_item(kind).unwrap();
+        assert_eq!(*item.transfer(), flate);
+        let stored = asset.structure.read_item(&mut asset.source, item).unwrap();
+        assert_eq!(stored, deflate(content));
+        assert_eq!(
+            asset
+                .structure
+                .read_content(&mut asset.source, item)
+                .unwrap(),
+            content
+        );
+    }
+
+    // PNG predictor rows: the columns are recorded and the rows undone.
+    let mut pdf = metadata_pdf();
+    let rows = deflate(&[0, b'a', b'b', b'c', 2, 0, 0, 0]);
+    pdf.stream(
+        2,
+        &format!(
+            "/Type /Metadata /Subtype /XML /Length {} /Filter /FlateDecode \
+             /DecodeParms << /Predictor 12 /Columns 3 >>",
+            rows.len()
+        ),
+        &rows,
+    );
+    pdf.finish("/Root 1 0 R");
+    let mut asset = Asset::from_source(Cursor::new(pdf.bytes)).unwrap();
+    let item = asset.structure.require_item(ItemKind::Xmp).unwrap();
+    assert_eq!(
+        *item.transfer(),
+        TransferEncoding::Zlib {
+            png_predictor_columns: Some(3)
+        }
+    );
+    assert_eq!(asset.xmp().unwrap().as_deref(), Some(b"abcabc".as_slice()));
 
     let mut pdf = metadata_pdf();
     pdf.stream(
@@ -586,7 +631,7 @@ fn exact_metadata_size_limit_is_enforced_without_payload_allocation() {
                 .structure()
                 .segments()
                 .iter()
-                .find(|s| s.kind() == SegmentKind::Xmp)
+                .find(|s| s.kind() == SegmentKind::Metadata)
                 .unwrap();
             assert_eq!(segment.location().size, length);
         } else {
@@ -709,9 +754,9 @@ fn mmap_exposes_borrowed_metadata_bytes() {
     let file = std::fs::File::open(&path).unwrap();
     let mapped = unsafe { asset_io::MappedFile::map(&file) }.unwrap();
     let structure = mapped.parse_detect(&HandlerRegistry::builtin()).unwrap();
-    let xmp = structure.require_entity(SegmentKind::Xmp).unwrap();
+    let xmp = structure.require_item(ItemKind::Xmp).unwrap();
     assert_eq!(
-        &*structure.slice_entity(mapped.as_bytes(), xmp).unwrap(),
+        &*structure.slice_item(mapped.as_bytes(), xmp).unwrap(),
         b"<xmp/>"
     );
 }
@@ -838,11 +883,11 @@ fn sparse_gigabyte_pdf_retrieves_compressed_xmp_with_bounded_io() {
 fn a_sink_that_skips_the_store_sees_exactly_the_rest() {
     use asset_io::{Chunk, Role, Sink};
 
-    /// Wants everything but the payload of a C2PA store.
-    struct SkipStore(Vec<u8>);
+    /// Wants everything but the payload of the segment holding the C2PA store.
+    struct SkipStore(Vec<u8>, asset_io::ByteRange);
     impl Sink for SkipStore {
         fn wants(&self, segment: &Segment, role: Role) -> bool {
-            !(segment.kind() == SegmentKind::Jumbf && role == Role::Payload)
+            !(segment.range().contains(&self.1) && role == Role::Payload)
         }
         fn chunk(&mut self, chunk: Chunk<'_>) -> asset_io::Result<()> {
             self.0.extend_from_slice(chunk.data);
@@ -855,9 +900,9 @@ fn a_sink_that_skips_the_store_sees_exactly_the_rest() {
     let mut asset = Asset::from_source(Cursor::new(pdf.bytes.clone())).unwrap();
     let store = asset
         .structure()
-        .require_entity(SegmentKind::Jumbf)
+        .require_item(ItemKind::Jumbf)
         .unwrap()
-        .parts()
+        .extents()
         .next()
         .unwrap()
         .range();
@@ -865,7 +910,7 @@ fn a_sink_that_skips_the_store_sees_exactly_the_rest() {
     let mut expected = pdf.bytes[..offset].to_vec();
     expected.extend_from_slice(&pdf.bytes[end..]);
 
-    let mut sink = SkipStore(Vec::new());
+    let mut sink = SkipStore(Vec::new(), store);
     asset.structure.read(&mut asset.source, &mut sink).unwrap();
     assert_eq!(sink.0, expected);
 }

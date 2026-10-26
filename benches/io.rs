@@ -21,7 +21,9 @@
 //! copy cost, not disk speed. `sha256` and `copy` are baselines: a read or write
 //! cannot go faster than the work it feeds.
 
-use asset_io::{Chunk, HandlerRegistry, NullSink, Result, Role, SegmentKind, Structure, Updates};
+use asset_io::{
+    Chunk, HandlerRegistry, ItemKind, NullSink, Result, Role, SegmentKind, Structure, Updates,
+};
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use sha2::{Digest, Sha256};
 use std::hint::black_box;
@@ -237,7 +239,7 @@ fn bench_read(c: &mut Criterion) {
         struct NoImage(u64);
         impl asset_io::Sink for NoImage {
             fn wants(&self, seg: &asset_io::Segment, _: Role) -> bool {
-                seg.kind() != SegmentKind::ImageData && seg.extent().len() < (1 << 20)
+                seg.kind() != SegmentKind::MediaData && seg.range().len() < (1 << 20)
             }
             fn chunk(&mut self, c: Chunk<'_>) -> Result<()> {
                 self.0 += c.data.len() as u64;
@@ -313,22 +315,22 @@ fn bench_write(c: &mut Criterion) {
     g.finish();
 }
 
-fn bench_entities(c: &mut Criterion) {
+fn bench_items(c: &mut Criterion) {
     let Some(bytes) = fixture("FireflyTrain.jpg") else {
         return;
     };
     let s = HandlerRegistry::builtin()
         .parse("jpg", &mut Cursor::new(&bytes))
         .unwrap();
-    let Some(e) = s.entities(SegmentKind::Xmp).next() else {
+    let Some(e) = s.items_of(ItemKind::Xmp).next() else {
         return;
     };
-    let mut g = group(c, "entity");
-    g.bench_function("read_entity", |b| {
-        b.iter(|| black_box(s.read_entity(&mut Cursor::new(&bytes), e).unwrap()))
+    let mut g = group(c, "item");
+    g.bench_function("read_item", |b| {
+        b.iter(|| black_box(s.read_item(&mut Cursor::new(&bytes), e).unwrap()))
     });
-    g.bench_function("slice_entity", |b| {
-        b.iter(|| black_box(s.slice_entity(&bytes, e).unwrap()))
+    g.bench_function("slice_item", |b| {
+        b.iter(|| black_box(s.slice_item(&bytes, e).unwrap()))
     });
     g.finish();
 }
@@ -389,7 +391,7 @@ criterion_group!(
     bench_parse,
     bench_read,
     bench_write,
-    bench_entities,
+    bench_items,
     bench_mmap
 );
 criterion_main!(benches);

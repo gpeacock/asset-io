@@ -128,12 +128,12 @@ impl Tracker<'_> {
     /// Start a segment. Fails if the output position has drifted from the plan.
     fn begin_segment(&mut self, id: SegmentId) -> Result<()> {
         let seg = self.structure.segment(id)?;
-        if self.pos != seg.extent().offset() {
+        if self.pos != seg.range().offset() {
             return Err(Error::invalid_segment(
                 self.pos,
                 format!(
                     "output position diverged from planned structure (expected {})",
-                    seg.extent().offset()
+                    seg.range().offset()
                 ),
             ));
         }

@@ -15,10 +15,12 @@
 
 use crate::error::{Error, Result};
 use crate::handler::{ContainerHandler, ReadSeek, ReadWriteSeek};
+use crate::item::{Extent, Item, ItemInfo, ItemKind};
 use crate::range::ByteRange;
 use crate::segment::{Name, Role, Segment};
 use crate::segment::{SegmentKind, DEFAULT_CHUNK_SIZE, MAX_SEGMENT_SIZE};
 use crate::sink::{Chunk, Sink};
+use crate::transfer::TransferEncoding;
 use crate::walk::Node;
 use std::borrow::Cow;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -50,92 +52,6 @@ impl SegmentId {
     }
 }
 
-/// A run of payload bytes belonging to an [`Entity`], and the segment holding it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Part {
-    range: ByteRange,
-    segment: SegmentId,
-}
-
-impl Part {
-    /// The payload bytes.
-    pub fn range(&self) -> ByteRange {
-        self.range
-    }
-
-    /// The segment that contains them.
-    pub fn segment(&self) -> SegmentId {
-        self.segment
-    }
-}
-
-/// A logical metadata item (XMP, JUMBF, EXIF) assembled from one or more parts.
-///
-/// Parts are payload-only: framing that repeats per part (JPEG XT headers, PNG
-/// chunk headers) is not included. The common single-part case does not allocate.
-#[derive(Debug, Clone)]
-pub struct Entity {
-    kind: SegmentKind,
-    label: Option<Cow<'static, str>>,
-    media_type: Option<Cow<'static, str>>,
-    jumbf_type: Option<[u8; 16]>,
-    first: Part,
-    rest: Vec<Part>,
-}
-
-impl Entity {
-    /// The type of a JUMBF superbox, from its description box, when the container
-    /// recorded it while parsing: JPEG does, as it carries JUMBF of any type.
-    /// `None` for other kinds, for containers that reserve an element for one
-    /// kind of store (PNG `caBX`, the BMFF C2PA box), and for data that is not a
-    /// superbox. [`Structure::jumbf_type`] reads it from the stream when needed.
-    /// This crate attaches no meaning to any type.
-    pub fn jumbf_type(&self) -> Option<[u8; 16]> {
-        self.jumbf_type
-    }
-
-    /// Container-defined role of the entity among others of its kind, for example
-    /// the purpose of a BMFF C2PA box (`manifest`, `update`). `None` if the
-    /// container does not distinguish them.
-    pub fn label(&self) -> Option<&str> {
-        self.label.as_deref()
-    }
-
-    /// Media type of the entity's data, when the container records one: for
-    /// example `image/jpeg` for a HEIF `jpeg` thumbnail, or the content type of a
-    /// HEIF `mime` item. `None` when the container does not say, as with
-    /// [`SubAsset::media_type`].
-    pub fn media_type(&self) -> Option<&str> {
-        self.media_type.as_deref()
-    }
-
-    /// Classification.
-    pub fn kind(&self) -> SegmentKind {
-        self.kind
-    }
-
-    /// Parts in logical order.
-    pub fn parts(&self) -> impl Iterator<Item = &Part> {
-        std::iter::once(&self.first).chain(self.rest.iter())
-    }
-
-    /// Number of parts.
-    pub fn part_count(&self) -> usize {
-        1 + self.rest.len()
-    }
-
-    /// Total payload bytes across all parts (saturating).
-    pub fn len(&self) -> u64 {
-        self.parts()
-            .fold(0u64, |acc, p| acc.saturating_add(p.range.len()))
-    }
-
-    /// True if all parts are empty.
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-}
-
 /// One independently valid piece of a multi-part asset, such as one image of a
 /// Multi-Picture Format file.
 ///
@@ -152,29 +68,29 @@ pub struct SubAsset {
 }
 
 impl SubAsset {
-    /// Where the part lies in the asset: absolute offset and length.
+    /// Where the sub-asset lies in the asset: absolute offset and length.
     pub fn range(&self) -> ByteRange {
         self.range
     }
 
-    /// Indices (see [`SegmentId::index`]) of the segments the part is made of.
+    /// Indices (see [`SegmentId::index`]) of the segments the sub-asset is made of.
     pub fn segments(&self) -> std::ops::Range<usize> {
         self.segments.clone()
     }
 
-    /// Media type of the part, or `None` when the container cannot tell (trailing
+    /// Media type of the sub-asset, or `None` when the container cannot tell (trailing
     /// data after the last image).
     pub fn media_type(&self) -> Option<&str> {
         self.media_type.as_deref()
     }
 
-    /// Whether this is the primary asset, the first part.
+    /// Whether this is the primary asset, the first sub-asset.
     pub fn is_primary(&self) -> bool {
         self.primary
     }
 
-    /// `offset` relative to the start of the part, or `None` if it is outside it.
-    /// Hash exclusion ranges of a part are relative to the part.
+    /// `offset` relative to the start of the sub-asset, or `None` if it is outside
+    /// it. Hash exclusion ranges of a sub-asset are relative to the sub-asset.
     pub fn relative(&self, offset: u64) -> Option<u64> {
         (self.range.offset()..self.range.end())
             .contains(&offset)
@@ -198,8 +114,8 @@ pub struct Region {
 ///
 /// Invariants, enforced by [`StructureBuilder`]:
 /// - `segments` are in file order and tile `[0, total_size)` exactly;
-/// - no segment is empty and each fits `header + trailer <= extent`;
-/// - every entity part lies inside the segment it names.
+/// - no segment is empty and each fits `header + trailer <= range`;
+/// - every item extent lies inside the segment it names.
 ///
 /// Something a container keeps with a structure for its own use; see
 /// [`StructureBuilder::attach`].
@@ -222,7 +138,7 @@ pub struct Structure {
     media_type: Cow<'static, str>,
     total_size: u64,
     segments: Vec<Segment>,
-    entities: Vec<Entity>,
+    items: Vec<Item>,
     subassets: Vec<SubAsset>,
     /// How many leading segments are the container's own structure. Segments from
     /// here on are data beyond the end of it.
@@ -249,8 +165,8 @@ impl Structure {
     pub fn trailing(&self) -> Option<ByteRange> {
         let first = self.segments.get(self.boxes)?;
         ByteRange::new(
-            first.extent().offset(),
-            self.total_size - first.extent().offset(),
+            first.range().offset(),
+            self.total_size - first.range().offset(),
         )
         .ok()
     }
@@ -260,12 +176,12 @@ impl Structure {
         self.boxes
     }
 
-    /// The parts of the asset, in file order: contiguous, non-overlapping, and
+    /// The sub-assets of the asset, in file order: contiguous, non-overlapping, and
     /// covering every byte. A file that embeds nothing else has one, the whole
     /// file. A Multi-Picture Format JPEG has one per image, plus one for any data
     /// after the last image.
     ///
-    /// This is geometry only. Whether to hash the parts separately (a C2PA
+    /// This is geometry only. Whether to hash the sub-assets separately (a C2PA
     /// multi-asset hash) or as one asset is the caller's decision.
     pub fn subassets(&self) -> &[SubAsset] {
         &self.subassets
@@ -355,20 +271,30 @@ impl Structure {
         })
     }
 
-    /// All entities of a kind.
-    pub fn entities(&self, kind: SegmentKind) -> impl Iterator<Item = &Entity> + '_ {
-        self.entities.iter().filter(move |e| e.kind == kind)
+    /// Every item, in declaration order.
+    pub fn items(&self) -> impl Iterator<Item = &Item> + '_ {
+        self.items.iter()
     }
 
-    /// All entities of a kind carrying `label` (see [`Entity::label`]).
-    pub fn entities_labelled<'a>(
+    /// All items of a kind.
+    pub fn items_of(&self, kind: ItemKind) -> impl Iterator<Item = &Item> + '_ {
+        self.items.iter().filter(move |e| e.kind() == kind)
+    }
+
+    /// All items of a kind carrying `label` (see [`Item::label`]).
+    pub fn items_labelled<'a>(
         &'a self,
-        kind: SegmentKind,
+        kind: ItemKind,
         label: &'a str,
-    ) -> impl Iterator<Item = &'a Entity> + 'a {
-        self.entities
+    ) -> impl Iterator<Item = &'a Item> + 'a {
+        self.items
             .iter()
-            .filter(move |e| e.kind == kind && e.label() == Some(label))
+            .filter(move |e| e.kind() == kind && e.label() == Some(label))
+    }
+
+    /// The items with an extent in segment `id`: what the segment holds.
+    pub fn items_in(&self, id: SegmentId) -> impl Iterator<Item = &Item> + '_ {
+        self.items.iter().filter(move |e| e.is_in(id))
     }
 
     /// Visit the container's element hierarchy in file order, parents first.
@@ -385,14 +311,9 @@ impl Structure {
         self.handler.walk(self, src, &mut f)
     }
 
-    /// Every entity with its kind, in declaration order.
-    pub fn entity_list(&self) -> impl Iterator<Item = (SegmentKind, &Entity)> + '_ {
-        self.entities.iter().map(|e| (e.kind, e))
-    }
-
-    /// The entity of a kind: `Ok(None)` if absent, `Err(Ambiguous)` if several.
-    pub fn entity(&self, kind: SegmentKind) -> Result<Option<&Entity>> {
-        let mut it = self.entities(kind);
+    /// The item of a kind: `Ok(None)` if absent, `Err(Ambiguous)` if several.
+    pub fn item(&self, kind: ItemKind) -> Result<Option<&Item>> {
+        let mut it = self.items_of(kind);
         let first = it.next();
         let extra = it.count();
         match (first, extra) {
@@ -405,9 +326,9 @@ impl Structure {
         }
     }
 
-    /// Like [`entity`](Self::entity) but absence is an error.
-    pub fn require_entity(&self, kind: SegmentKind) -> Result<&Entity> {
-        self.entity(kind)?.ok_or(Error::NotFound {
+    /// Like [`item`](Self::item) but absence is an error.
+    pub fn require_item(&self, kind: ItemKind) -> Result<&Item> {
+        self.item(kind)?.ok_or(Error::NotFound {
             what: kind.as_str(),
         })
     }
@@ -467,26 +388,46 @@ impl Structure {
         Ok(())
     }
 
-    /// The superbox type UUID of a JUMBF entity (ISO/IEC 19566-5): the 16-byte
+    /// The superbox type UUID of a JUMBF item (ISO/IEC 19566-5): the 16-byte
     /// type in its description box. Callers compare it with the types they care
     /// about; this crate attaches no meaning to any of them.
     ///
-    /// Returns `Ok(None)` if the entity is not a JUMBF superbox with a
+    /// Returns `Ok(None)` if the item is not a JUMBF superbox with a
     /// description box in the first 32 bytes (including boxes using extended
-    /// lengths, which this does not interpret). Reads at most 32 bytes.
-    pub fn jumbf_type<R: Read + Seek>(
-        &self,
-        src: &mut R,
-        entity: &Entity,
-    ) -> Result<Option<[u8; 16]>> {
-        if entity.kind() != SegmentKind::Jumbf {
+    /// lengths, which this does not interpret). Reads at most 32 bytes of an item
+    /// stored as is; an item with a [transfer encoding](Item::transfer) is decoded.
+    pub fn jumbf_type<R: Read + Seek>(&self, src: &mut R, item: &Item) -> Result<Option<[u8; 16]>> {
+        if item.kind() != ItemKind::Jumbf {
             return Ok(None);
         }
-        if let Some(t) = entity.jumbf_type() {
+        if let Some(t) = item.jumbf_type() {
             return Ok(Some(t));
         }
-        let first = entity.parts().next().ok_or(Error::NotFound {
-            what: "entity part",
+        if *item.transfer() != TransferEncoding::Identity {
+            // Decode only the head. Stored bytes that do not decode, or whose decoder
+            // is not built in, give no type, as bytes that are not a superbox do.
+            const STORED_HEAD: u64 = 4096;
+            let mut stored = Vec::new();
+            for extent in item.extents() {
+                let left = STORED_HEAD - stored.len() as u64;
+                let r = extent.range();
+                self.read_into(
+                    src,
+                    ByteRange::new(r.offset(), r.len().min(left))?,
+                    &mut stored,
+                )?;
+                if stored.len() as u64 >= STORED_HEAD {
+                    break;
+                }
+            }
+            return match item.transfer().decode_prefix(&stored, 32) {
+                Ok(head) => Ok(crate::jumbf::superbox_type(&head)),
+                Err(Error::InvalidFormat(_) | Error::UnsupportedFeature(_)) => Ok(None),
+                Err(e) => Err(e),
+            };
+        }
+        let first = item.extents().next().ok_or(Error::NotFound {
+            what: "item extent",
         })?;
         let r = first.range();
         if r.len() < 32 {
@@ -503,21 +444,21 @@ impl Structure {
 
     /// The JUMBF store as a reader sees it, or `None` if the asset has none.
     ///
-    /// Usually that is the one JUMBF entity. A file with an `original` store and an
+    /// Usually that is the one JUMBF item. A file with an `original` store and an
     /// `update` (ISO BMFF) reads as the two combined, with the update's children
     /// after the original's. Several unrelated stores are
     /// [`Error::Ambiguous`]. Merkle boxes are not stores and are never returned.
     pub fn store<R: Read + Seek>(&self, src: &mut R) -> Result<Option<Vec<u8>>> {
         use crate::segment::labels::{ORIGINAL, UPDATE};
-        let original = self.entities_labelled(SegmentKind::Jumbf, ORIGINAL).next();
-        let update = self.entities_labelled(SegmentKind::Jumbf, UPDATE).next();
+        let original = self.items_labelled(ItemKind::Jumbf, ORIGINAL).next();
+        let update = self.items_labelled(ItemKind::Jumbf, UPDATE).next();
         if let (Some(o), Some(u)) = (original, update) {
-            let o = self.read_decoded(src, o)?;
-            let u = self.read_decoded(src, u)?;
+            let o = self.read_content(src, o)?;
+            let u = self.read_content(src, u)?;
             return crate::jumbf::extend(&o, &u).map(Some);
         }
-        match self.entity(SegmentKind::Jumbf)? {
-            Some(e) => self.read_decoded(src, e).map(Some),
+        match self.item(ItemKind::Jumbf)? {
+            Some(e) => self.read_content(src, e).map(Some),
             None => Ok(None),
         }
     }
@@ -528,29 +469,25 @@ impl Structure {
         self.handler.read_xmp(self, src)
     }
 
-    /// Read an entity's parts, concatenated.
-    pub fn read_entity<R: Read + Seek + ?Sized>(
-        &self,
-        src: &mut R,
-        entity: &Entity,
-    ) -> Result<Vec<u8>> {
+    /// Read an item's extents, concatenated: the bytes stored in the file.
+    pub fn read_item<R: Read + Seek + ?Sized>(&self, src: &mut R, item: &Item) -> Result<Vec<u8>> {
         let mut out = Vec::new();
-        for part in entity.parts() {
-            self.read_into(src, part.range, &mut out)?;
+        for extent in item.extents() {
+            self.read_into(src, extent.range, &mut out)?;
         }
         Ok(out)
     }
 
-    /// Read an entity's item: [`read_entity`](Self::read_entity), then the
-    /// container's [decoding](ContainerHandler::decode_entity) of what is stored.
-    /// For most containers the two are the same.
-    pub fn read_decoded<R: Read + Seek + ?Sized>(
+    /// Read an item's content: [`read_item`](Self::read_item), then the item's
+    /// [transfer encoding](Item::transfer) undone. For most items the two are the
+    /// same.
+    pub fn read_content<R: Read + Seek + ?Sized>(
         &self,
         src: &mut R,
-        entity: &Entity,
+        item: &Item,
     ) -> Result<Vec<u8>> {
-        let stored = self.read_entity(src, entity)?;
-        self.handler.decode_entity(self, entity, stored)
+        let stored = self.read_item(src, item)?;
+        item.transfer().decode(stored)
     }
 
     /// Stream a range through a caller-owned buffer; no allocation.
@@ -605,21 +542,21 @@ impl Structure {
         data.get(start..end).ok_or_else(bad)
     }
 
-    /// An entity's bytes from `data`. Borrowed, with no copy, when the entity is
-    /// a single part; copied (up to `MAX_SEGMENT_SIZE`) when it spans several.
-    pub fn slice_entity<'a>(&self, data: &'a [u8], entity: &Entity) -> Result<Cow<'a, [u8]>> {
-        let mut parts = entity.parts();
-        let Some(first) = parts.next() else {
+    /// An item's bytes from `data`. Borrowed, with no copy, when the item has a
+    /// single extent; copied (up to `MAX_SEGMENT_SIZE`) when it has several.
+    pub fn slice_item<'a>(&self, data: &'a [u8], item: &Item) -> Result<Cow<'a, [u8]>> {
+        let mut extents = item.extents();
+        let Some(first) = extents.next() else {
             return Ok(Cow::Borrowed(&[]));
         };
         let head = self.slice(data, first.range)?;
-        let Some(second) = parts.next() else {
+        let Some(second) = extents.next() else {
             return Ok(Cow::Borrowed(head));
         };
         let mut out = Vec::new();
         for r in [first.range, second.range]
             .into_iter()
-            .chain(parts.map(|p| p.range))
+            .chain(extents.map(|p| p.range))
         {
             let b = self.slice(data, r)?;
             if (out.len() as u64).saturating_add(b.len() as u64) > MAX_SEGMENT_SIZE {
@@ -696,20 +633,20 @@ impl Structure {
     // In-place patching
     // ------------------------------------------------------------------
 
-    /// Overwrite an entity's payload in an already-written stream.
+    /// Overwrite an item's bytes in an already-written stream.
     ///
-    /// `data` must fit the entity's total payload capacity; the remainder is
+    /// `data` must fit the item's total capacity; the remainder is
     /// zero-filled so the structure is unchanged. Container checksums that cover
     /// the patched payload (PNG CRC) are recomputed. `out` must contain the
     /// asset starting at offset 0.
     pub fn patch<W: Read + Write + Seek>(
         &self,
         out: &mut W,
-        entity: &Entity,
+        item: &Item,
         data: &[u8],
     ) -> Result<()> {
-        self.handler.check_patch(self, entity, data.len())?;
-        let capacity = entity.len();
+        self.handler.check_patch(self, item, data.len())?;
+        let capacity = item.len();
         if data.len() as u64 > capacity {
             return Err(Error::LimitExceeded {
                 what: "patch exceeds payload capacity",
@@ -717,19 +654,19 @@ impl Structure {
             });
         }
         let mut rest = data;
-        for part in entity.parts() {
-            let take = (rest.len() as u64).min(part.range.len()) as usize;
-            out.seek(SeekFrom::Start(part.range.offset()))?;
+        for extent in item.extents() {
+            let take = (rest.len() as u64).min(extent.range.len()) as usize;
+            out.seek(SeekFrom::Start(extent.range.offset()))?;
             out.write_all(&rest[..take])?;
-            write_zeros(out, part.range.len() - take as u64)?;
+            write_zeros(out, extent.range.len() - take as u64)?;
             rest = &rest[take..];
         }
-        // Parts are in order; fix each segment's trailer once.
+        // Extents are in order; fix each segment's trailer once.
         let mut last: Option<SegmentId> = None;
-        for part in entity.parts() {
-            if last != Some(part.segment) {
-                last = Some(part.segment);
-                self.fix_trailer(out, part.segment)?;
+        for extent in item.extents() {
+            if last != Some(extent.segment) {
+                last = Some(extent.segment);
+                self.fix_trailer(out, extent.segment)?;
             }
         }
         out.flush()?;
@@ -752,7 +689,7 @@ impl Structure {
     }
 
     /// The structure `write` would produce for `updates`, without writing: where each
-    /// entity would land, and the total size. `src` must be the stream this
+    /// item would land, and the total size. `src` must be the stream this
     /// structure was parsed from.
     ///
     /// The result is the one `write` returns, so a caller can learn where a
@@ -762,7 +699,7 @@ impl Structure {
         self.handler.plan(self, src, updates)
     }
 
-    /// Fill a placeholder: overwrite an entity's payload, in place, with `data` of
+    /// Fill a placeholder: overwrite an item's bytes, in place, with `data` of
     /// exactly the same length.
     ///
     /// This is how a signed manifest replaces the placeholder it was sized from.
@@ -774,26 +711,26 @@ impl Structure {
     /// Writing the store again with `set_jumbf` is not a substitute: that is free
     /// to change the size.
     ///
-    /// `data` is the item, not what is stored: a container that
-    /// [encodes](ContainerHandler::encode_entity) it (SVG, as base64) has `data`
-    /// encoded first, and it is the encoded length that must match.
+    /// `data` is the content, not what is stored: an item with a
+    /// [transfer encoding](Item::transfer) (SVG's base64) has `data` encoded first,
+    /// and it is the encoded length that must match.
     pub fn patch_exact<W: Read + Write + Seek>(
         &self,
         out: &mut W,
-        entity: &Entity,
+        item: &Item,
         data: &[u8],
     ) -> Result<()> {
-        let stored = self.handler.encode_entity(self, entity, data)?;
+        let stored = item.transfer().encode(data)?;
         // The container's refusal comes before a complaint about the length.
-        self.handler.check_patch(self, entity, stored.len())?;
-        if stored.len() as u64 != entity.len() {
+        self.handler.check_patch(self, item, stored.len())?;
+        if stored.len() as u64 != item.len() {
             return Err(Error::InvalidFormat(format!(
                 "replacement is {} bytes, the placeholder is {}",
                 stored.len(),
-                entity.len()
+                item.len()
             )));
         }
-        self.patch(out, entity, &stored)
+        self.patch(out, item, &stored)
     }
 
     fn fix_trailer<W: Read + Write + Seek>(&self, out: &mut W, id: SegmentId) -> Result<()> {
@@ -820,7 +757,7 @@ pub struct StructureBuilder {
     total_size: u64,
     cursor: u64,
     segments: Vec<Segment>,
-    entities: Vec<Entity>,
+    items: Vec<Item>,
     /// Segment index and media type where each sub-asset after the primary starts.
     sub_starts: Vec<(usize, Option<Cow<'static, str>>)>,
     /// Segment index where data beyond the container's structure starts, if declared.
@@ -841,7 +778,7 @@ impl StructureBuilder {
             total_size,
             cursor: 0,
             segments: Vec::new(),
-            entities: Vec::new(),
+            items: Vec::new(),
             sub_starts: Vec::new(),
             boxes: None,
             attachment: None,
@@ -891,25 +828,25 @@ impl StructureBuilder {
     /// since, for a parser that found the sub-asset was not one after all. Returns
     /// the offset where it started, which is also the cursor again.
     ///
-    /// Fails if there is no sub-asset to undo, or if an entity already refers to one
+    /// Fails if there is no sub-asset to undo, or if an item already refers to one
     /// of the segments being removed.
     pub fn rollback_subasset(&mut self) -> Result<u64> {
         let Some(&(at, _)) = self.sub_starts.last() else {
             return Err(Error::InvalidFormat("no sub-asset to roll back".into()));
         };
         if self
-            .entities
+            .items
             .iter()
-            .any(|e| e.parts().any(|p| p.segment().index() >= at))
+            .any(|e| e.extents().any(|p| p.segment().index() >= at))
         {
             return Err(Error::InvalidFormat(
-                "an entity refers to the sub-asset being rolled back".into(),
+                "an item refers to the sub-asset being rolled back".into(),
             ));
         }
         let start = self
             .segments
             .get(at)
-            .map_or(self.cursor, |s| s.extent().offset());
+            .map_or(self.cursor, |s| s.range().offset());
         self.segments.truncate(at);
         self.sub_starts.pop();
         self.cursor = start;
@@ -929,7 +866,7 @@ impl StructureBuilder {
                 limit: MAX_SEGMENTS as u64,
             });
         }
-        let ext = seg.extent();
+        let ext = seg.range();
         if ext.offset() != self.cursor {
             return Err(Error::invalid_segment(
                 ext.offset(),
@@ -972,9 +909,8 @@ impl StructureBuilder {
     }
 
     /// Like [`push_span`](Self::push_span), for a container where each item of
-    /// metadata is one segment, as chunks are: a segment of kind
-    /// [`Xmp`](SegmentKind::Xmp), [`Jumbf`](SegmentKind::Jumbf) or
-    /// [`Exif`](SegmentKind::Exif) is also declared as the entity it is the whole of.
+    /// metadata is one segment, as chunks are: the segment's payload is also
+    /// declared as the item `info` describes.
     pub fn push_item(
         &mut self,
         kind: SegmentKind,
@@ -982,14 +918,10 @@ impl StructureBuilder {
         header_len: u32,
         payload_len: u64,
         trailer_len: u16,
+        info: ItemInfo,
     ) -> Result<SegmentId> {
         let id = self.push_span(kind, name, header_len, payload_len, trailer_len)?;
-        if matches!(
-            kind,
-            SegmentKind::Xmp | SegmentKind::Jumbf | SegmentKind::Exif
-        ) {
-            self.entity_of_segments(kind, &[id])?;
-        }
+        self.item_of_segments(info, &[id])?;
         Ok(id)
     }
 
@@ -1027,93 +959,42 @@ impl StructureBuilder {
         Ok(())
     }
 
-    /// Declare an entity whose parts are the payloads of whole segments.
-    pub fn entity_of_segments(&mut self, kind: SegmentKind, ids: &[SegmentId]) -> Result<()> {
-        self.entity_of_segments_typed(kind, None, ids)
-    }
-
-    /// Like [`entity_of_segments`](Self::entity_of_segments), recording the
-    /// [JUMBF type](Entity::jumbf_type) of the item.
-    pub fn entity_of_segments_typed(
-        &mut self,
-        kind: SegmentKind,
-        jumbf_type: Option<[u8; 16]>,
-        ids: &[SegmentId],
-    ) -> Result<()> {
-        let mut parts = Vec::with_capacity(ids.len());
+    /// Declare an item whose extents are the payloads of whole segments.
+    pub fn item_of_segments(&mut self, info: ItemInfo, ids: &[SegmentId]) -> Result<()> {
+        let mut extents = Vec::with_capacity(ids.len());
         for &id in ids {
-            parts.push((id, self.segment(id)?.payload()));
+            extents.push((id, self.segment(id)?.payload()));
         }
-        self.entity_described(kind, None, None, jumbf_type, &parts)
+        self.item(info, &extents)
     }
 
-    /// Declare an entity from explicit `(segment, range)` parts. Each range must
-    /// lie within its segment's extent.
-    pub fn entity(&mut self, kind: SegmentKind, parts: &[(SegmentId, ByteRange)]) -> Result<()> {
-        self.entity_described(kind, None, None, None, parts)
-    }
-
-    /// Like [`entity`](Self::entity), with a container-defined [label](Entity::label).
-    pub fn entity_labelled(
-        &mut self,
-        kind: SegmentKind,
-        label: impl Into<Cow<'static, str>>,
-        parts: &[(SegmentId, ByteRange)],
-    ) -> Result<()> {
-        self.entity_described(kind, Some(label.into()), None, None, parts)
-    }
-
-    /// Like [`entity_labelled`](Self::entity_labelled), with the
-    /// [media type](Entity::media_type) of the data as well. Either may be `None`.
-    pub fn entity_with_media_type(
-        &mut self,
-        kind: SegmentKind,
-        label: Option<Cow<'static, str>>,
-        media_type: Option<Cow<'static, str>>,
-        parts: &[(SegmentId, ByteRange)],
-    ) -> Result<()> {
-        self.entity_described(kind, label, media_type, None, parts)
-    }
-
-    pub(crate) fn entity_described(
-        &mut self,
-        kind: SegmentKind,
-        label: Option<Cow<'static, str>>,
-        media_type: Option<Cow<'static, str>>,
-        jumbf_type: Option<[u8; 16]>,
-        parts: &[(SegmentId, ByteRange)],
-    ) -> Result<()> {
-        let mut it = parts.iter();
+    /// Declare an item from explicit `(segment, range)` extents, in logical order.
+    /// Each range must lie within its segment.
+    pub fn item(&mut self, info: ItemInfo, extents: &[(SegmentId, ByteRange)]) -> Result<()> {
+        let mut it = extents.iter();
         let Some(&(sid, range)) = it.next() else {
             return Err(Error::InvalidFormat(
-                "entity needs at least one part".into(),
+                "item needs at least one extent".into(),
             ));
         };
-        let first = self.make_part(sid, range)?;
+        let first = self.make_extent(sid, range)?;
         let mut rest = Vec::new();
         for &(sid, range) in it {
-            rest.push(self.make_part(sid, range)?);
+            rest.push(self.make_extent(sid, range)?);
         }
-        self.entities.push(Entity {
-            kind,
-            label,
-            media_type,
-            jumbf_type,
-            first,
-            rest,
-        });
+        self.items.push(Item { info, first, rest });
         Ok(())
     }
 
-    fn make_part(&self, segment: SegmentId, range: ByteRange) -> Result<Part> {
+    fn make_extent(&self, segment: SegmentId, range: ByteRange) -> Result<Extent> {
         let seg = self.segment(segment)?;
-        if !seg.extent().contains(&range) {
+        if !seg.range().contains(&range) {
             return Err(Error::invalid_segment(
                 range.offset(),
-                "entity part lies outside its segment",
+                "item extent lies outside its segment",
             ));
         }
-        Ok(Part { range, segment })
+        Ok(Extent { range, segment })
     }
 
     /// Finish. The segments must cover the whole asset.
@@ -1148,11 +1029,11 @@ impl StructureBuilder {
             let from = self
                 .segments
                 .get(start)
-                .map_or(self.total_size, |s| s.extent().offset());
+                .map_or(self.total_size, |s| s.range().offset());
             let to = self
                 .segments
                 .get(end)
-                .map_or(self.total_size, |s| s.extent().offset());
+                .map_or(self.total_size, |s| s.range().offset());
             subassets.push(SubAsset {
                 range: ByteRange::new(from, to - from)?,
                 segments: start..end,
@@ -1173,7 +1054,7 @@ impl StructureBuilder {
             media_type: self.media_type,
             total_size: self.total_size,
             segments: self.segments,
-            entities: self.entities,
+            items: self.items,
             subassets,
             boxes,
             attachment: self.attachment,
@@ -1222,7 +1103,7 @@ mod tests {
     #[test]
     fn subassets_tile_and_default_to_one() {
         let mut b = builder(30);
-        b.push_span(SegmentKind::Header, Name::None, 30, 0, 0)
+        b.push_span(SegmentKind::Preamble, Name::None, 30, 0, 0)
             .unwrap();
         let s = b.finish().unwrap();
         assert_eq!(s.subassets().len(), 1);
@@ -1231,7 +1112,7 @@ mod tests {
 
         let mut b = builder(30);
         assert!(b.begin_subasset(None).is_err(), "nothing pushed yet");
-        b.push_span(SegmentKind::Header, Name::None, 10, 0, 0)
+        b.push_span(SegmentKind::Preamble, Name::None, 10, 0, 0)
             .unwrap();
         b.begin_subasset(Some("a/b".into())).unwrap();
         assert!(b.begin_subasset(None).is_err(), "empty sub-asset");
@@ -1245,7 +1126,7 @@ mod tests {
         assert_eq!(subs[1].media_type(), Some("a/b"));
 
         let mut b = builder(30);
-        b.push_span(SegmentKind::Header, Name::None, 10, 0, 0)
+        b.push_span(SegmentKind::Preamble, Name::None, 10, 0, 0)
             .unwrap();
         b.begin_subasset(None).unwrap();
         assert!(b.finish().is_err(), "trailing empty sub-asset");
@@ -1256,7 +1137,7 @@ mod tests {
         #[derive(Debug, PartialEq)]
         struct State(u32);
         let mut b = builder(4);
-        b.push_span(SegmentKind::Header, Name::None, 4, 0, 0)
+        b.push_span(SegmentKind::Preamble, Name::None, 4, 0, 0)
             .unwrap();
         b.attach(State(1)).attach(State(2));
         let s = b.finish().unwrap();
@@ -1264,7 +1145,7 @@ mod tests {
         assert!(s.attachment::<String>().is_none());
 
         let mut b = builder(4);
-        b.push_span(SegmentKind::Header, Name::None, 4, 0, 0)
+        b.push_span(SegmentKind::Preamble, Name::None, 4, 0, 0)
             .unwrap();
         assert!(b.finish().unwrap().attachment::<State>().is_none());
     }
@@ -1273,7 +1154,7 @@ mod tests {
     fn rolling_back_a_subasset_restores_the_cursor() {
         let mut b = builder(30);
         assert!(b.rollback_subasset().is_err(), "nothing to roll back");
-        b.push_span(SegmentKind::Header, Name::None, 10, 0, 0)
+        b.push_span(SegmentKind::Preamble, Name::None, 10, 0, 0)
             .unwrap();
         b.begin_subasset(Some("a/b".into())).unwrap();
         b.push_span(SegmentKind::Other, Name::None, 5, 0, 0)
@@ -1292,19 +1173,21 @@ mod tests {
 
         // A sub-asset with nothing pushed yet rolls back too.
         let mut b = builder(30);
-        b.push_span(SegmentKind::Header, Name::None, 10, 0, 0)
+        b.push_span(SegmentKind::Preamble, Name::None, 10, 0, 0)
             .unwrap();
         b.begin_subasset(None).unwrap();
         assert_eq!(b.rollback_subasset().unwrap(), 10);
 
-        // An entity that refers to the removed segments blocks it.
+        // An item that refers to the removed segments blocks it.
         let mut b = builder(30);
         let first = b
-            .push_span(SegmentKind::Header, Name::None, 10, 0, 0)
+            .push_span(SegmentKind::Preamble, Name::None, 10, 0, 0)
             .unwrap();
         b.begin_subasset(None).unwrap();
-        let second = b.push_span(SegmentKind::Xmp, Name::None, 4, 16, 0).unwrap();
-        b.entity_of_segments(SegmentKind::Xmp, &[second]).unwrap();
+        let second = b
+            .push_span(SegmentKind::Metadata, Name::None, 4, 16, 0)
+            .unwrap();
+        b.item_of_segments(ItemInfo::xmp(), &[second]).unwrap();
         assert!(b.rollback_subasset().is_err());
         let _ = first;
     }
@@ -1312,20 +1195,20 @@ mod tests {
     #[test]
     fn tiles_exactly() {
         let mut b = builder(30);
-        b.push_span(SegmentKind::Header, Name::None, 10, 0, 0)
+        b.push_span(SegmentKind::Preamble, Name::None, 10, 0, 0)
             .unwrap();
         let id = b
-            .push_span(SegmentKind::Xmp, Name::FourCC(*b"iTXt"), 8, 8, 4)
+            .push_span(SegmentKind::Metadata, Name::FourCC(*b"iTXt"), 8, 8, 4)
             .unwrap();
-        b.entity_of_segments(SegmentKind::Xmp, &[id]).unwrap();
+        b.item_of_segments(ItemInfo::xmp(), &[id]).unwrap();
         let s = b.finish().unwrap();
         let covered: u64 = s.regions().map(|r| r.range.len()).sum();
         assert_eq!(covered, 30);
-        let e = s.require_entity(SegmentKind::Xmp).unwrap();
+        let e = s.require_item(ItemKind::Xmp).unwrap();
         assert_eq!(e.len(), 8);
-        assert!(s.entity(SegmentKind::Jumbf).unwrap().is_none());
+        assert!(s.item(ItemKind::Jumbf).unwrap().is_none());
         assert!(matches!(
-            s.require_entity(SegmentKind::Jumbf),
+            s.require_item(ItemKind::Jumbf),
             Err(Error::NotFound { .. })
         ));
     }
@@ -1351,32 +1234,34 @@ mod tests {
     }
 
     #[test]
-    fn ambiguous_entity() {
+    fn ambiguous_item() {
         let mut b = builder(8);
         let a = b
-            .push_span(SegmentKind::Jumbf, Name::None, 0, 4, 0)
+            .push_span(SegmentKind::Metadata, Name::None, 0, 4, 0)
             .unwrap();
         let c = b
-            .push_span(SegmentKind::Jumbf, Name::None, 0, 4, 0)
+            .push_span(SegmentKind::Metadata, Name::None, 0, 4, 0)
             .unwrap();
-        b.entity_of_segments(SegmentKind::Jumbf, &[a]).unwrap();
-        b.entity_of_segments(SegmentKind::Jumbf, &[c]).unwrap();
+        b.item_of_segments(ItemInfo::jumbf(), &[a]).unwrap();
+        b.item_of_segments(ItemInfo::jumbf(), &[c]).unwrap();
         let s = b.finish().unwrap();
         assert!(matches!(
-            s.entity(SegmentKind::Jumbf),
+            s.item(ItemKind::Jumbf),
             Err(Error::Ambiguous { count: 2, .. })
         ));
     }
 
     #[test]
-    fn part_must_lie_in_segment() {
+    fn extent_must_lie_in_segment() {
         let mut b = builder(10);
-        let a = b.push_span(SegmentKind::Xmp, Name::None, 0, 5, 0).unwrap();
+        let a = b
+            .push_span(SegmentKind::Metadata, Name::None, 0, 5, 0)
+            .unwrap();
         let _ = b
             .push_span(SegmentKind::Other, Name::None, 0, 5, 0)
             .unwrap();
         let outside = ByteRange::new(4, 3).unwrap();
-        assert!(b.entity(SegmentKind::Xmp, &[(a, outside)]).is_err());
+        assert!(b.item(ItemInfo::xmp(), &[(a, outside)]).is_err());
     }
 
     #[test]
