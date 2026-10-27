@@ -54,17 +54,93 @@ checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 name = "asset-io"
 version = "0.2.0"
 dependencies = [
- "brotli-decompressor",
+ "asset-io-bmff",
+ "asset-io-c2pa",
+ "asset-io-core",
+ "asset-io-jpeg",
+ "asset-io-pdf",
+ "asset-io-png",
+ "asset-io-riff",
+ "asset-io-svg",
+ "asset-io-tiff",
  "criterion",
- "flate2",
- "md5",
- "memchr",
- "memmap2",
- "quick-xml",
  "sha2",
  "tempfile",
- "thiserror",
  "tokio",
+]
+
+[[package]]
+name = "asset-io-bmff"
+version = "0.2.0"
+dependencies = [
+ "asset-io-core",
+]
+
+[[package]]
+name = "asset-io-c2pa"
+version = "0.2.0"
+dependencies = [
+ "asset-io-core",
+]
+
+[[package]]
+name = "asset-io-core"
+version = "0.2.0"
+dependencies = [
+ "brotli-decompressor",
+ "flate2",
+ "memmap2",
+ "quick-xml",
+ "thiserror",
+]
+
+[[package]]
+name = "asset-io-jpeg"
+version = "0.2.0"
+dependencies = [
+ "asset-io-core",
+ "md5",
+ "memchr",
+ "sha2",
+]
+
+[[package]]
+name = "asset-io-pdf"
+version = "0.2.0"
+dependencies = [
+ "asset-io-core",
+ "criterion",
+ "flate2",
+ "tempfile",
+]
+
+[[package]]
+name = "asset-io-png"
+version = "0.2.0"
+dependencies = [
+ "asset-io-core",
+]
+
+[[package]]
+name = "asset-io-riff"
+version = "0.2.0"
+dependencies = [
+ "asset-io-core",
+]
+
+[[package]]
+name = "asset-io-svg"
+version = "0.2.0"
+dependencies = [
+ "asset-io-core",
+ "quick-xml",
+]
+
+[[package]]
+name = "asset-io-tiff"
+version = "0.2.0"
+dependencies = [
+ "asset-io-core",
 ]
 
 [[package]]

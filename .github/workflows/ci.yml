@@ -34,13 +34,25 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-
 
       - name: Check formatting
-        run: cargo fmt --check
+        run: cargo fmt --all --check
 
       - name: Clippy (all features)
-        run: cargo clippy --all-features -- -D warnings
+        run: cargo clippy --workspace --all-features --all-targets -- -D warnings
+
+      - name: Tests without handlers
+        run: |
+          cargo test --locked -p asset-io-core --no-default-features
+          cargo test --locked -p asset-io --no-default-features
+
+      - name: Test each handler independently
+        run: |
+          for handler in jpeg png bmff riff svg pdf tiff c2pa; do
+            cargo test --locked -p asset-io --no-default-features --features "$handler"
+            cargo test --locked -p "asset-io-$handler"
+          done
 
       - name: Tests (all features)
-        run: cargo test --all-features
+        run: cargo test --locked --workspace --all-features
 
   c-bindings:
     name: C bindings

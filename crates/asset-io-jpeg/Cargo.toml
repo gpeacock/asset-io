@@ -1,0 +1,16 @@
+[package]
+name = "asset-io-jpeg"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "JPEG container handler for asset-io"
+
+[dependencies]
+asset-io-core.workspace = true
+md5 = "0.7"
+memchr = "2"
+
+[dev-dependencies]
+sha2 = "0.11"

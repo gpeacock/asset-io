@@ -1,7 +1,8 @@
 # asset-io application C bindings (ABI 1)
 
-This **separate, standalone Cargo package** leaves `asset-io` and its defaults
-unchanged. It produces `libasset_io_c.{dylib,so,a}` (Windows: DLL/import library)
+This **separate, standalone Cargo package** uses the `asset-io` facade and keeps
+its own JPEG/PNG defaults; the Rust facade has no default handlers.
+It produces `libasset_io_c.{dylib,so,a}` (Windows: DLL/import library)
 and an `rlib`. Applications in C/C++, Swift or Python can use the C ABI. This is
 **not** a Rust handler/plugin ABI. There is no dynamic handler loading, registration
 of foreign handlers, or registry sharing between separately loaded libraries.
@@ -20,8 +21,9 @@ cargo build --locked --manifest-path asset-io-c/Cargo.toml \
   --features all-formats,xmp,exif
 ```
 
-Individual `jpeg`, `png`, `bmff`, `riff`, `svg`, `pdf`, `tiff`, `xmp`, `exif`,
-`memory-mapped`, `flate` and `brotli` (transfer-encoding decoders) switches forward to the core without enabling its defaults.
+Individual `jpeg`, `png`, `bmff`, `riff`, `svg`, `pdf`, `tiff`, `c2pa`, `xmp`, `exif`,
+`memory-mapped`, `flate` and `brotli` (transfer-encoding decoders) switches forward
+through the facade without enabling additional handlers.
 Inspector switches compile core functionality; inspector-specific methods are
 not currently exported. Query the registry rather than assuming feature presence.
 The no-default library can construct registries but cannot parse any format.
