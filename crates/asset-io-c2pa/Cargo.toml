@@ -1,0 +1,11 @@
+[package]
+name = "asset-io-c2pa"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Raw C2PA manifest-store sidecar handler for asset-io"
+
+[dependencies]
+asset-io-core.workspace = true

@@ -77,13 +77,21 @@ dependencies = [
 name = "asset-io"
 version = "0.2.0"
 dependencies = [
- "brotli-decompressor",
- "flate2",
- "md5",
- "memchr",
- "memmap2",
- "quick-xml",
- "thiserror",
+ "asset-io-bmff",
+ "asset-io-c2pa",
+ "asset-io-core",
+ "asset-io-jpeg",
+ "asset-io-pdf",
+ "asset-io-png",
+ "asset-io-riff",
+ "asset-io-svg",
+]
+
+[[package]]
+name = "asset-io-bmff"
+version = "0.2.0"
+dependencies = [
+ "asset-io-core",
 ]
 
 [[package]]
@@ -94,6 +102,62 @@ dependencies = [
  "cbindgen",
  "cimpl",
  "serde_json",
+]
+
+[[package]]
+name = "asset-io-c2pa"
+version = "0.2.0"
+dependencies = [
+ "asset-io-core",
+]
+
+[[package]]
+name = "asset-io-core"
+version = "0.2.0"
+dependencies = [
+ "brotli-decompressor",
+ "flate2",
+ "memmap2",
+ "quick-xml",
+ "thiserror",
+]
+
+[[package]]
+name = "asset-io-jpeg"
+version = "0.2.0"
+dependencies = [
+ "asset-io-core",
+ "md5",
+ "memchr",
+]
+
+[[package]]
+name = "asset-io-pdf"
+version = "0.2.0"
+dependencies = [
+ "asset-io-core",
+]
+
+[[package]]
+name = "asset-io-png"
+version = "0.2.0"
+dependencies = [
+ "asset-io-core",
+]
+
+[[package]]
+name = "asset-io-riff"
+version = "0.2.0"
+dependencies = [
+ "asset-io-core",
+]
+
+[[package]]
+name = "asset-io-svg"
+version = "0.2.0"
+dependencies = [
+ "asset-io-core",
+ "quick-xml",
 ]
 
 [[package]]

@@ -1,0 +1,23 @@
+[package]
+name = "asset-io-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Handler-free structures, I/O and write execution for asset-io"
+
+[dependencies]
+thiserror = "1.0"
+quick-xml = { version = "0.38", optional = true, default-features = false }
+memmap2 = { version = "0.9", optional = true }
+flate2 = { version = "1", optional = true, default-features = false, features = ["rust_backend"] }
+brotli-decompressor = { version = "5", optional = true, default-features = false, features = ["std"] }
+
+[features]
+default = []
+flate = ["dep:flate2"]
+brotli = ["dep:brotli-decompressor"]
+exif = []
+xmp = ["dep:quick-xml"]
+memory-mapped = ["dep:memmap2"]

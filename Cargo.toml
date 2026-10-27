@@ -1,3 +1,35 @@
+[workspace]
+members = [
+    ".",
+    "crates/asset-io-core",
+    "crates/asset-io-jpeg",
+    "crates/asset-io-png",
+    "crates/asset-io-bmff",
+    "crates/asset-io-riff",
+    "crates/asset-io-svg",
+    "crates/asset-io-pdf",
+    "crates/asset-io-c2pa",
+]
+exclude = ["asset-io-c", "fuzz"]
+resolver = "2"
+
+[workspace.package]
+version = "0.2.0"
+edition = "2021"
+authors = ["Gavin Peacock <gpeacock@adobe.com>"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/gpeacock/asset-io"
+
+[workspace.dependencies]
+asset-io-core = { path = "crates/asset-io-core", version = "0.2.0", default-features = false }
+asset-io-jpeg = { path = "crates/asset-io-jpeg", version = "0.2.0", default-features = false }
+asset-io-png = { path = "crates/asset-io-png", version = "0.2.0", default-features = false }
+asset-io-bmff = { path = "crates/asset-io-bmff", version = "0.2.0", default-features = false }
+asset-io-riff = { path = "crates/asset-io-riff", version = "0.2.0", default-features = false }
+asset-io-svg = { path = "crates/asset-io-svg", version = "0.2.0", default-features = false }
+asset-io-pdf = { path = "crates/asset-io-pdf", version = "0.2.0", default-features = false }
+asset-io-c2pa = { path = "crates/asset-io-c2pa", version = "0.2.0", default-features = false }
+
 [package]
 name = "asset-io"
 version = "0.2.0"
@@ -11,14 +43,14 @@ categories = ["multimedia", "parsing"]
 exclude = ["tests/", "fuzz/", "fuzz.sh", "FUZZING_SETUP.md", "Makefile"]
 
 [dependencies]
-thiserror = "1.0"
-
-md5 = { version = "0.7", optional = true }
-memchr = { version = "2", optional = true }
-quick-xml = { version = "0.38", optional = true, default-features = false }
-memmap2 = { version = "0.9", optional = true }
-flate2 = { version = "1", optional = true, default-features = false, features = ["rust_backend"] }
-brotli-decompressor = { version = "5", optional = true, default-features = false, features = ["std"] }
+asset-io-core.workspace = true
+asset-io-jpeg = { workspace = true, optional = true }
+asset-io-png = { workspace = true, optional = true }
+asset-io-bmff = { workspace = true, optional = true }
+asset-io-riff = { workspace = true, optional = true }
+asset-io-svg = { workspace = true, optional = true }
+asset-io-pdf = { workspace = true, optional = true }
+asset-io-c2pa = { workspace = true, optional = true }
 
 [dev-dependencies]
 sha2 = "0.11"
@@ -27,24 +59,25 @@ criterion = "0.5"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util"] }
 
 [features]
-default = ["jpeg", "png"]
-jpeg = ["md5", "memchr"]
-png = []
-bmff = []
-riff = []
-svg = ["quick-xml"]
-pdf = ["flate"]
+default = []
+jpeg = ["dep:asset-io-jpeg"]
+png = ["dep:asset-io-png"]
+bmff = ["dep:asset-io-bmff"]
+riff = ["dep:asset-io-riff"]
+svg = ["dep:asset-io-svg"]
+pdf = ["dep:asset-io-pdf", "flate"]
+c2pa = ["dep:asset-io-c2pa"]
 # Transfer-encoding decoders: zlib, raw deflate and gzip; Brotli.
-flate = ["dep:flate2"]
-brotli = ["dep:brotli-decompressor"]
-exif = []
-xmp = ["quick-xml", "md5"]
-memory-mapped = ["memmap2"]
-all-formats = ["jpeg", "png", "bmff", "riff", "svg", "pdf"]
+flate = ["asset-io-core/flate", "asset-io-png?/flate", "asset-io-bmff?/flate"]
+brotli = ["asset-io-core/brotli", "asset-io-bmff?/brotli"]
+exif = ["asset-io-core/exif", "asset-io-bmff?/exif"]
+xmp = ["asset-io-core/xmp"]
+memory-mapped = ["asset-io-core/memory-mapped", "asset-io-pdf?/memory-mapped"]
+all-formats = ["jpeg", "png", "bmff", "riff", "svg", "pdf", "c2pa"]
 
 [[example]]
 name = "inspect"
-required-features = ["all-formats", "xmp", "exif"]
+required-features = ["all-formats", "exif"]
 
 [[example]]
 name = "tokio_client"
@@ -54,11 +87,6 @@ required-features = ["all-formats"]
 name = "io"
 harness = false
 required-features = ["all-formats"]
-
-[[bench]]
-name = "pdf"
-harness = false
-required-features = ["pdf"]
 
 [profile.bench]
 inherits = "release"

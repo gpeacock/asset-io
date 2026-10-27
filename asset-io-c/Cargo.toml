@@ -1,3 +1,5 @@
+[workspace]
+
 [package]
 name = "asset-io-c"
 version = "0.2.0"
@@ -27,7 +29,8 @@ bmff = ["asset-io/bmff"]
 riff = ["asset-io/riff"]
 svg = ["asset-io/svg"]
 pdf = ["asset-io/pdf"]
-all-formats = ["jpeg", "png", "bmff", "riff", "svg", "pdf"]
+c2pa = ["asset-io/c2pa"]
+all-formats = ["jpeg", "png", "bmff", "riff", "svg", "pdf", "c2pa"]
 exif = ["asset-io/exif"]
 xmp = ["asset-io/xmp"]
 memory-mapped = ["asset-io/memory-mapped"]

@@ -1,0 +1,24 @@
+[package]
+name = "asset-io-pdf"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "PDF container handler for asset-io"
+
+[dependencies]
+asset-io-core = { workspace = true, features = ["flate"] }
+
+[dev-dependencies]
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+tempfile = "3"
+criterion = "0.5"
+
+[features]
+default = []
+memory-mapped = ["asset-io-core/memory-mapped"]
+
+[[bench]]
+name = "pdf"
+harness = false

@@ -1,5 +1,10 @@
 # Test Fixtures
 
+This is the workspace's shared fixture corpus. Container-family integration
+tests live in their owning crates under `crates/`, while facade cross-container
+tests and C binding tests also consume these files. Keeping the corpus here
+avoids duplicating binary assets; core tests use synthetic handlers instead.
+
 This directory contains a minimal set of JPEG test files for the asset-io library.
 
 ## Committed Fixtures (3 files, ~1.1 MB)
