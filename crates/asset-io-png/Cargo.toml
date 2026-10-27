@@ -1,0 +1,15 @@
+[package]
+name = "asset-io-png"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "PNG container handler for asset-io"
+
+[dependencies]
+asset-io-core.workspace = true
+
+[features]
+default = []
+flate = ["asset-io-core/flate"]

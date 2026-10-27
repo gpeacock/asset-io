@@ -13,6 +13,8 @@
 
 //! Read-side sink and zero-copy slices on real files.
 
+#![cfg(all(feature = "jpeg", feature = "png", feature = "bmff"))]
+
 use asset_io::{ByteRange, Chunk, Error, HandlerRegistry, NullSink, Result, Role, Structure};
 use std::borrow::Cow;
 use std::io::Cursor;

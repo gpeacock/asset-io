@@ -1,0 +1,17 @@
+[package]
+name = "asset-io-bmff"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "ISO BMFF and HEIF container handler for asset-io"
+
+[dependencies]
+asset-io-core.workspace = true
+
+[features]
+default = []
+flate = ["asset-io-core/flate"]
+brotli = ["asset-io-core/brotli"]
+exif = ["asset-io-core/exif"]

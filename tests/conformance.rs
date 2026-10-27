@@ -14,6 +14,15 @@
 //! The conformance checks, run on every real file in `tests/fixtures` with the
 //! handler that serves it.
 
+#![cfg(any(
+    feature = "jpeg",
+    feature = "png",
+    feature = "bmff",
+    feature = "riff",
+    feature = "svg",
+    feature = "pdf"
+))]
+
 use asset_io::testing::Conformance;
 use asset_io::HandlerRegistry;
 use std::fs;

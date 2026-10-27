@@ -39,6 +39,7 @@ fn main() -> asset_io::Result<()> {
         println!("  {}", describe(e));
     }
 
+    #[cfg(feature = "exif")]
     if let Some(info) = structure.exif_info(&mut src)? {
         println!("\nEXIF: {info}");
     }

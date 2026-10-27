@@ -131,6 +131,7 @@ fn errors_handles_features_and_lifetimes() {
     assert_eq!(f.iter().any(|s| s == "webp"), cfg!(feature = "riff"));
     assert_eq!(f.iter().any(|s| s == "svg"), cfg!(feature = "svg"));
     assert_eq!(f.iter().any(|s| s == "pdf"), cfg!(feature = "pdf"));
+    assert_eq!(f.iter().any(|s| s == "c2pa"), cfg!(feature = "c2pa"));
     let empty = owned(asset_io_registry_new(0));
     let f = owned(asset_io_registry_formats(empty.0));
     assert_eq!(bytes(f.0), b"[]");
@@ -172,6 +173,35 @@ fn errors_handles_features_and_lifetimes() {
         let b = owned(asset_io_structure_json(s.0));
         assert!(!bytes(b.0).is_empty());
     }
+}
+
+#[cfg(feature = "c2pa")]
+#[test]
+fn sidecars_can_be_replaced_and_removed_through_the_c_api() {
+    let r = registry();
+    let format = CString::new("c2pa").unwrap();
+    let input = b"raw sidecar";
+    let asset = owned(asset_io_parse_memory(
+        r.0,
+        format.as_ptr(),
+        input.as_ptr(),
+        input.len(),
+    ));
+    let metadata = owned(asset_io_metadata_bytes(asset.0, 2));
+    assert_eq!(bytes(metadata.0), input);
+    let updates = owned(asset_io_updates_new());
+    let replacement = jumbf(1);
+    assert_eq!(
+        asset_io_updates_metadata(updates.0, 2, 1, replacement.as_ptr(), replacement.len()),
+        0
+    );
+    let output = owned(asset_io_write_memory(asset.0, updates.0));
+    assert_eq!(bytes(output.0), replacement);
+    assert_eq!(asset_io_updates_remove_all(updates.0), 0);
+    let output = owned(asset_io_write_memory(asset.0, updates.0));
+    assert!(bytes(output.0).is_empty());
+    let empty = owned(asset_io_parse_memory(r.0, format.as_ptr(), ptr::null(), 0));
+    assert!(inspect(empty.0)["items"].as_array().unwrap().is_empty());
 }
 
 struct Context {

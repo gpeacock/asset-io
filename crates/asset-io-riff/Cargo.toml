@@ -1,0 +1,11 @@
+[package]
+name = "asset-io-riff"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "RIFF container handler for asset-io"
+
+[dependencies]
+asset-io-core.workspace = true

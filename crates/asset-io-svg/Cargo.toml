@@ -1,0 +1,12 @@
+[package]
+name = "asset-io-svg"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "SVG container handler for asset-io"
+
+[dependencies]
+asset-io-core.workspace = true
+quick-xml = { version = "0.38", default-features = false }
