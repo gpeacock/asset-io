@@ -17,7 +17,7 @@
 //! - Extracting embedded thumbnails from EXIF data
 //! - Reading basic EXIF metadata (Make, Model, DateTime, etc.)
 //!
-//! For full TIFF container support, see `formats/tiff_io.rs` (future).
+//! TIFF/DNG container support is provided by the independent `tiff` feature.
 //!
 //! TIFF Structure:
 //! - Header: byte order (II/MM), magic (0x002A), IFD offset

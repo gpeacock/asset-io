@@ -27,7 +27,7 @@ const PRIVATE_CORE: &[&str] = &[
     "containers",
 ];
 
-const HANDLERS: &[&str] = &["jpeg", "png", "bmff", "riff", "svg", "pdf"];
+const HANDLERS: &[&str] = &["jpeg", "png", "bmff", "riff", "svg", "pdf", "tiff"];
 
 /// External crates a handler owns; no other handler may use them.
 const OWNED_DEPS: &[(&str, &str)] = &[("jpeg", "md5"), ("jpeg", "memchr"), ("svg", "quick_xml")];

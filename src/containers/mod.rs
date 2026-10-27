@@ -13,7 +13,7 @@
 
 //! Built-in container handlers, one module per format, each behind its feature.
 //!
-//! Each handler module ([`jpeg`], [`png`], [`bmff`], [`riff`], [`svg`], [`pdf`]) exposes `handler()`
+//! Each handler module ([`jpeg`], [`png`], [`bmff`], [`riff`], [`svg`], [`pdf`], [`tiff`]) exposes `handler()`
 //! for registration plus direct `parse` and `write` functions. Most callers go
 //! through [`HandlerRegistry`] instead.
 //!
@@ -42,6 +42,8 @@ pub mod png;
 pub mod riff;
 #[cfg(feature = "svg")]
 pub mod svg;
+#[cfg(feature = "tiff")]
+pub mod tiff;
 
 /// Add the handler of every enabled format to `registry`.
 ///
@@ -61,4 +63,6 @@ pub(crate) fn register_builtin(registry: &mut HandlerRegistry) {
     registry.add_arc(svg::handler());
     #[cfg(feature = "pdf")]
     registry.add_arc(pdf::handler());
+    #[cfg(feature = "tiff")]
+    registry.add_arc(tiff::handler());
 }

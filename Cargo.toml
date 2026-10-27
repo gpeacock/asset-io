@@ -34,13 +34,14 @@ bmff = []
 riff = []
 svg = ["quick-xml"]
 pdf = ["flate"]
+tiff = []
 # Transfer-encoding decoders: zlib, raw deflate and gzip; Brotli.
 flate = ["dep:flate2"]
 brotli = ["dep:brotli-decompressor"]
 exif = []
 xmp = ["quick-xml", "md5"]
 memory-mapped = ["memmap2"]
-all-formats = ["jpeg", "png", "bmff", "riff", "svg", "pdf"]
+all-formats = ["jpeg", "png", "bmff", "riff", "svg", "pdf", "tiff"]
 
 [[example]]
 name = "inspect"
