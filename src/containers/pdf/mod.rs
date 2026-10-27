@@ -316,7 +316,11 @@ impl<'io> Parser<'io> {
         let mut entry_count = 0usize;
         let mut classic_count = 0usize;
         let mut storage = 0usize;
+        let mut visited = BTreeSet::new();
         for _ in 0..MAX_REVISIONS {
+            if !visited.insert(offset) {
+                return Err(invalid("cyclic Prev chain"));
+            }
             let file_size = self.size;
             let (entries_so_far, classic_so_far) = (entry_count, classic_count);
             let classic = self
@@ -538,11 +542,7 @@ impl<'io> Parser<'io> {
             match trailer.remove(b"Prev".as_slice()) {
                 None => return root.ok_or_else(|| invalid("missing document Root")),
                 Some(value) => {
-                    let previous = value.integer()?;
-                    if previous >= offset {
-                        return Err(invalid("cyclic or forward Prev chain"));
-                    }
-                    offset = previous;
+                    offset = value.integer()?;
                 }
             }
         }
@@ -811,8 +811,14 @@ impl<'io> Parser<'io> {
         } else {
             b"EmbeddedFile"
         };
-        if !required(&mut dict, b"Type")?.is_name(expected_type) {
-            return Err(invalid("unexpected metadata stream type"));
+        match dict.remove(b"Type".as_slice()) {
+            Some(value) if !value.is_name(expected_type) => {
+                return Err(invalid("unexpected metadata stream type"));
+            }
+            None if kind == ItemKind::Xmp => {
+                return Err(invalid("missing metadata stream type"));
+            }
+            _ => {}
         }
         if kind == ItemKind::Xmp && !required(&mut dict, b"Subtype")?.is_name(b"XML") {
             return Err(invalid("XMP stream must have XML subtype"));
@@ -874,8 +880,10 @@ impl<'io> Parser<'io> {
                 if ranges.iter().any(|(_, kind, _)| *kind == ItemKind::Jumbf) {
                     return Err(invalid("multiple document-level C2PA manifests"));
                 }
-                if !required(&mut spec, b"Subtype")?.is_name(b"application/c2pa") {
-                    return Err(invalid("C2PA file specification has wrong subtype"));
+                if let Some(subtype) = spec.remove(b"Subtype".as_slice()) {
+                    if !subtype.is_name(b"application/c2pa") {
+                        return Err(invalid("C2PA file specification has wrong subtype"));
+                    }
                 }
                 let ef_value = required(&mut spec, b"EF")?;
                 let mut ef = self.resolve(ef_value).await?.dictionary()?;

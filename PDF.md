@@ -14,6 +14,8 @@ association. Cross-reference streams remain compact tables; compressed object
 streams are decoded on demand, with only one object stream cached during
 parsing. It does not load the document, decode page content, or search for
 metadata markers. Unreferenced and superseded metadata are not exposed.
+Linearized PDFs may link forward through `/Prev`; repeated cross-reference offsets
+are rejected as cycles, and the same revision and resource limits apply.
 
 Each metadata stream, including those with an indirect `/Length`, is a segment holding
 the stream's payload as it is in the file, and the item for XMP or the C2PA store. The
@@ -36,7 +38,12 @@ file-stability requirements.
 Only document-level C2PA stores associated through the catalog's `/AF` are
 discovered. Page/object-level manifests and attachment-only stores without that
 association are outside this first version. C2PA file specifications require
-`/AFRelationship /C2PA_Manifest` and `/Subtype /application#2Fc2pa`.
+`/AFRelationship /C2PA_Manifest`. New file specifications include
+`/Subtype /application#2Fc2pa`; legacy files may omit it, but an explicitly
+conflicting subtype is rejected. For compatibility with legacy writers, the
+associated embedded stream may omit `/Type /EmbeddedFile`; an explicitly
+conflicting type is rejected. XMP streams still require `/Type /Metadata` and
+`/Subtype /XML`.
 Multiple document-level C2PA stores are rejected rather than concatenated.
 
 Encryption, hybrid-reference files, external metadata streams, other filter
