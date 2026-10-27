@@ -289,6 +289,82 @@ fn mixed_classic_and_stream_revisions_preserve_latest_object_semantics() {
     assert_eq!(asset.xmp().unwrap().as_deref(), Some(b"new".as_slice()));
 }
 
+#[test]
+fn forward_prev_offsets_are_supported_without_allowing_cycles() {
+    for cyclic in [false, true] {
+        let mut pdf = metadata_pdf();
+        let first = pdf.finish("/Root 1 0 R /Prev 0000000000");
+        pdf.entries.clear();
+        let extra = if cyclic {
+            format!("/Root 1 0 R /Prev {first}")
+        } else {
+            "/Root 1 0 R".to_string()
+        };
+        let main = pdf.finish(&extra);
+        assert!(main > first);
+        let key = b"/Prev ";
+        let start = pdf.bytes.windows(key.len()).position(|v| v == key).unwrap() + key.len();
+        pdf.bytes[start..start + 10].copy_from_slice(format!("{main:010}").as_bytes());
+        pdf.bytes
+            .extend_from_slice(format!("startxref\n{first}\n%%EOF\n").as_bytes());
+
+        if cyclic {
+            assert!(parse_error(pdf.bytes)
+                .to_string()
+                .contains("cyclic Prev chain"));
+        } else {
+            let mut asset = Asset::from_source(Cursor::new(pdf.bytes)).unwrap();
+            assert_eq!(asset.xmp().unwrap().as_deref(), Some(b"<xmp/>".as_slice()));
+            assert_eq!(
+                asset.jumbf().unwrap().as_deref(),
+                Some(b"manifest".as_slice())
+            );
+        }
+    }
+}
+
+#[test]
+fn legacy_embedded_streams_may_omit_type_but_not_declare_a_wrong_type() {
+    for stream_type in ["", "/Type /EmbeddedFile", "/Type /Metadata"] {
+        let mut pdf = metadata_pdf();
+        pdf.stream(5, &format!("{stream_type} /Length 8"), b"manifest");
+        pdf.finish("/Root 1 0 R");
+        if stream_type == "/Type /Metadata" {
+            assert!(parse_error(pdf.bytes)
+                .to_string()
+                .contains("unexpected metadata stream type"));
+        } else {
+            let mut asset = Asset::from_source(Cursor::new(pdf.bytes)).unwrap();
+            assert_eq!(
+                asset.jumbf().unwrap().as_deref(),
+                Some(b"manifest".as_slice())
+            );
+        }
+    }
+}
+
+#[test]
+fn legacy_c2pa_file_specifications_may_omit_subtype_but_not_conflict() {
+    for subtype in ["", "/Subtype /application#2Fc2pa", "/Subtype /text#2Fplain"] {
+        let mut pdf = metadata_pdf();
+        pdf.object(
+            4,
+            0,
+            format!("<< {subtype} /AFRelationship /C2PA_Manifest /EF << /F 5 0 R >> >>").as_bytes(),
+        );
+        pdf.finish("/Root 1 0 R");
+        if subtype == "/Subtype /text#2Fplain" {
+            assert!(parse_error(pdf.bytes).to_string().contains("wrong subtype"));
+        } else {
+            let mut asset = Asset::from_source(Cursor::new(pdf.bytes)).unwrap();
+            assert_eq!(
+                asset.jumbf().unwrap().as_deref(),
+                Some(b"manifest".as_slice())
+            );
+        }
+    }
+}
+
 fn sparse_xref_document(dictionary: &str, data: &[u8]) -> Vec<u8> {
     let mut pdf = Pdf::new();
     pdf.object(1, 0, b"<< /Type /Catalog >>");
