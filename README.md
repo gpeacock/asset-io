@@ -25,7 +25,7 @@ asset-io exposes what each format's own specifications define, including compani
 |---------|-----------|------|-------|
 | `jpeg`  | JPEG      | yes  | yes   |
 | `png`   | PNG       | yes  | yes   |
-| `bmff`  | ISO BMFF (MP4, HEIC, AVIF, ...) | yes | yes, with streaming chunk-offset rewrite and merkle boxes |
+| `bmff`  | ISO BMFF (MP4, HEIC, AVIF, fragmented MP4, DASH media segments, ...) | yes | yes, with streaming offset/index rewrite and merkle boxes |
 | `riff`  | RIFF (WebP, WAV, AVI) | yes | yes; WebP XMP maintains the `VP8X` flag |
 | `svg`   | SVG       | yes  | yes; a splice, nothing re-serialized; the manifest is base64 text |
 | `pdf`   | PDF 1.0–2.0 | XMP and the document's C2PA store, found through the catalog | appends an incremental revision; see `PDF.md` |
@@ -38,6 +38,9 @@ Decoders for transfer encodings are optional features, in neither the defaults n
 | `brotli` | Brotli (pure-Rust `brotli-decompressor`) |
 
 Containers implement `ContainerHandler` and are found through `HandlerRegistry`, by format string or by content. Callers can register their own handlers.
+
+See the [BMFF README](src/containers/bmff/README.md) for fragmented
+MP4 and DASH support, usage, and limitations.
 
 ## Use
 

@@ -64,7 +64,8 @@
 //! `manifest` (or `original`) box in place, or is inserted after `ftyp`. Any
 //! `update` box is dropped, as when a file is re-signed. `remove_jumbf` drops every
 //! C2PA box. XMP follows the same placement rules, and is always written as the
-//! `uuid` box.
+//! `uuid` box. DASH media segments use the same rules after `styp`, or before
+//! the first box when no type box is present.
 //!
 //! HEIF items, whatever their kind, are carried through a write unchanged:
 //! updates do not edit, add or remove them (an XMP item in `mdat` stays as it is
@@ -89,10 +90,16 @@
 //! before copying starts, so there is one pass. Tables are rewritten through the
 //! copy buffer, so memory does not grow with the size of `moov`; only `iloc`,
 //! which is variable-length, is buffered (capped at 16 MiB). When no box changes
-//! size, nothing is rewritten and `moov` is copied verbatim. `mfro` and `sidx`
-//! hold sizes and relative offsets, which these edits do not change.
+//! size, nothing is rewritten and `moov` is copied verbatim. Fragment-relative
+//! `trun` and `saio` offsets and `sidx` first offsets and reference sizes are
+//! adjusted too. `mfro` holds the size of `mfra`, which these edits do not change.
 
+#![doc = include_str!("README.md")]
+
+mod fragments;
 mod heif_items;
+
+pub use fragments::{fragment_layout, Fragment, FragmentLayout};
 
 use crate::plan::{OffsetMap, Relocate, WritePlan};
 use crate::{
@@ -213,6 +220,8 @@ const FULL_BOXES: &[[u8; 4]] = &[
 const UUID: [u8; 4] = *b"uuid";
 const MDAT: [u8; 4] = *b"mdat";
 const FTYP: [u8; 4] = *b"ftyp";
+const STYP: [u8; 4] = *b"styp";
+const MOOF: [u8; 4] = *b"moof";
 const META: [u8; 4] = *b"meta";
 const HDLR: [u8; 4] = *b"hdlr";
 
@@ -236,6 +245,7 @@ impl ContainerHandler for BmffHandler {
     fn formats(&self) -> &[FormatSpec] {
         const F: &[FormatSpec] = &[
             FormatSpec::new("video/mp4", "mp4").media_type_aliases(&["application/mp4"]),
+            FormatSpec::new("video/iso.segment", "m4s").extension_aliases(&["cmfv", "cmfa"]),
             FormatSpec::new("audio/mp4", "m4a"),
             FormatSpec::new("video/x-m4v", "m4v"),
             FormatSpec::new("video/quicktime", "mov"),
@@ -247,7 +257,21 @@ impl ContainerHandler for BmffHandler {
     }
 
     fn detect(&self, header: &[u8]) -> bool {
-        header.len() >= 12 && header[4..8] == FTYP
+        header.len() >= 8
+            && match &header[4..8] {
+                b"ftyp" | b"styp" => header.len() >= 12,
+                b"moof" | b"sidx" | b"emsg" | b"prft" => true,
+                b"uuid" => {
+                    let at = if header[..4] == 1u32.to_be_bytes() {
+                        16
+                    } else {
+                        8
+                    };
+                    header.get(at..at + 16) == Some(C2PA_UUID.as_slice())
+                        || header.get(at..at + 16) == Some(XMP_UUID.as_slice())
+                }
+                _ => false,
+            }
     }
 
     fn parse_async(self: Arc<Self>, io: Io) -> BoxFuture<'static, Result<Structure>> {
@@ -506,14 +530,27 @@ where
 
 /// Media type implied by the major brand of a leading `ftyp` box.
 async fn media_type(io: &mut Io, total: u64) -> Result<&'static str> {
-    let Some(h) = read_header(io, 0, total).await? else {
-        return Ok("video/mp4");
+    let mut at = 0;
+    let h = loop {
+        let Some(h) = read_header(io, at, total).await? else {
+            return Ok("video/mp4");
+        };
+        if h.ty != UUID && h.ty != *b"emsg" && h.ty != *b"prft" && h.ty != *b"free" {
+            break h;
+        }
+        at += h.size;
+        if at == total {
+            return Ok("video/mp4");
+        }
     };
+    if h.ty == STYP || h.ty == MOOF || h.ty == *b"sidx" {
+        return Ok("video/iso.segment");
+    }
     if h.ty != FTYP || h.size < h.header_len as u64 + 4 {
         return Ok("video/mp4");
     }
     let mut brand = [0u8; 4];
-    io.read_at(h.header_len as u64, &mut brand).await?;
+    io.read_at(at + h.header_len as u64, &mut brand).await?;
     Ok(match &brand {
         b"avif" | b"avis" => "image/avif",
         b"heic" | b"heix" | b"hevc" | b"hevx" => "image/heic",
@@ -622,7 +659,7 @@ async fn classify(io: &mut Io, at: u64, h: &BoxHeader) -> Result<Classified> {
         item: None,
     };
     match h.ty {
-        FTYP => return Ok(plain(SegmentKind::Preamble)),
+        FTYP | STYP => return Ok(plain(SegmentKind::Preamble)),
         MDAT => return Ok(plain(SegmentKind::MediaData)),
         UUID => {}
         _ => return Ok(plain(SegmentKind::Other)),
@@ -897,6 +934,7 @@ enum Patch {
         stride: u32,
         field_off: u32,
         width: u8,
+        base: Option<u64>,
     },
     /// Replacement bytes of the same length.
     Bytes { at: u64, data: Vec<u8> },
@@ -921,7 +959,7 @@ impl Patch {
 
 /// Boxes of these types can contain offset-bearing boxes.
 fn may_hold_offsets(name: Name) -> bool {
-    matches!(name, Name::FourCC(t) if t == *b"moov" || t == *b"moof" || t == *b"mfra" || t == *b"meta")
+    matches!(name, Name::FourCC(t) if t == *b"moov" || t == MOOF || t == *b"mfra" || t == *b"meta" || t == *b"sidx")
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -932,6 +970,7 @@ enum Table {
     Iloc,
     Tfhd,
     Tfra,
+    Trun,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -942,6 +981,7 @@ struct Candidate {
     content: u64,
     version: u8,
     flags: u32,
+    traf: Option<u64>,
 }
 
 async fn read_u32_at(io: &mut Io, at: u64) -> Result<u32> {
@@ -952,16 +992,41 @@ async fn read_u32_at(io: &mut Io, at: u64) -> Result<u32> {
 
 /// Find the offset-bearing boxes inside one top-level box by reading box headers,
 /// then read just their table headers.
-async fn collect_patches(io: &mut Io, seg: &Segment, map: &OffsetMap) -> Result<Vec<Patch>> {
+async fn collect_patches(
+    io: &mut Io,
+    src: &Structure,
+    seg: &Segment,
+    map: &OffsetMap,
+) -> Result<Vec<Patch>> {
+    if seg.name() == Name::FourCC(*b"sidx") {
+        let next = src
+            .segments()
+            .partition_point(|s| s.range().offset() <= seg.range().offset());
+        let has_ssix = src.segments()[next..]
+            .iter()
+            .take_while(|s| {
+                !matches!(s.name(), Name::FourCC(MOOF | MDAT)) && s.name() != Name::FourCC(*b"sidx")
+            })
+            .any(|s| s.name() == Name::FourCC(*b"ssix"));
+        return index_patches(io, seg, map, has_ssix).await;
+    }
     let mut cands: Vec<Candidate> = Vec::new();
+    let mut traf = None;
+    let mut first_traf = None;
     let ext = seg.range();
     walk(io, ext.offset(), ext.end(), &mut |n: &Node<'_>| {
+        if n.path == "/moof/traf" {
+            traf = Some(n.range.offset());
+            first_traf = first_traf.or(traf);
+        }
         let table = match n.path {
             "/moov/trak/mdia/minf/stbl/stco" => Table::Stco,
             "/moov/trak/mdia/minf/stbl/co64" => Table::Co64,
             "/moov/trak/mdia/minf/stbl/saio" => Table::Saio,
             "/meta/iloc" => Table::Iloc,
             "/moof/traf/tfhd" => Table::Tfhd,
+            "/moof/traf/trun" => Table::Trun,
+            "/moof/traf/saio" => Table::Saio,
             "/mfra/tfra" => Table::Tfra,
             _ => return Ok(()),
         };
@@ -983,14 +1048,79 @@ async fn collect_patches(io: &mut Io, seg: &Segment, map: &OffsetMap) -> Result<
             content: n.range.offset() + n.header_len as u64 + 4,
             version,
             flags,
+            traf: if n.path.starts_with("/moof/traf/") {
+                traf
+            } else {
+                None
+            },
         });
         Ok(())
     })
     .await?;
 
+    let mut bases = std::collections::BTreeMap::new();
+    for c in &cands {
+        if matches!(c.table, Table::Tfhd) {
+            require_room(c, 4)?;
+            let base = if c.flags & 1 != 0 {
+                require_room(c, 12)?;
+                Some(read_u64_at(io, c.content + 4).await?)
+            } else if c.flags & 0x020000 != 0 || c.traf == first_traf {
+                Some(ext.offset())
+            } else {
+                None
+            };
+            if bases.insert(c.traf, base).is_some() {
+                return Err(Error::invalid_segment(c.content, "duplicate tfhd in traf"));
+            }
+        }
+    }
+    let mut uniform = fragment_media_moves_together(src, seg, map)?;
+    // An explicit base can address media outside this fragment's top-level run.
+    // Such media must move with the local media before an inherited base is safe
+    // to leave implicit.
+    for c in &cands {
+        if !matches!(c.table, Table::Trun) {
+            continue;
+        }
+        if let Some(Some(base)) = bases.get(&c.traf) {
+            require_room(c, if c.flags & 1 == 0 { 4 } else { 8 })?;
+            let offset = if c.flags & 1 != 0 {
+                read_u32_at(io, c.content + 4).await? as i32
+            } else {
+                0
+            };
+            let target = track_run_target(*base, offset, c.content)?;
+            if map.apply(target)? as i128 - target as i128
+                != map.apply(ext.offset())? as i128 - ext.offset() as i128
+            {
+                uniform = false;
+            }
+        }
+    }
     let mut patches = Vec::with_capacity(cands.len());
     for c in cands {
-        if let Some(p) = build_patch(io, &c, map).await? {
+        let base = if matches!(c.table, Table::Trun | Table::Saio) && c.traf.is_some() {
+            *bases
+                .get(&c.traf)
+                .ok_or_else(|| Error::invalid_segment(c.content, "fragment offset has no tfhd"))?
+        } else {
+            None
+        };
+        if c.traf.is_some() && matches!(c.table, Table::Trun | Table::Saio) && base.is_none() {
+            if uniform {
+                continue;
+            }
+            return Err(Error::UnsupportedFeature(
+                "relocating inherited fragment data bases across metadata edits",
+            ));
+        }
+        if matches!(c.table, Table::Trun) && c.flags & 1 == 0 && !uniform {
+            return Err(Error::UnsupportedFeature(
+                "relocating implicit track runs across metadata edits",
+            ));
+        }
+        if let Some(p) = build_patch(io, &c, map, base).await? {
             patches.push(p);
         }
     }
@@ -1027,10 +1157,137 @@ fn table(
         stride,
         field_off,
         width,
+        base: None,
     }))
 }
 
-async fn build_patch(io: &mut Io, c: &Candidate, map: &OffsetMap) -> Result<Option<Patch>> {
+fn require_room(c: &Candidate, need: u64) -> Result<()> {
+    if c.end.saturating_sub(c.content) < need {
+        return Err(Error::invalid_segment(
+            c.content,
+            "offset table box is truncated",
+        ));
+    }
+    Ok(())
+}
+
+async fn read_u64_at(io: &mut Io, at: u64) -> Result<u64> {
+    let mut b = [0; 8];
+    io.read_at(at, &mut b).await?;
+    Ok(u64::from_be_bytes(b))
+}
+
+fn fragment_media_moves_together(src: &Structure, seg: &Segment, map: &OffsetMap) -> Result<bool> {
+    if seg.name() != Name::FourCC(MOOF) {
+        return Ok(true);
+    }
+    let base = seg.range().offset();
+    let shift = map.apply(base)? as i128 - base as i128;
+    let start = src
+        .segments()
+        .partition_point(|s| s.range().offset() <= base);
+    for s in &src.segments()[start..] {
+        if s.name() == Name::FourCC(MOOF) {
+            break;
+        }
+        if s.name() == Name::FourCC(MDAT) {
+            for at in [s.range().offset(), s.range().end() - 1] {
+                if map.apply(at)? as i128 - at as i128 != shift {
+                    return Ok(false);
+                }
+            }
+        }
+    }
+    Ok(true)
+}
+
+async fn index_patches(
+    io: &mut Io,
+    seg: &Segment,
+    map: &OffsetMap,
+    has_ssix: bool,
+) -> Result<Vec<Patch>> {
+    let at = seg.payload().offset();
+    let end = seg.range().end();
+    if end - at < 4 {
+        return Err(Error::invalid_segment(
+            at,
+            "sidx version and flags truncated",
+        ));
+    }
+    let vf = read_u32_at(io, at).await?;
+    let width = match vf >> 24 {
+        0 => 4,
+        1 => 8,
+        _ => return Err(Error::invalid_segment(at, "unknown sidx version")),
+    };
+    // FullBox, reference ID, timescale, presentation time, first offset,
+    // reserved bits and reference count.
+    let fixed = 16 + 2 * width;
+    if end - at < fixed {
+        return Err(Error::invalid_segment(at, "sidx header truncated"));
+    }
+    let offset_at = at + 12 + width;
+    let first_offset = if width == 4 {
+        read_u32_at(io, offset_at).await? as u64
+    } else {
+        read_u64_at(io, offset_at).await?
+    };
+    let mut start = end
+        .checked_add(first_offset)
+        .ok_or_else(|| Error::invalid_segment(at, "sidx first offset out of range"))?;
+    let first = map
+        .apply(start)?
+        .checked_sub(map.apply(end)?)
+        .ok_or_else(|| Error::invalid_segment(at, "sidx first offset became negative"))?;
+    let mut data = vec![0; width as usize];
+    put_uint(&mut data, first)?;
+    let count = read_u32_at(io, at + fixed - 4).await? & 0xffff;
+    if count as u64 * 12 > end - at - fixed {
+        return Err(Error::invalid_segment(at, "sidx reference table truncated"));
+    }
+    let mut patches = vec![Patch::Bytes {
+        at: offset_at,
+        data,
+    }];
+    for i in 0..count {
+        let entry = at + fixed + i as u64 * 12;
+        let reference = read_u32_at(io, entry).await?;
+        let stop = start
+            .checked_add((reference & 0x7fff_ffff) as u64)
+            .filter(|&stop| stop <= io.len())
+            .ok_or_else(|| Error::invalid_segment(entry, "sidx reference outside the stream"))?;
+        let size = map
+            .apply(stop)?
+            .checked_sub(map.apply(start)?)
+            .and_then(|n| u32::try_from(n).ok())
+            .filter(|&n| n <= 0x7fff_ffff)
+            .ok_or_else(|| Error::invalid_segment(entry, "sidx reference size out of range"))?;
+        if has_ssix && size != reference & 0x7fff_ffff {
+            return Err(Error::UnsupportedFeature(
+                "resizing subsegments indexed by ssix",
+            ));
+        }
+        patches.push(Patch::Bytes {
+            at: entry,
+            data: ((reference & 0x8000_0000) | size).to_be_bytes().to_vec(),
+        });
+        start = stop;
+    }
+    Ok(patches)
+}
+
+fn track_run_target(base: u64, offset: i32, at: u64) -> Result<u64> {
+    u64::try_from(base as i128 + offset as i128)
+        .map_err(|_| Error::invalid_segment(at, "track-run offset out of range"))
+}
+
+async fn build_patch(
+    io: &mut Io,
+    c: &Candidate,
+    map: &OffsetMap,
+    base: Option<u64>,
+) -> Result<Option<Patch>> {
     let room = |need: u64| -> Result<()> {
         if c.end.saturating_sub(c.content) < need {
             return Err(Error::invalid_segment(
@@ -1048,13 +1305,41 @@ async fn build_patch(io: &mut Io, c: &Candidate, map: &OffsetMap) -> Result<Opti
             table(c.content + 4, count, w as u32, 0, w, c.end)
         }
         Table::Saio => {
+            if c.version > 1 {
+                return Err(Error::invalid_segment(c.content, "unknown saio version"));
+            }
             let skip = if c.flags & 1 == 1 { 8 } else { 0 };
             room(skip + 4)?;
             let count = read_u32_at(io, c.content + skip).await? as u64;
             let w: u8 = if c.version == 0 { 4 } else { 8 };
-            table(c.content + skip + 4, count, w as u32, 0, w, c.end)
+            let mut patch = table(c.content + skip + 4, count, w as u32, 0, w, c.end)?;
+            if let Some(Patch::Table { base: relative, .. }) = &mut patch {
+                *relative = base;
+            }
+            Ok(patch)
+        }
+        Table::Trun => {
+            room(if c.flags & 1 == 0 { 4 } else { 8 })?;
+            if c.version > 1 {
+                return Err(Error::invalid_segment(c.content, "unknown trun version"));
+            }
+            if c.flags & 1 == 0 {
+                return Ok(None);
+            }
+            let base = base.ok_or(Error::UnsupportedFeature("unknown track-run data base"))?;
+            let offset = read_u32_at(io, c.content + 4).await? as i32;
+            let target = track_run_target(base, offset, c.content)?;
+            let adjusted = i32::try_from(map.apply(target)? as i128 - map.apply(base)? as i128)
+                .map_err(|_| Error::invalid_segment(c.content, "track-run offset exceeds i32"))?;
+            Ok(Some(Patch::Bytes {
+                at: c.content + 4,
+                data: adjusted.to_be_bytes().to_vec(),
+            }))
         }
         Table::Tfhd => {
+            if c.version != 0 {
+                return Err(Error::invalid_segment(c.content, "unknown tfhd version"));
+            }
             if c.flags & 1 == 0 {
                 return Ok(None); // no base data offset
             }
@@ -1062,6 +1347,9 @@ async fn build_patch(io: &mut Io, c: &Candidate, map: &OffsetMap) -> Result<Opti
             table(c.content + 4, 1, 8, 0, 8, c.end)
         }
         Table::Tfra => {
+            if c.version > 1 {
+                return Err(Error::invalid_segment(c.content, "unknown tfra version"));
+            }
             room(12)?;
             let info = read_u32_at(io, c.content + 4).await?;
             let count = read_u32_at(io, c.content + 8).await? as u64;
@@ -1379,7 +1667,30 @@ async fn plan<'a>(
     let mut ops: Vec<Op<'a>> = Vec::with_capacity(segs.len() + 2);
     let mut store = MetadataSlot::new(updates.jumbf());
     let mut xmp = MetadataSlot::new(updates.xmp());
-    let mut ftyp_seen = false;
+    let mut preamble_seen = false;
+
+    // A media segment need not have a type box at all. Prefix its first box;
+    // unlike appending, this also works when its final mdat has size zero.
+    if !segs
+        .iter()
+        .any(|s| matches!(s.name(), Name::FourCC(FTYP | STYP)))
+        && segs.iter().any(|s| s.name() == Name::FourCC(MOOF))
+    {
+        if !has_store {
+            if let Some(d) = store.pending() {
+                let op = new_c2pa(d)?;
+                note(&mut map, total, 0, op_len(&op, src)?, 0)?;
+                ops.push(op);
+            }
+        }
+        if !has_xmp {
+            if let Some(d) = xmp.pending() {
+                let op = new_xmp(d)?;
+                note(&mut map, total, 0, op_len(&op, src)?, 0)?;
+                ops.push(op);
+            }
+        }
+    }
 
     for (i, seg) in segs.iter().enumerate() {
         let id = SegmentId::from_index(i)?;
@@ -1431,8 +1742,8 @@ async fn plan<'a>(
             },
             _ => {
                 ops.push(Op::Copy(id));
-                if !ftyp_seen && seg.name() == Name::FourCC(FTYP) {
-                    ftyp_seen = true;
+                if !preamble_seen && matches!(seg.name(), Name::FourCC(FTYP | STYP)) {
+                    preamble_seen = true;
                     if !has_store {
                         if let Some(d) = store.pending() {
                             let op = new_c2pa(d)?;
@@ -1474,7 +1785,7 @@ async fn plan<'a>(
     }
     if (!update_mode && store.is_pending()) || xmp.is_pending() {
         return Err(Error::InvalidFormat(
-            "BMFF has no ftyp box to insert metadata after".into(),
+            "BMFF has no ftyp, styp or moof box for metadata placement".into(),
         ));
     }
 
@@ -1571,7 +1882,7 @@ async fn assemble<'a>(
                 let seg = src.segment(sid)?;
                 let id = b.shape_like(sid)?;
                 if with_steps {
-                    let mut patches = collect_patches(io, seg, &map).await?;
+                    let mut patches = collect_patches(io, src, seg, &map).await?;
                     for (role, range) in seg.regions() {
                         match open_ended.filter(|(open, _)| *open == sid) {
                             Some((_, size)) if role == Role::Header => {
@@ -1664,9 +1975,14 @@ fn patched_steps(
                 stride,
                 field_off,
                 width,
+                base,
                 ..
             } => {
-                let rule = Relocate::new(map.clone(), *stride, *field_off, *width)
+                let map = match base {
+                    Some(base) => Arc::new(map.relative_to(*base)),
+                    None => map.clone(),
+                };
+                let rule = Relocate::new(map, *stride, *field_off, *width)
                     .map_err(|_| Error::invalid_segment(start, "invalid offset table geometry"))?;
                 plan.relocate(dest, role, ByteRange::new(start, len)?, rule);
             }
@@ -3071,5 +3387,62 @@ mod tests {
         assert_eq!(b, moof_at);
         let (off, _, hl) = find(&out, "/mfra/tfra");
         assert_eq!(be32(&out, off + hl as u64 + 4 + 12 + 4) as u64, moof_at);
+    }
+
+    #[test]
+    fn signed_fragment_offsets_enforce_the_i32_boundary() {
+        let c = Candidate {
+            table: Table::Trun,
+            content: 0,
+            end: 8,
+            version: 0,
+            flags: 1,
+            traf: Some(0),
+        };
+        let bytes = [1u32.to_be_bytes(), 8u32.to_be_bytes()].concat();
+        let run = |shift| {
+            let mut map = OffsetMap::new();
+            map.add(8, shift);
+            block_on(
+                bytes.len() as u64,
+                &mut Cursor::new(&bytes),
+                |mut io| async move { build_patch(&mut io, &c, &map, Some(0)).await },
+            )
+        };
+        let Some(Patch::Bytes { data, .. }) = run(i32::MAX as i64 - 8).unwrap() else {
+            panic!("expected a signed offset patch");
+        };
+        assert_eq!(data, i32::MAX.to_be_bytes());
+        assert!(run(i32::MAX as i64 - 7).is_err());
+        assert!(track_run_target(0, -1, 0).is_err());
+        assert_eq!(track_run_target(1, -1, 0).unwrap(), 0);
+    }
+
+    #[test]
+    fn index_first_offsets_enforce_their_version_width() {
+        for version in [0, 1] {
+            let mut data = vec![0; 8];
+            data.extend(vec![0; if version == 0 { 4 } else { 8 }]);
+            if version == 0 {
+                data.extend(8u32.to_be_bytes());
+            } else {
+                data.extend(8u64.to_be_bytes());
+            }
+            data.extend([0; 4]); // no references
+            let bytes = full(b"sidx", version, 0, &data);
+            let src = parse(&mut Cursor::new(&bytes)).unwrap();
+            let seg = &src.segments()[0];
+            let run = |shift| {
+                let mut map = OffsetMap::new();
+                map.add(bytes.len() as u64 + 1, shift);
+                block_on(
+                    bytes.len() as u64,
+                    &mut Cursor::new(&bytes),
+                    |mut io| async move { index_patches(&mut io, seg, &map, false).await },
+                )
+            };
+            assert!(run(u32::MAX as i64 - 8).is_ok());
+            assert_eq!(run(u32::MAX as i64 - 7).is_ok(), version == 1);
+        }
     }
 }

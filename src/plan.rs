@@ -62,6 +62,21 @@ impl OffsetMap {
         self.edits.is_empty()
     }
 
+    /// The same edits expressed as unsigned offsets relative to `base`.
+    ///
+    /// Edits at or before the base move the base and target equally and cancel.
+    /// Useful for BMFF auxiliary-information tables relative to a fragment base.
+    pub fn relative_to(&self, base: u64) -> Self {
+        Self {
+            edits: self
+                .edits
+                .iter()
+                .filter(|(end, _)| *end > base)
+                .map(|(end, delta)| (end - base, *delta))
+                .collect(),
+        }
+    }
+
     /// Where the source offset `v` is in the output.
     pub fn apply(&self, v: u64) -> Result<u64> {
         let shift: i128 = self
