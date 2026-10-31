@@ -12,8 +12,44 @@ A parsed file is a `Structure`: a gapless tiling of `Segment`s (header, payload,
 - An item's **transfer encoding** (`TransferEncoding`: `Identity`, `Base64`, `Zlib`, `Deflate`, `Gzip`, `Brotli`, or `Unknown` with the format's own label) says how the bytes the container stores wrap the content: SVG stores a manifest as base64 text, PDF may store metadata as a zlib (`FlateDecode`) stream, PNG may hold compressed XMP in `iTXt`, and a HEIF `mime` item names a `content_encoding`. It is distinct from the `Encoding` of the content. The wrapping is always identified; undoing a compression is optional. `read_item` returns the stored bytes, which are what a hash covers and what `patch_exact` overwrites; `read_content` returns the content, or `UnsupportedFeature` when the decoder is not built in.
 - An item's bytes are its **extents**; an item can be multi-extent (JPEG XT packets, extended XMP, HEIF `iloc` extents). "Fragment" is reserved for fragmented ISO BMFF.
 - `Structure::items_in(segment)` says what a segment holds; writers decide what to do with a segment from its items, never from its kind.
+- `Structure::c2pa_item(src)` and `Structure::c2pa_store(src)` find the C2PA
+  manifest store, as `xmp()` finds XMP: the JUMBF item whose superbox type is
+  `jumbf::C2PA_STORE_TYPE`, ignoring other JUMBF (such as JPEG XT boxes of other
+  types). `c2pa_store` returns its content with any transfer encoding undone and,
+  for ISO BMFF, an `update` appended to its `original`. The manifests in it are
+  not interpreted. `store()` and the item APIs still give any JUMBF. Handlers
+  record each JUMBF item's type when they parse, and planned structures carry it
+  from the source or the bytes being written, so the store is found in a plan
+  before the output exists.
+- `Structure::c2pa_hash()` names the C2PA hard binding an embedded manifest in
+  the asset calls for: `C2paHash::Bmff` for ISO BMFF, `C2paHash::Box` when
+  every element of the container has a box name (JPEG, PNG, RIFF),
+  `C2paHash::Data` for containers without meaningful boxes (SVG), and `None`
+  where asset-io cannot support one yet (PDF, sidecars). A caller may choose a
+  data hash instead of a box hash. Building and checking the assertion is the
+  caller's.
+- `Structure::c2pa_boxes(src)` lists the boxes a `c2pa.hash.boxes` covers
+  (C2PA 2.4, 18.7), in file order and tiling the asset. Each element is a box,
+  named by the handler's `c2pa_box_name`: a JPEG scan with restart markers is
+  its `SOS` box plus one box per `RSTn`, a RIFF chunk is a 12-byte box named by
+  its form (`WAVE`, `AVIX`) and a `LIST` chunk a box named by its list type
+  (`INFO`, `movi`) holding everything nested in it. The later images of a
+  Multi-Picture Format JPEG are listed box by box. The C2PA store's segments
+  are one `C2PA` box and unnamed bytes at the end one `c2pa.after` box. Each
+  box carries the ranges of asset metadata (XMP, EXIF) inside it, the only
+  ranges a box hash may exclude besides the store. It works on planned
+  structures, reading copied segments in the source, so an output's boxes are
+  known before it is written.
+- `Structure::c2pa_data_hash_exclusions(item)` is where C2PA embedding rules
+  reach the container: the ranges a `c2pa.hash.data` excludes for a
+  JUMBF item such as `c2pa_item`, on parsed or planned structures. By default it
+  excludes the whole segments carrying the item (JPEG APP11, PNG `caBX` with its
+  CRC). RIFF overrides it to keep alignment padding hashed and SVG to exclude
+  only the base64 text. BMFF and PDF report `UnsupportedFeature`, since they bind
+  differently. Ranges are checked, sorted and merged. It does not interpret the
+  manifest or compute a hash.
 
-asset-io exposes what each format's own specifications define, including companion specifications (EXIF/TIFF, MPF, JPEG XT, the HEIF item model), and never interprets content that is portable across formats (C2PA manifests, XMP schemas); that belongs to higher-level helpers built on this API. See the crate documentation for the full glossary.
+asset-io exposes what each format's own specifications define, including companion specifications (EXIF/TIFF, MPF, JPEG XT, the HEIF item model), and never interprets content that is portable across formats (C2PA manifests, XMP schemas); that belongs to higher-level helpers built on this API. Where such content is placed, including which item is the C2PA manifest store, is container knowledge and is here. See the crate documentation for the full glossary.
 
 ## Upgrading from 0.1
 

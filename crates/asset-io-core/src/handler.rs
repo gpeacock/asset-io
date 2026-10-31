@@ -24,6 +24,7 @@ use crate::error::{Error, Result};
 use crate::io::{BoxFuture, Io};
 use crate::item::{Item, ItemKind};
 use crate::plan::WritePlan;
+use crate::range::ByteRange;
 use crate::segment::{Name, Segment};
 use crate::sink::Sink;
 use crate::structure::{SegmentId, Structure};
@@ -44,6 +45,22 @@ impl<T: Read + Write + Seek + ?Sized> ReadWriteSeek for T {}
 
 /// How many leading bytes [`ContainerHandler::detect`] is given.
 pub const DETECT_LEN: usize = 64;
+
+/// The kind of C2PA hard-binding assertion a container's embedded manifest uses;
+/// see [`ContainerHandler::c2pa_hash`]. Creating and checking the assertion is
+/// the caller's; this only says which one the container calls for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum C2paHash {
+    /// `c2pa.hash.data`: every byte outside the ranges
+    /// [`Structure::c2pa_data_hash_exclusions`] returns.
+    Data,
+    /// `c2pa.hash.boxes`: each box [`Structure::c2pa_boxes`] lists.
+    Box,
+    /// `c2pa.hash.bmff`: the ISO BMFF box tree, as the C2PA specification
+    /// defines it for BMFF.
+    Bmff,
+}
 
 /// One format a container handler serves: a media type and its file extensions.
 ///
@@ -114,6 +131,58 @@ pub trait ContainerHandler: std::fmt::Debug + Send + Sync {
 
     /// The formats this handler serves, each a media type with its extensions.
     fn formats(&self) -> &[FormatSpec];
+
+    /// The C2PA hard binding an embedded manifest in `structure` should use, or
+    /// `None` when asset-io cannot support embedding one. Called by
+    /// [`Structure::c2pa_hash`].
+    ///
+    /// The default is [`C2paHash::Box`] when every element of the container's own
+    /// structure has a [`box_name`](Self::box_name), so
+    /// [`Structure::c2pa_boxes`] can list it, and [`C2paHash::Data`] otherwise:
+    /// for containers without meaningful boxes.
+    fn c2pa_hash(&self, structure: &Structure) -> Option<C2paHash> {
+        let named = structure.segments()[..structure.box_count()]
+            .iter()
+            .enumerate()
+            .all(|(i, s)| {
+                SegmentId::from_index(i)
+                    .is_ok_and(|id| self.c2pa_box_name(structure, id, s).is_some())
+            });
+        Some(if named { C2paHash::Box } else { C2paHash::Data })
+    }
+
+    /// The name a C2PA box hash lists `element` of `segment` under, or `None` if it
+    /// is not a box. Called by [`Structure::c2pa_boxes`]. The default is
+    /// [`box_name`](Self::box_name); a container whose C2PA box names are not its
+    /// element names (RIFF lists a `RIFF` or `LIST` chunk under its type)
+    /// overrides it.
+    fn c2pa_box_name(
+        &self,
+        _structure: &Structure,
+        _segment: SegmentId,
+        element: &Segment,
+    ) -> Option<Cow<'static, str>> {
+        self.box_name(element.name())
+    }
+
+    /// The ranges a C2PA data hash (`c2pa.hash.data`) excludes when `item` is the
+    /// embedded manifest store. Called by [`Structure::c2pa_data_hash_exclusions`],
+    /// which validates and normalizes the ranges.
+    ///
+    /// The default excludes every segment that carries the item, framing and
+    /// trailers included, which is the C2PA rule for containers that store the
+    /// manifest in dedicated segments (JPEG APP11, PNG `caBX`). A container with
+    /// other rules overrides it; one whose C2PA embedding uses a different binding
+    /// returns [`Error::UnsupportedFeature`].
+    fn c2pa_data_hash_exclusions(
+        &self,
+        structure: &Structure,
+        item: &Item,
+    ) -> Result<Vec<ByteRange>> {
+        item.extents()
+            .map(|extent| Ok(structure.segment(extent.segment())?.range()))
+            .collect()
+    }
 
     /// Whether `header` (the first [`DETECT_LEN`] bytes, or fewer for a short
     /// stream) looks like this container. The default never matches, so the handler

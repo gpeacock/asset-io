@@ -15,7 +15,8 @@
 //!
 //! Just enough to split a superbox's children: boxes are `LBox TBox [XLBox]`, and a
 //! superbox (`jumb`) starts with a description box (`jumd`, whose first 16 bytes
-//! are the superbox type) followed by its children. This module attaches no
+//! are the superbox type) followed by its children. Apart from naming the C2PA
+//! manifest store's type, so a store can be found, this module attaches no
 //! meaning to any type or label.
 //!
 //! [`addition_to`] and [`extend`] convert between a store and the original-plus-update
@@ -30,6 +31,12 @@ const MAX_CHILDREN: usize = 1 << 16;
 const JUMB: [u8; 4] = *b"jumb";
 const JUMD: [u8; 4] = *b"jumd";
 
+/// The superbox type of a C2PA manifest store (C2PA 11.1.4.2): `c2pa` followed
+/// by the ISO/IEC 19566-5 common suffix.
+pub const C2PA_STORE_TYPE: [u8; 16] = [
+    0x63, 0x32, 0x70, 0x61, 0x00, 0x11, 0x00, 0x10, 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71,
+];
+
 /// The 16-byte type of the JUMBF superbox at the start of `b`, from its description
 /// box: `LBox "jumb" LBox "jumd" type[16]`. `None` if `b` is shorter than 32 bytes
 /// or does not begin that way. Boxes with an extended length are not interpreted.
@@ -40,6 +47,22 @@ pub fn superbox_type(b: &[u8]) -> Option<[u8; 16]> {
     let mut uuid = [0u8; 16];
     uuid.copy_from_slice(&b[16..32]);
     Some(uuid)
+}
+
+/// [`superbox_type`] of the `len` stored bytes at `offset`, reading at most 32 of
+/// them. For a handler recording an item's type while it parses, as
+/// [`ItemInfo::jumbf_type`](crate::ItemInfo::jumbf_type) asks.
+pub async fn superbox_type_at(
+    io: &mut crate::Io,
+    offset: u64,
+    len: u64,
+) -> Result<Option<[u8; 16]>> {
+    if len < 32 {
+        return Ok(None);
+    }
+    let mut head = [0u8; 32];
+    io.read_at(offset, &mut head).await?;
+    Ok(superbox_type(&head))
 }
 
 fn bad(reason: &str) -> Error {

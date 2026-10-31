@@ -93,6 +93,21 @@ impl PdfState {
 }
 
 impl ContainerHandler for PdfHandler {
+    fn c2pa_hash(&self, _structure: &Structure) -> Option<asset_io_core::C2paHash> {
+        None
+    }
+
+    // PDF's C2PA embedding rules for incremental updates are not implemented.
+    fn c2pa_data_hash_exclusions(
+        &self,
+        _structure: &Structure,
+        _item: &asset_io_core::Item,
+    ) -> Result<Vec<asset_io_core::ByteRange>> {
+        Err(Error::UnsupportedFeature(
+            "C2PA data-hash exclusions for PDF",
+        ))
+    }
+
     fn id(&self) -> &'static str {
         ID
     }

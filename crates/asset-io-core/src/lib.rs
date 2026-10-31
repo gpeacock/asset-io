@@ -151,7 +151,7 @@ pub use crc::Crc32;
 pub use embedded::{EmbeddedAsset, EmbeddedReader, ScanLimits};
 pub use error::{Error, Result};
 pub use execute::{Action, Execution};
-pub use handler::{ContainerHandler, FormatSpec, ReadSeek, ReadWriteSeek, DETECT_LEN};
+pub use handler::{C2paHash, ContainerHandler, FormatSpec, ReadSeek, ReadWriteSeek, DETECT_LEN};
 pub use io::{BoxFuture, Io, Reader, DEFAULT_WINDOW};
 pub use item::{Encoding, Extent, Item, ItemCategory, ItemInfo, ItemKind, Relation, RelationKind};
 #[cfg(feature = "memory-mapped")]
@@ -160,9 +160,13 @@ pub use plan::{Step, WritePlan};
 pub use plan_builder::PlanBuilder;
 pub use range::ByteRange;
 pub use registry::HandlerRegistry;
-pub use segment::{labels, Name, Role, Segment, SegmentKind, AFTER_BOX, MAX_SEGMENT_SIZE};
+pub use segment::{
+    labels, Name, Role, Segment, SegmentKind, AFTER_BOX, C2PA_BOX, MAX_SEGMENT_SIZE,
+};
 pub use sink::{Chunk, NullSink, Sink};
-pub use structure::{Region, SegmentId, Structure, StructureBuilder, SubAsset, MAX_SEGMENTS};
+pub use structure::{
+    C2paBox, Region, SegmentId, Structure, StructureBuilder, SubAsset, MAX_SEGMENTS,
+};
 pub use task::{block_on, Progress, ReadRequest, Task};
 pub use thumbnail::Thumbnail;
 #[cfg(feature = "exif")]
