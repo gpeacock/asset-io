@@ -21,6 +21,7 @@ fn container_families_depend_on_core_not_the_facade_or_each_other() {
         ("riff", include_str!("../crates/asset-io-riff/Cargo.toml")),
         ("svg", include_str!("../crates/asset-io-svg/Cargo.toml")),
         ("pdf", include_str!("../crates/asset-io-pdf/Cargo.toml")),
+        ("tiff", include_str!("../crates/asset-io-tiff/Cargo.toml")),
         ("c2pa", include_str!("../crates/asset-io-c2pa/Cargo.toml")),
     ] {
         assert!(manifest.contains("asset-io-core"), "{name} needs core");

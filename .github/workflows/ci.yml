@@ -46,7 +46,7 @@ jobs:
 
       - name: Test each handler independently
         run: |
-          for handler in jpeg png bmff riff svg pdf c2pa; do
+          for handler in jpeg png bmff riff svg pdf tiff c2pa; do
             cargo test --locked -p asset-io --no-default-features --features "$handler"
             cargo test --locked -p "asset-io-$handler"
           done

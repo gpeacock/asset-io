@@ -61,6 +61,8 @@ fn fixtures() -> Vec<&'static [u8]> {
         &b"\xff\xd8\xff\xd9"[..],
         #[cfg(feature = "png")]
         &b"\x89PNG\r\n\x1a\n\0\0\0\0IEND\xaeB`\x82"[..],
+        #[cfg(feature = "tiff")]
+        &b"II\x2a\0\x08\0\0\0\0\0\0\0\0\0"[..],
     ]
 }
 

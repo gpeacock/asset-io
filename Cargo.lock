@@ -62,6 +62,7 @@ dependencies = [
  "asset-io-png",
  "asset-io-riff",
  "asset-io-svg",
+ "asset-io-tiff",
  "criterion",
  "sha2",
  "tempfile",
@@ -133,6 +134,13 @@ version = "0.2.0"
 dependencies = [
  "asset-io-core",
  "quick-xml",
+]
+
+[[package]]
+name = "asset-io-tiff"
+version = "0.2.0"
+dependencies = [
+ "asset-io-core",
 ]
 
 [[package]]

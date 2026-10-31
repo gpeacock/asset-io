@@ -27,6 +27,14 @@ a document-level C2PA attachment association using classic cross-reference
 tables. Its `manifest` payload is a placeholder, not a valid C2PA manifest. It is
 used directly by the PDF integration tests and can seed the parsing fuzzer.
 
+## TIFF Reference Fixture
+
+`tiff_multipage.tif` is the unmodified `sdk/tests/fixtures/MultiPage.tif` from
+[contentauth/c2pa-rs at fea8d1c5ac4f37cc2e258dc65a045ddb47c5b17b](https://github.com/contentauth/c2pa-rs/blob/fea8d1c5ac4f37cc2e258dc65a045ddb47c5b17b/sdk/tests/fixtures/MultiPage.tif),
+used under that repository's MIT OR Apache-2.0 license. It exercises the TIFF
+handler's real multi-page metadata lifecycle in addition to synthetic classic
+TIFF, BigTIFF, and DNG cases.
+
 ## Extended Fixtures (Optional)
 
 For more comprehensive testing, you can use a larger fixture set by setting the `JUMBF_TEST_FIXTURES` environment variable to point to an extended directory:

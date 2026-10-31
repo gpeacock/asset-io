@@ -8,6 +8,7 @@ members = [
     "crates/asset-io-riff",
     "crates/asset-io-svg",
     "crates/asset-io-pdf",
+    "crates/asset-io-tiff",
     "crates/asset-io-c2pa",
 ]
 exclude = ["asset-io-c", "fuzz"]
@@ -28,6 +29,7 @@ asset-io-bmff = { path = "crates/asset-io-bmff", version = "0.2.0", default-feat
 asset-io-riff = { path = "crates/asset-io-riff", version = "0.2.0", default-features = false }
 asset-io-svg = { path = "crates/asset-io-svg", version = "0.2.0", default-features = false }
 asset-io-pdf = { path = "crates/asset-io-pdf", version = "0.2.0", default-features = false }
+asset-io-tiff = { path = "crates/asset-io-tiff", version = "0.2.0", default-features = false }
 asset-io-c2pa = { path = "crates/asset-io-c2pa", version = "0.2.0", default-features = false }
 
 [package]
@@ -50,6 +52,7 @@ asset-io-bmff = { workspace = true, optional = true }
 asset-io-riff = { workspace = true, optional = true }
 asset-io-svg = { workspace = true, optional = true }
 asset-io-pdf = { workspace = true, optional = true }
+asset-io-tiff = { workspace = true, optional = true }
 asset-io-c2pa = { workspace = true, optional = true }
 
 [dev-dependencies]
@@ -66,6 +69,7 @@ bmff = ["dep:asset-io-bmff"]
 riff = ["dep:asset-io-riff"]
 svg = ["dep:asset-io-svg"]
 pdf = ["dep:asset-io-pdf", "flate"]
+tiff = ["dep:asset-io-tiff"]
 c2pa = ["dep:asset-io-c2pa"]
 # Transfer-encoding decoders: zlib, raw deflate and gzip; Brotli.
 flate = ["asset-io-core/flate", "asset-io-png?/flate", "asset-io-bmff?/flate"]
@@ -73,7 +77,7 @@ brotli = ["asset-io-core/brotli", "asset-io-bmff?/brotli"]
 exif = ["asset-io-core/exif", "asset-io-bmff?/exif"]
 xmp = ["asset-io-core/xmp"]
 memory-mapped = ["asset-io-core/memory-mapped", "asset-io-pdf?/memory-mapped"]
-all-formats = ["jpeg", "png", "bmff", "riff", "svg", "pdf", "c2pa"]
+all-formats = ["jpeg", "png", "bmff", "riff", "svg", "pdf", "tiff", "c2pa"]
 
 [[example]]
 name = "inspect"

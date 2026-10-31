@@ -64,7 +64,7 @@ The `c2pa` feature now selects raw sidecar handling only; it does not restore th
   write plans, execution, and shared conformance checks. It has no container
   dependencies, even with all its features enabled.
 - Container-family crates under [`crates/`](crates): JPEG, PNG, BMFF, RIFF, SVG,
-  PDF, and raw C2PA sidecars. BMFF keeps HEIF/HEIC/AVIF/MP4/M4A together; RIFF keeps WebP/WAV/AVI
+  PDF, TIFF/DNG, and raw C2PA sidecars. BMFF keeps HEIF/HEIC/AVIF/MP4/M4A together; RIFF keeps WebP/WAV/AVI
   together. Crate boundaries follow shared implementation, not file extensions.
 - `asset-io`: this consumer-facing facade re-exports core types and selected
   container crates through `containers`. Its `HandlerRegistry::builtin()` assembles
@@ -99,7 +99,7 @@ be passed to core APIs such as memory mapping and embedded-asset scanning.
 ### Test ownership
 
 Private unit tests stay with each implementation. PDF read/write integration
-tests and its benchmark live in its crate; BMFF HEIF and RIFF fixture tests live
+tests and its benchmark live in its crate; BMFF HEIF, RIFF fixture, and TIFF tests live
 in theirs. Shared real-file fixtures remain in [`tests/fixtures`](tests/fixtures)
 because the facade's cross-container tests and the C bindings also use them.
 Container tests explicitly register their own handler and never depend on the
@@ -131,6 +131,7 @@ individual facade handlers, and the complete workspace.
 | `riff`  | RIFF (WebP, WAV, AVI) | yes | yes; WebP XMP maintains the `VP8X` flag |
 | `svg`   | SVG       | yes  | yes; a splice, nothing re-serialized; the manifest is base64 text |
 | `pdf`   | PDF 1.0–2.0 | XMP and the document's C2PA store, found through the catalog | appends an incremental revision; see the [PDF crate README](crates/asset-io-pdf/README.md) |
+| `tiff`  | TIFF, BigTIFF, DNG | yes | yes, append-only IFD updates; see the [TIFF crate README](crates/asset-io-tiff/README.md) |
 | `c2pa`  | Raw C2PA sidecar | entire file as one JUMBF item | replaces the file; removal emits an empty sidecar; see the [sidecar crate README](crates/asset-io-c2pa/README.md) |
 
 Decoders for transfer encodings are optional features, in neither the defaults nor `all-formats`:
@@ -185,7 +186,7 @@ The `Updates` API is deliberately specific to XMP and JUMBF, whose placement eac
 
 `HandlerRegistry::compose(format, kind, data)` returns the container's own encoding of an item (JPEG APP11 segments, a PNG `caBX` chunk, a BMFF C2PA box), for callers that insert it into an asset themselves. Callers that use `write` don't need it.
 
-Each handler has an `id()` (`"jpeg"`, `"png"`, `"bmff"`, `"riff"`, `"svg"`, `"pdf"`, `"c2pa"`) and declares the formats it serves as `FormatSpec`s: a media type, a preferred extension, and any other accepted media types and extensions. `HandlerRegistry::media_type_for("heic")` gives `image/heic` and `extension_for("image/jpeg")` gives `jpg`; aliases resolve to the preferred values (`image/x-webp` gives `image/webp`).
+Each handler has an `id()` (`"jpeg"`, `"png"`, `"bmff"`, `"riff"`, `"svg"`, `"pdf"`, `"tiff"`, `"c2pa"`) and declares the formats it serves as `FormatSpec`s: a media type, a preferred extension, and any other accepted media types and extensions. `HandlerRegistry::media_type_for("heic")` gives `image/heic` and `extension_for("image/jpeg")` gives `jpg`; aliases resolve to the preferred values (`image/x-webp` gives `image/webp`).
 
 ## Sub-assets
 

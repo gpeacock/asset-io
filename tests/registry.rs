@@ -33,6 +33,9 @@ fn builtin_registry_contains_exactly_the_enabled_families() {
         ("webp", cfg!(feature = "riff"), "riff"),
         ("svg", cfg!(feature = "svg"), "svg"),
         ("pdf", cfg!(feature = "pdf"), "pdf"),
+        ("tif", cfg!(feature = "tiff"), "tiff"),
+        ("tiff", cfg!(feature = "tiff"), "tiff"),
+        ("dng", cfg!(feature = "tiff"), "tiff"),
         ("c2pa", cfg!(feature = "c2pa"), "c2pa"),
     ];
     for (extension, enabled, id) in families {

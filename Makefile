@@ -12,7 +12,7 @@ clippy:
 test:
 	cargo test -p asset-io-core --no-default-features
 	cargo test -p asset-io --no-default-features
-	@set -e; for handler in jpeg png bmff riff svg pdf c2pa; do \
+	@set -e; for handler in jpeg png bmff riff svg pdf tiff c2pa; do \
 		cargo test -p asset-io --no-default-features --features $$handler; \
 		cargo test -p asset-io-$$handler; \
 	done

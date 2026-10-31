@@ -41,6 +41,8 @@ pub use asset_io_png as png;
 pub use asset_io_riff as riff;
 #[cfg(feature = "svg")]
 pub use asset_io_svg as svg;
+#[cfg(feature = "tiff")]
+pub use asset_io_tiff as tiff;
 
 /// Add the handler of every enabled format to `registry`.
 ///
@@ -60,6 +62,8 @@ pub(crate) fn register_builtin(registry: &mut HandlerRegistry) {
     registry.add_arc(svg::handler());
     #[cfg(feature = "pdf")]
     registry.add_arc(pdf::handler());
+    #[cfg(feature = "tiff")]
+    registry.add_arc(tiff::handler());
     #[cfg(feature = "c2pa")]
     registry.add_arc(c2pa::handler());
 }

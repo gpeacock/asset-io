@@ -21,7 +21,7 @@ cargo build --locked --manifest-path asset-io-c/Cargo.toml \
   --features all-formats,xmp,exif
 ```
 
-Individual `jpeg`, `png`, `bmff`, `riff`, `svg`, `pdf`, `c2pa`, `xmp`, `exif`,
+Individual `jpeg`, `png`, `bmff`, `riff`, `svg`, `pdf`, `tiff`, `c2pa`, `xmp`, `exif`,
 `memory-mapped`, `flate` and `brotli` (transfer-encoding decoders) switches forward
 through the facade without enabling additional handlers.
 Inspector switches compile core functionality; inspector-specific methods are
