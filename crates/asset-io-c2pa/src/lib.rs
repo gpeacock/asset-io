@@ -11,7 +11,7 @@
 //! bytes; detection recognizes the standard-length C2PA JUMBF prefix, not every
 //! JUMBF type. This handler does not validate manifests or signatures.
 
-use asset_io_core::jumbf::superbox_type;
+use asset_io_core::jumbf::{superbox_type, C2PA_STORE_TYPE};
 use asset_io_core::{
     BoxFuture, ContainerHandler, Error, FormatSpec, Io, Item, ItemInfo, ItemKind, MetadataUpdate,
     Name, PlanBuilder, Result, SegmentId, SegmentKind, Structure, StructureBuilder, Updates,
@@ -19,10 +19,6 @@ use asset_io_core::{
 };
 use std::io::{Read, Seek};
 use std::sync::Arc;
-
-const STORE_TYPE: [u8; 16] = [
-    0x63, 0x32, 0x70, 0x61, 0x00, 0x11, 0x00, 0x10, 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71,
-];
 
 /// The C2PA sidecar container's [`ContainerHandler::id`].
 pub const ID: &str = "c2pa";
@@ -37,6 +33,22 @@ pub fn handler() -> Arc<dyn ContainerHandler> {
 }
 
 impl ContainerHandler for C2paHandler {
+    // A sidecar is the store; it embeds no manifest to bind.
+    fn c2pa_hash(&self, _structure: &Structure) -> Option<asset_io_core::C2paHash> {
+        None
+    }
+
+    // A sidecar is the store, not an asset that embeds one.
+    fn c2pa_data_hash_exclusions(
+        &self,
+        _structure: &Structure,
+        _item: &Item,
+    ) -> Result<Vec<asset_io_core::ByteRange>> {
+        Err(Error::UnsupportedFeature(
+            "C2PA data-hash exclusions for a sidecar",
+        ))
+    }
+
     fn id(&self) -> &'static str {
         ID
     }
@@ -48,7 +60,7 @@ impl ContainerHandler for C2paHandler {
     }
 
     fn detect(&self, header: &[u8]) -> bool {
-        superbox_type(header) == Some(STORE_TYPE)
+        superbox_type(header) == Some(C2PA_STORE_TYPE)
     }
 
     fn parse_async(self: Arc<Self>, mut io: Io) -> BoxFuture<'static, Result<Structure>> {

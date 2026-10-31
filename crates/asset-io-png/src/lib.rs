@@ -22,6 +22,7 @@
 //! [`Zlib`](TransferEncoding::Zlib) transfer encoding. New XMP is written
 //! uncompressed.
 
+use asset_io_core::jumbf::superbox_type;
 use asset_io_core::plan::WritePlan;
 use asset_io_core::{
     BoxFuture, ContainerHandler, Crc32, Error, Existing, FormatSpec, Io, ItemInfo, ItemKind,
@@ -208,13 +209,18 @@ async fn parse_with(handler: Arc<dyn ContainerHandler>, mut io: Io) -> Result<St
         let (name, header_len, payload_len) = (Name::FourCC(ty), 8 + prefix as u32, len - prefix);
         match item {
             Some(kind) => {
+                let mut info = item_info(kind).transfer(transfer);
+                if kind == ItemKind::Jumbf && payload_len >= 32 {
+                    r.seek(offset + header_len as u64);
+                    info = info.jumbf_type(superbox_type(r.take(32).await?));
+                }
                 b.push_item(
                     SegmentKind::Metadata,
                     name,
                     header_len,
                     payload_len,
                     4,
-                    item_info(kind).transfer(transfer),
+                    info,
                 )?;
             }
             None => {

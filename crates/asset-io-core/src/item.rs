@@ -262,6 +262,15 @@ impl ItemInfo {
         self
     }
 
+    /// A JUMBF item whose superbox type has not been recorded.
+    pub(crate) fn lacks_jumbf_type(&self) -> bool {
+        self.kind == ItemKind::Jumbf && self.jumbf_type.is_none()
+    }
+
+    pub(crate) fn transfer_encoding(&self) -> &TransferEncoding {
+        &self.transfer
+    }
+
     /// Set the [label](Item::label).
     pub fn label(mut self, label: impl Into<Cow<'static, str>>) -> Self {
         self.label = Some(label.into());

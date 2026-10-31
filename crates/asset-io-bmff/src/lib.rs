@@ -229,6 +229,21 @@ pub fn handler() -> Arc<dyn ContainerHandler> {
 pub const ID: &str = "bmff";
 
 impl ContainerHandler for BmffHandler {
+    fn c2pa_hash(&self, _structure: &Structure) -> Option<asset_io_core::C2paHash> {
+        Some(asset_io_core::C2paHash::Bmff)
+    }
+
+    // C2PA binds ISO BMFF with `c2pa.hash.bmff`, not a data hash.
+    fn c2pa_data_hash_exclusions(
+        &self,
+        _structure: &Structure,
+        _item: &asset_io_core::Item,
+    ) -> Result<Vec<asset_io_core::ByteRange>> {
+        Err(Error::UnsupportedFeature(
+            "C2PA data-hash exclusions for ISO BMFF",
+        ))
+    }
+
     fn id(&self) -> &'static str {
         ID
     }
@@ -763,10 +778,21 @@ async fn parse_with(handler: Arc<dyn ContainerHandler>, mut io: Io) -> Result<St
             }
         }
         if let Some(item) = c.item {
+            let mut info = item.info();
             if let BoxItem::C2pa(label) = item {
                 counts.add(label);
+                if label != MERKLE {
+                    let payload = at + c.header_len as u64;
+                    let ty = asset_io_core::jumbf::superbox_type_at(
+                        io,
+                        payload,
+                        h.size - c.header_len as u64,
+                    )
+                    .await?;
+                    info = info.jumbf_type(ty);
+                }
             }
-            b.item_of_segments(item.info(), &[id])?;
+            b.item_of_segments(info, &[id])?;
         }
         at += h.size;
     }

@@ -84,6 +84,15 @@ pub fn handler() -> Arc<dyn ContainerHandler> {
 pub const ID: &str = "svg";
 
 impl ContainerHandler for SvgHandler {
+    // C2PA excludes only the base64 text; the enclosing tags stay hashed.
+    fn c2pa_data_hash_exclusions(
+        &self,
+        _structure: &Structure,
+        item: &asset_io_core::Item,
+    ) -> Result<Vec<ByteRange>> {
+        Ok(item.extents().map(|extent| extent.range()).collect())
+    }
+
     fn id(&self) -> &'static str {
         ID
     }

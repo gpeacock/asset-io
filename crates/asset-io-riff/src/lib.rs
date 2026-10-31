@@ -24,7 +24,9 @@
 //! a large AVI) is a 12-byte header segment with no payload; its children follow
 //! as sibling segments. Every other chunk is one segment: the 8-byte `id size` is
 //! the header, the data is the payload and the pad byte, if any, is the trailer.
-//! `LIST` chunks are not entered: nothing C2PA needs lives inside them.
+//! `LIST` chunks are not entered: nothing C2PA needs lives inside them. A C2PA box
+//! hash lists a `RIFF` chunk under its form type and a `LIST` chunk under its list
+//! type (C2PA 2.4, 18.7.3.5); both are recorded when parsing and planning.
 //!
 //! The `C2PA` chunk is an [`ItemKind::Jumbf`] item and the `XMP ` chunk an
 //! [`ItemKind::Xmp`] item, both only when they are children of the first
@@ -40,6 +42,7 @@
 //! `VP8X` chunk: it is set (or cleared when the XMP is removed), and a `VP8X` chunk
 //! is created from the `VP8` or `VP8L` image size if the file has none.
 
+use asset_io_core::jumbf::superbox_type_at;
 use asset_io_core::plan::WritePlan;
 use asset_io_core::{
     BoxFuture, ContainerHandler, Error, Existing, FormatSpec, Io, ItemInfo, ItemKind, MetadataSlot,
@@ -95,7 +98,56 @@ pub fn handler() -> Arc<dyn ContainerHandler> {
 /// The RIFF container's [`ContainerHandler::id`].
 pub const ID: &str = "riff";
 
+/// The type of each `RIFF` chunk (its form, such as `WAVE`) and `LIST` chunk (its
+/// list type, such as `INFO`), by segment: what a C2PA box hash lists the chunk
+/// under (C2PA 2.4, 18.7.3.5). Attached to parsed and planned structures.
+#[derive(Debug, Default)]
+struct ChunkTypes(Vec<Option<[u8; 4]>>);
+
+impl ChunkTypes {
+    fn set(&mut self, id: SegmentId, ty: [u8; 4]) {
+        if self.0.len() <= id.index() {
+            self.0.resize(id.index() + 1, None);
+        }
+        self.0[id.index()] = Some(ty);
+    }
+
+    fn get(&self, id: SegmentId) -> Option<[u8; 4]> {
+        self.0.get(id.index()).copied().flatten()
+    }
+}
+
 impl ContainerHandler for RiffHandler {
+    // A `RIFF` chunk is listed under its form and a `LIST` chunk under its list
+    // type; nested chunks are part of their `LIST`.
+    fn c2pa_box_name(
+        &self,
+        structure: &Structure,
+        segment: SegmentId,
+        element: &Segment,
+    ) -> Option<Cow<'static, str>> {
+        let ty = structure
+            .attachment::<ChunkTypes>()
+            .and_then(|t| t.get(segment));
+        self.box_name(ty.map_or(element.name(), Name::FourCC))
+    }
+
+    fn c2pa_data_hash_exclusions(
+        &self,
+        structure: &Structure,
+        item: &asset_io_core::Item,
+    ) -> Result<Vec<asset_io_core::ByteRange>> {
+        item.extents()
+            .map(|extent| {
+                let segment = structure.segment(extent.segment())?;
+                // C2PA keeps the alignment pad, outside the chunk's declared length, hashed.
+                segment
+                    .range()
+                    .sub(0, segment.range().len() - segment.trailer().len())
+            })
+            .collect()
+    }
+
     fn id(&self) -> &'static str {
         ID
     }
@@ -158,6 +210,7 @@ async fn parse_with(handler: Arc<dyn ContainerHandler>, mut io: Io) -> Result<St
     let webp = head[8..12] == FORM_WEBP;
 
     let mut b = StructureBuilder::new(handler, media, total);
+    let mut types = ChunkTypes::default();
     let mut at = 0u64;
     let mut first = true;
     while at < total {
@@ -189,22 +242,27 @@ async fn parse_with(handler: Arc<dyn ContainerHandler>, mut io: Io) -> Result<St
                     "RIFF chunk declared size exceeds file size",
                 ));
             }
-            b.push_span(SegmentKind::Preamble, Name::FourCC(RIFF), 12, 0, 0)?;
-            parse_children(&mut b, &mut io, at + 12, end, first, webp).await?;
+            let id = b.push_span(SegmentKind::Preamble, Name::FourCC(RIFF), 12, 0, 0)?;
+            let mut form = [0u8; 4];
+            io.read_at(at + 8, &mut form).await?;
+            types.set(id, form);
+            parse_children(&mut b, &mut io, &mut types, at + 12, end, first, webp).await?;
             at = end;
             first = false;
         } else {
             // Something other than a RIFF chunk at top level: one opaque chunk.
-            let next = parse_chunk(&mut b, &mut io, at, total, false, false).await?;
+            let next = parse_chunk(&mut b, &mut io, &mut types, at, total, false, false).await?;
             at = next;
         }
     }
+    b.attach(types);
     b.finish()
 }
 
 async fn parse_children(
     b: &mut StructureBuilder,
     io: &mut Io,
+    types: &mut ChunkTypes,
     start: u64,
     end: u64,
     first: bool,
@@ -212,7 +270,7 @@ async fn parse_children(
 ) -> Result<()> {
     let mut at = start;
     while at < end {
-        at = parse_chunk(b, io, at, end, first, webp).await?;
+        at = parse_chunk(b, io, types, at, end, first, webp).await?;
     }
     Ok(())
 }
@@ -222,6 +280,7 @@ async fn parse_children(
 async fn parse_chunk(
     b: &mut StructureBuilder,
     io: &mut Io,
+    types: &mut ChunkTypes,
     at: u64,
     end: u64,
     classify: bool,
@@ -251,34 +310,30 @@ async fn parse_chunk(
         _ => None,
     };
     if let Some(kind) = item {
-        b.push_item(
-            SegmentKind::Metadata,
-            Name::FourCC(id),
-            8,
-            size,
-            pad,
-            item_info(kind),
-        )?;
+        let mut info = item_info(kind);
+        if kind == ItemKind::Jumbf {
+            info = info.jumbf_type(superbox_type_at(io, at + 8, size).await?);
+        }
+        b.push_item(SegmentKind::Metadata, Name::FourCC(id), 8, size, pad, info)?;
         return Ok(data_end + pad as u64);
     }
-    let kind = if !classify {
-        SegmentKind::Other
+    let list_type = if id == LIST && size >= 4 {
+        let mut t = [0u8; 4];
+        io.read_at(at + 8, &mut t).await?;
+        Some(t)
     } else {
-        match id {
-            DATA | VP8 | VP8L | ALPH | ANMF => SegmentKind::MediaData,
-            LIST if size >= 4 => {
-                let mut t = [0u8; 4];
-                io.read_at(at + 8, &mut t).await?;
-                if t == MOVI {
-                    SegmentKind::MediaData
-                } else {
-                    SegmentKind::Other
-                }
-            }
-            _ => SegmentKind::Other,
-        }
+        None
     };
-    b.push_span(kind, Name::FourCC(id), 8, size, pad)?;
+    let kind = match id {
+        _ if !classify => SegmentKind::Other,
+        DATA | VP8 | VP8L | ALPH | ANMF => SegmentKind::MediaData,
+        LIST if list_type == Some(MOVI) => SegmentKind::MediaData,
+        _ => SegmentKind::Other,
+    };
+    let segment = b.push_span(kind, Name::FourCC(id), 8, size, pad)?;
+    if let Some(t) = list_type {
+        types.set(segment, t);
+    }
     Ok(data_end + pad as u64)
 }
 
@@ -475,6 +530,8 @@ async fn plan<'a>(src: &Structure, io: &mut Io, updates: &'a Updates) -> Result<
     }
 
     let mut b = PlanBuilder::new(src);
+    let source_types = src.attachment::<ChunkTypes>();
+    let mut types = ChunkTypes::default();
     let riff = b.put_segment(
         SegmentKind::Preamble,
         Name::FourCC(RIFF),
@@ -482,8 +539,14 @@ async fn plan<'a>(src: &Structure, io: &mut Io, updates: &'a Updates) -> Result<
         &[][..],
         &[][..],
     )?;
+    types.set(riff, form);
     for (i, op) in ops.iter().enumerate() {
         let id = emit(&mut b, op, unpadded == Some(i))?;
+        if let Op::Copy(sid) | Op::Flags { id: sid, .. } = op {
+            if let Some(t) = source_types.and_then(|t| t.get(*sid)) {
+                types.set(id, t);
+            }
+        }
         let info = match op {
             Op::Chunk { item, .. } => item.map(item_info),
             Op::Copy(sid) | Op::Flags { id: sid, .. } => {
@@ -502,8 +565,13 @@ async fn plan<'a>(src: &Structure, io: &mut Io, updates: &'a Updates) -> Result<
 
     // Whatever follows the first RIFF chunk (AVIX, ...) is copied.
     for i in kids_end..segs.len() {
-        b.copy_segment(SegmentId::from_index(i)?)?;
+        let sid = SegmentId::from_index(i)?;
+        let id = b.copy_segment(sid)?;
+        if let Some(t) = source_types.and_then(|t| t.get(sid)) {
+            types.set(id, t);
+        }
     }
+    b.attach(types);
     let mut plan = b.finish()?;
     plan.replace(riff, Role::Header, riff_header(size, form))?;
     Ok(plan)

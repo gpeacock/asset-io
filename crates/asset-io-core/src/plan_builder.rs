@@ -19,6 +19,7 @@ use crate::plan::{Relocate, Step, WritePlan};
 use crate::range::ByteRange;
 use crate::segment::{Name, Role, SegmentKind};
 use crate::structure::{Attached, SegmentId, Structure, StructureBuilder, MAX_SEGMENTS};
+use crate::transfer::TransferEncoding;
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -385,6 +386,9 @@ impl<'s, 'a> PlanBuilder<'s, 'a> {
             let id = b.push_span(s.kind, s.name, s.header_len, s.payload_len, s.trailer_len)?;
             if s.subdivides {
                 b.mark_subdivides(id)?;
+                if let Some(from) = s.from {
+                    b.set_origin(id, src.segment(from)?.range().offset());
+                }
             }
         }
         if !subs.is_empty() {
@@ -394,6 +398,16 @@ impl<'s, 'a> PlanBuilder<'s, 'a> {
         }
 
         for e in self.items {
+            let first = e.extents.first().map(|&(dest, _)| dest);
+            let info = match first {
+                Some(dest) if e.info.lacks_jumbf_type() => {
+                    let from = self.shapes[dest.index()].from;
+                    let ty =
+                        jumbf_type_of(src, &self.steps, dest, from, e.info.transfer_encoding());
+                    e.info.jumbf_type(ty)
+                }
+                _ => e.info,
+            };
             let mut parts = Vec::with_capacity(e.extents.len());
             for (dest, carried) in e.extents {
                 let at = b.segment(dest)?.range().offset();
@@ -409,8 +423,39 @@ impl<'s, 'a> PlanBuilder<'s, 'a> {
                 };
                 parts.push((dest, range));
             }
-            b.item(e.info, &parts)?;
+            b.item(info, &parts)?;
         }
         Ok(WritePlan::from_parts(b.finish()?, self.steps))
+    }
+}
+
+/// The superbox type of a JUMBF item that starts in output segment `dest`, so a
+/// planned structure knows it without the output existing: from the source item
+/// in the segment `dest` was made from, or else the bytes first put in its payload.
+/// `None` when neither tells.
+fn jumbf_type_of(
+    src: &Structure,
+    steps: &[Step<'_>],
+    dest: SegmentId,
+    from: Option<SegmentId>,
+    transfer: &TransferEncoding,
+) -> Option<[u8; 16]> {
+    const STORED_HEAD: usize = 4096;
+    if let Some(from) = from {
+        return src
+            .items_of(crate::ItemKind::Jumbf)
+            .find(|item| item.extents().next().is_some_and(|x| x.segment() == from))
+            .and_then(Item::jumbf_type);
+    }
+    match steps
+        .iter()
+        .find(|s| s.dest() == dest && s.role() == Role::Payload)?
+    {
+        Step::Put { data, .. } => {
+            let stored = &data[..data.len().min(STORED_HEAD)];
+            let head = transfer.decode_prefix(stored, 32).ok()?;
+            crate::jumbf::superbox_type(&head)
+        }
+        _ => None,
     }
 }

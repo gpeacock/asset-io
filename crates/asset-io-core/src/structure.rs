@@ -98,6 +98,19 @@ impl SubAsset {
     }
 }
 
+/// One box of a C2PA box hash; see [`Structure::c2pa_boxes`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct C2paBox {
+    /// The name the hash lists the box under.
+    pub name: Cow<'static, str>,
+    /// Where the box is.
+    pub range: ByteRange,
+    /// The ranges inside the box that hold asset metadata (XMP, EXIF), which a box
+    /// hash may exclude (C2PA 2.4, 15.12.3).
+    pub metadata: Vec<ByteRange>,
+}
+
 /// A region of the file with a role, in file order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -144,6 +157,10 @@ pub struct Structure {
     /// here on are data beyond the end of it.
     boxes: usize,
     attachment: Option<Arc<dyn Attached>>,
+    /// For a planned structure, the source offset of each subdividing segment that
+    /// was copied from the source, so its elements can be read there. Empty for a
+    /// parsed structure.
+    origins: Vec<Option<u64>>,
 }
 
 impl Structure {
@@ -159,9 +176,11 @@ impl Structure {
     /// everything after the primary image. `None` when there are none, and for
     /// containers that do not report it.
     ///
-    /// A box-based hash lists these bytes as one final box named
-    /// [`AFTER_BOX`](crate::AFTER_BOX) (C2PA 18.7.2). A hash of one part of a
-    /// multi-asset file covers that part only and never includes them.
+    /// A box hash lists any boxes among them (the later images of a Multi-Picture
+    /// Format JPEG) as they are, and unnamed bytes at the end as one final box
+    /// named [`AFTER_BOX`](crate::AFTER_BOX) (C2PA 2.4, 18.7.2); see
+    /// [`c2pa_boxes`](Self::c2pa_boxes). A hash of one part of a multi-asset file
+    /// covers that part only and never includes them.
     pub fn trailing(&self) -> Option<ByteRange> {
         let first = self.segments.get(self.boxes)?;
         ByteRange::new(
@@ -333,6 +352,53 @@ impl Structure {
         })
     }
 
+    /// The C2PA hard binding an embedded manifest in this asset should use, or
+    /// `None` when asset-io cannot support embedding one in its container; see
+    /// [`ContainerHandler::c2pa_hash`]. A caller may choose a data hash instead
+    /// of a recommended box hash.
+    pub fn c2pa_hash(&self) -> Option<crate::C2paHash> {
+        self.handler.c2pa_hash(self)
+    }
+
+    /// The ranges a C2PA data hash (`c2pa.hash.data`) excludes when `item` is the
+    /// embedded manifest store.
+    ///
+    /// The container's C2PA embedding rules decide whether framing, checksums,
+    /// padding or only stored payload bytes are excluded; see
+    /// [`ContainerHandler::c2pa_data_hash_exclusions`]. Results are ordered,
+    /// nonempty, disjoint, nonadjacent and within the asset. Works on parsed and
+    /// planned structures without reading the source.
+    ///
+    /// The item must be a JUMBF item of this structure; the caller selects which
+    /// store it is. This neither interprets the manifest nor computes a hash.
+    /// Containers whose C2PA embedding uses another binding (ISO BMFF, PDF) return
+    /// [`Error::UnsupportedFeature`].
+    pub fn c2pa_data_hash_exclusions(&self, item: &Item) -> Result<Vec<ByteRange>> {
+        if item.kind() != ItemKind::Jumbf || !self.items.iter().any(|e| std::ptr::eq(e, item)) {
+            return Err(Error::InvalidFormat(
+                "C2PA data-hash exclusions require a JUMBF item from this structure".into(),
+            ));
+        }
+        let mut ranges = self.handler.c2pa_data_hash_exclusions(self, item)?;
+        for range in &ranges {
+            self.check_readable(*range)?;
+        }
+        ranges.retain(|range| !range.is_empty());
+        ranges.sort_by_key(ByteRange::offset);
+        let mut merged: Vec<ByteRange> = Vec::new();
+        for range in ranges {
+            if let Some(last) = merged.last_mut() {
+                if range.offset() <= last.end() {
+                    *last =
+                        ByteRange::new(last.offset(), last.end().max(range.end()) - last.offset())?;
+                    continue;
+                }
+            }
+            merged.push(range);
+        }
+        Ok(merged)
+    }
+
     // ------------------------------------------------------------------
     // Bounded data access
     // ------------------------------------------------------------------
@@ -448,6 +514,8 @@ impl Structure {
     /// `update` (ISO BMFF) reads as the two combined, with the update's children
     /// after the original's. Several unrelated stores are
     /// [`Error::Ambiguous`]. Merkle boxes are not stores and are never returned.
+    /// To read the C2PA manifest store whatever other JUMBF the asset holds, use
+    /// [`c2pa_store`](Self::c2pa_store).
     pub fn store<R: Read + Seek>(&self, src: &mut R) -> Result<Option<Vec<u8>>> {
         use crate::segment::labels::{ORIGINAL, UPDATE};
         let original = self.items_labelled(ItemKind::Jumbf, ORIGINAL).next();
@@ -467,6 +535,188 @@ impl Structure {
     /// in several pieces return it reassembled.
     pub fn xmp(&self, src: &mut dyn ReadSeek) -> Result<Option<Vec<u8>>> {
         self.handler.read_xmp(self, src)
+    }
+
+    /// The JUMBF item holding the asset's C2PA manifest store: the one whose
+    /// superbox type is [`C2PA_STORE_TYPE`](crate::jumbf::C2PA_STORE_TYPE).
+    /// `None` if there is none; other JUMBF, such as JPEG XT boxes of other types,
+    /// is ignored. Several stores are [`Error::Ambiguous`].
+    ///
+    /// When a store is kept as an `original` plus an `update` (ISO BMFF), this is
+    /// the `original`; [`c2pa_store`](Self::c2pa_store) reads the two combined. The
+    /// item is what a caller excludes from a hash or patches in place.
+    pub fn c2pa_item<R: Read + Seek>(&self, src: &mut R) -> Result<Option<&Item>> {
+        use crate::segment::labels::UPDATE;
+        let mut found = None;
+        let mut count = 0;
+        for item in self.items_of(ItemKind::Jumbf) {
+            if item.label() == Some(UPDATE) {
+                continue;
+            }
+            if self.jumbf_type(src, item)? == Some(crate::jumbf::C2PA_STORE_TYPE) {
+                count += 1;
+                found.get_or_insert(item);
+            }
+        }
+        if count > 1 {
+            return Err(Error::Ambiguous {
+                what: "C2PA manifest store",
+                count,
+            });
+        }
+        Ok(found)
+    }
+
+    /// The asset's C2PA manifest store as a reader sees it, or `None` if it has
+    /// none: the content of [`c2pa_item`](Self::c2pa_item), with any transfer
+    /// encoding undone, and an `update` appended to its `original` (ISO BMFF).
+    /// Only finds the store; the manifests in it are not interpreted.
+    pub fn c2pa_store<R: Read + Seek>(&self, src: &mut R) -> Result<Option<Vec<u8>>> {
+        use crate::segment::labels::{ORIGINAL, UPDATE};
+        let Some(item) = self.c2pa_item(src)? else {
+            return Ok(None);
+        };
+        let store = self.read_content(src, item)?;
+        if item.label() == Some(ORIGINAL) {
+            if let Some(update) = self.items_labelled(ItemKind::Jumbf, UPDATE).next() {
+                let update = self.read_content(src, update)?;
+                return crate::jumbf::extend(&store, &update).map(Some);
+            }
+        }
+        Ok(Some(store))
+    }
+
+    /// The boxes a C2PA box hash (`c2pa.hash.boxes`) lists for this asset, in file
+    /// order, covering every byte once.
+    ///
+    /// Each element ([`elements`](Self::elements)) is one box, named by the
+    /// handler's [`c2pa_box_name`](ContainerHandler::c2pa_box_name): a JPEG scan
+    /// with restart markers is its `SOS` box and one box per `RSTn`. Elements past
+    /// the container's own structure that are boxes (later images of a
+    /// Multi-Picture Format JPEG) are listed as they are. The segments of the C2PA
+    /// manifest store ([`c2pa_item`](Self::c2pa_item)) are one box named
+    /// [`C2PA_BOX`](crate::C2PA_BOX), which the hash does not cover, and unnamed
+    /// bytes at the end one box named [`AFTER_BOX`](crate::AFTER_BOX).
+    ///
+    /// `src` is the asset, or for a planned structure the source it was planned
+    /// from: its boxes are known before the output exists. An element of the
+    /// structure without a box name, or boxes after unnamed data, are
+    /// [`Error::UnsupportedFeature`]: the asset is not box-hashable.
+    pub fn c2pa_boxes<R: Read + Seek>(&self, src: &mut R) -> Result<Vec<C2paBox>> {
+        let store: Vec<SegmentId> = match self.c2pa_item(src)? {
+            Some(item) => item.extents().map(|e| e.segment()).collect(),
+            None => Vec::new(),
+        };
+        let metadata: Vec<ByteRange> = self
+            .items
+            .iter()
+            .filter(|i| matches!(i.kind(), ItemKind::Xmp | ItemKind::Exif))
+            .flat_map(|i| i.extents().map(|e| e.range()))
+            .collect();
+        let unsupported = Error::UnsupportedFeature;
+        let mut boxes: Vec<C2paBox> = Vec::new();
+        let mut after: Option<ByteRange> = None;
+        for (i, seg) in self.segments.iter().enumerate() {
+            let id = SegmentId(i as u32);
+            let range = seg.range();
+            if store.contains(&id) {
+                match boxes.last_mut() {
+                    Some(last)
+                        if last.name == crate::C2PA_BOX && last.range.end() == range.offset() =>
+                    {
+                        last.range =
+                            ByteRange::new(last.range.offset(), last.range.len() + range.len())?;
+                    }
+                    _ => boxes.push(C2paBox {
+                        name: Cow::Borrowed(crate::C2PA_BOX),
+                        range,
+                        metadata: Vec::new(),
+                    }),
+                }
+                continue;
+            }
+            for element in self.box_elements(src, i, seg)? {
+                let name = self.handler.c2pa_box_name(self, id, &element);
+                match (name, i < self.boxes) {
+                    (Some(_), _) if after.is_some() => {
+                        return Err(unsupported("C2PA box hash: boxes after unnamed data"));
+                    }
+                    (Some(name), _) => {
+                        let range = element.range();
+                        boxes.push(C2paBox {
+                            name,
+                            range,
+                            metadata: metadata
+                                .iter()
+                                .filter(|m| range.contains(m))
+                                .copied()
+                                .collect(),
+                        });
+                    }
+                    (None, false) => {
+                        let r = element.range();
+                        after = Some(match after {
+                            Some(a) => ByteRange::new(a.offset(), r.end() - a.offset())?,
+                            None => r,
+                        });
+                    }
+                    (None, true) => {
+                        return Err(unsupported("C2PA box hash: an element has no box name"));
+                    }
+                }
+            }
+        }
+        if let Some(range) = after {
+            boxes.push(C2paBox {
+                name: Cow::Borrowed(crate::AFTER_BOX),
+                range,
+                metadata: Vec::new(),
+            });
+        }
+        Ok(boxes)
+    }
+
+    /// The elements of segment `i` for a box hash: the segment, or its finer
+    /// elements. A planned copy of a source segment is read in the source.
+    fn box_elements<R: Read + Seek>(
+        &self,
+        src: &mut R,
+        i: usize,
+        seg: &Segment,
+    ) -> Result<Vec<Segment>> {
+        if !seg.subdivides() {
+            return Ok(vec![*seg]);
+        }
+        let src: &mut dyn ReadSeek = src;
+        let mut out = Vec::new();
+        match self.origins.get(i).copied().flatten() {
+            None => self.handler.subdivide(src, seg, &mut |e| {
+                out.push(*e);
+                Ok(())
+            })?,
+            Some(origin) => {
+                let source = Segment::new(
+                    ByteRange::new(origin, seg.range().len())?,
+                    seg.header().len() as u32,
+                    seg.trailer().len() as u16,
+                    seg.kind(),
+                    seg.name(),
+                )?;
+                let at = seg.range().offset();
+                self.handler.subdivide(src, &source, &mut |e| {
+                    let offset = at + (e.range().offset() - origin);
+                    out.push(Segment::new(
+                        ByteRange::new(offset, e.range().len())?,
+                        e.header().len() as u32,
+                        e.trailer().len() as u16,
+                        e.kind(),
+                        e.name(),
+                    )?);
+                    Ok(())
+                })?
+            }
+        }
+        Ok(out)
     }
 
     /// Read an item's extents, concatenated: the bytes stored in the file.
@@ -763,6 +1013,7 @@ pub struct StructureBuilder {
     /// Segment index where data beyond the container's structure starts, if declared.
     boxes: Option<usize>,
     attachment: Option<Arc<dyn Attached>>,
+    origins: Vec<Option<u64>>,
 }
 
 impl StructureBuilder {
@@ -782,6 +1033,7 @@ impl StructureBuilder {
             sub_starts: Vec::new(),
             boxes: None,
             attachment: None,
+            origins: Vec::new(),
         }
     }
 
@@ -798,6 +1050,14 @@ impl StructureBuilder {
 
     pub(crate) fn attach_shared(&mut self, value: Option<Arc<dyn Attached>>) {
         self.attachment = value;
+    }
+
+    /// Record that pushed segment `id` is a copy of the source segment at `offset`.
+    pub(crate) fn set_origin(&mut self, id: SegmentId, offset: u64) {
+        if self.origins.len() <= id.index() {
+            self.origins.resize(id.index() + 1, None);
+        }
+        self.origins[id.index()] = Some(offset);
     }
 
     /// Declare that the container's own structure ends here: segments pushed from
@@ -1058,6 +1318,7 @@ impl StructureBuilder {
             subassets,
             boxes,
             attachment: self.attachment,
+            origins: self.origins,
         })
     }
 }
